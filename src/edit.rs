@@ -504,7 +504,7 @@ pub struct CameraSettings {
 /// Default camera height (fraction of the canvas) and its height while the
 /// screen is zoomed in.
 pub const SIZE_DEFAULT: f64 = 0.38;
-pub const ZOOM_SIZE_DEFAULT: f64 = 0.28;
+pub const ZOOM_SIZE_DEFAULT: f64 = 0.33;
 
 impl Default for CameraSettings {
     fn default() -> Self {
