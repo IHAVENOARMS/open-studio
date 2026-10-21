@@ -91,6 +91,8 @@ pub struct Editor {
     /// Short message under the title ("Saved", errors).
     status: Option<Toast>,
     player: Player,
+    /// For reopening players when the project folder moves.
+    ctx: egui::Context,
     /// Camera track player and the frame index on the GPU.
     camera: Option<(Player, i64)>,
     /// Background-removal matte player, in step with the camera.
@@ -141,6 +143,7 @@ impl Editor {
             status: None,
             edit,
             player,
+            ctx: ctx.clone(),
             camera,
             matte,
             camera_changed: Instant::now(),
@@ -400,9 +403,28 @@ impl Editor {
         self.is_new() || self.edit != self.saved
     }
 
+    /// The project folder moved (saved, renamed, Save As): reopen
+    /// everything that reads files from it at the new place.
     fn set_dir(&mut self, dir: PathBuf) {
         self.rec.dir = dir.clone();
         self.dir = dir;
+        let paths = ProjectPaths::new(&self.dir);
+        self.player = Player::new(paths.video(), (self.rec.width, self.rec.height), self.rec.fps, self.ctx.clone());
+        self.shown_index = -1;
+        self.camera = self.rec.camera.as_ref().map(|c| (Player::new(self.dir.join(&c.file), (c.width, c.height), c.fps, self.ctx.clone()), -1));
+        self.matte = open_matte(&self.dir, &self.rec, &self.edit, self.time, &self.ctx);
+        self.audio = audio::AudioPreview::new(&self.rec, &self.edit);
+        // Resume where we were.
+        if let Some((_, _)) = self.playing {
+            let now = Instant::now();
+            self.playing = Some((self.time, now));
+            self.player.play(self.time, now);
+            self.audio.play(self.time);
+            self.camera_follow(Some(now));
+        } else {
+            self.player.seek(self.time);
+            self.camera_follow(None);
+        }
     }
 
     /// Shows a toast at the top of the window. `msg` is "Title" or
