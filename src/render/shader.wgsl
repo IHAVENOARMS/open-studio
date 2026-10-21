@@ -4,7 +4,9 @@ struct Scene {
     radius: f32,
     content: vec4f,      // x, y, w, h in canvas units (canvas is aspect x 1)
     cam: vec4f,          // cx, cy, scale, shadow strength
-    prev_cam: vec4f,     // cx, cy, scale, blur sample count
+    prev_cam: vec4f,     // shutter start camera: cx, cy, scale, blur sample count
+    next_cam: vec4f,     // shutter end camera: cx, cy, scale, unused
+    blur: vec4f,         // zoom blur strength, pan blur strength, unused, unused
     bg0: vec4f,
     bg1: vec4f,
     bg2: vec4f,
@@ -138,16 +140,22 @@ fn fs_scene(in: VsOut) -> @location(0) vec4f {
         let px = 1.0 / (u.out_size.y * cur.z);
         return vec4f(scene(to_canvas(p, cur), px), 1.0);
     }
-    // Motion blur: average the scene over the camera path within the shutter.
-    // Dithered start offset hides banding.
-    let prev = u.prev_cam.xyz;
+    // Motion blur. Between the shutter-start and shutter-end cameras each
+    // pixel moves by a radial part (scale change, about the frame centre) plus
+    // a translation (centre change); the two are weighted separately and the
+    // scene is averaged along the result, centred on the current camera.
+    // A per-pixel dithered offset hides banding.
+    let a = u.prev_cam.xyz;
+    let b = u.next_cam.xyz;
+    let off = p / u.out_size.y - vec2f(u.aspect * 0.5, 0.5);
+    let d = off * (1.0 / b.z - 1.0 / a.z) * u.blur.x + (b.xy - a.xy) * u.blur.y;
+    let q0 = to_canvas(p, cur);
+    let px = 1.0 / (u.out_size.y * cur.z);
     let jitter = hash(p) / f32(n);
     var acc = vec3f(0.0);
     for (var i = 0; i < n; i++) {
-        let f = clamp(f32(i) / f32(n) + jitter, 0.0, 1.0);
-        let cam = vec3f(mix(prev.xy, cur.xy, f), exp(mix(log(prev.z), log(cur.z), f)));
-        let px = 1.0 / (u.out_size.y * cam.z);
-        acc += scene(to_canvas(p, cam), px);
+        let f = f32(i) / f32(n) + jitter - 0.5;
+        acc += scene(q0 + d * f, px);
     }
     return vec4f(acc / f32(n), 1.0);
 }

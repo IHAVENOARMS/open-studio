@@ -254,6 +254,14 @@ fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut
     help(ui, "Zooms and camera moves use spring physics, like a real camera operator.");
     widgets::divider(ui);
     widgets::toggle_row(ui, "Motion blur", &mut edit.motion_blur);
+    if edit.motion_blur {
+        theme::section(ui, &format!("Zoom blur  ·  {:.0}%", edit.zoom_blur * 100.0));
+        help(ui, "Radial blur while the camera zooms in or out.");
+        widgets::slider(ui, &mut edit.zoom_blur, 0.0..=1.0, Some(0.5));
+        theme::section(ui, &format!("Movement blur  ·  {:.0}%", edit.pan_blur * 100.0));
+        help(ui, "Directional blur while the zoomed camera follows the cursor.");
+        widgets::slider(ui, &mut edit.pan_blur, 0.0..=1.0, Some(0.25));
+    }
     widgets::divider(ui);
     theme::section(ui, &format!("Default zoom level  ·  {:.0}%", edit.default_zoom * 100.0));
     widgets::slider(ui, &mut edit.default_zoom, 1.0..=4.0, Some(2.0));

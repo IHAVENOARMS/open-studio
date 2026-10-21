@@ -122,6 +122,10 @@ pub struct EditConfig {
     pub trim_start: f64,
     pub trim_end: Option<f64>,
     pub motion_blur: bool,
+    /// 0..1, radial blur while the camera zooms.
+    pub zoom_blur: f64,
+    /// 0..1, directional blur while the camera pans.
+    pub pan_blur: f64,
 }
 
 impl Default for EditConfig {
@@ -140,6 +144,8 @@ impl Default for EditConfig {
             trim_start: 0.0,
             trim_end: None,
             motion_blur: true,
+            zoom_blur: 0.5,
+            pan_blur: 0.25,
         }
     }
 }

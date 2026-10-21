@@ -5,7 +5,7 @@ pub mod background;
 pub mod cursor_image;
 
 use crate::edit::{Background, EditConfig};
-use crate::engine::{Camera, CursorShape, FrameState, Layout};
+use crate::engine::{CursorShape, FrameState, Layout};
 use egui_wgpu::wgpu;
 use wgpu::util::DeviceExt;
 
@@ -20,6 +20,8 @@ struct SceneUniform {
     content: [f32; 4],
     cam: [f32; 4],
     prev_cam: [f32; 4],
+    next_cam: [f32; 4],
+    blur: [f32; 4],
     bg: [[f32; 4]; 4],
     params: [f32; 4],
 }
@@ -484,19 +486,16 @@ impl Compositor {
         };
         let lod = density.log2().max(0.0) as f32;
         let bicubic = if density < 0.9 { 1.0 } else { 0.0 };
-        let samples = if edit.motion_blur { blur_samples(layout, frame, oh as f64) } else { 1 };
+        let samples = if edit.motion_blur { blur_samples(layout, frame, edit, oh as f64) } else { 1 };
         let u = SceneUniform {
             out_size: [ow, oh],
             aspect: layout.aspect as f32,
             radius: (edit.radius / 1080.0) as f32,
             content: [c.x as f32, c.y as f32, c.w as f32, c.h as f32],
             cam: [cam.cx as f32, cam.cy as f32, cam.scale as f32, edit.shadow as f32],
-            prev_cam: [
-                frame.prev_camera.cx as f32,
-                frame.prev_camera.cy as f32,
-                frame.prev_camera.scale as f32,
-                samples as f32,
-            ],
+            prev_cam: [frame.blur_from.cx as f32, frame.blur_from.cy as f32, frame.blur_from.scale as f32, samples as f32],
+            next_cam: [frame.blur_to.cx as f32, frame.blur_to.cy as f32, frame.blur_to.scale as f32, 0.0],
+            blur: [edit.zoom_blur as f32, edit.pan_blur as f32, 0.0, 0.0],
             bg: bg.1,
             params: [lod, bg.0, bicubic, bg_lod],
         };
@@ -568,19 +567,20 @@ fn begin_pass<'a>(enc: &'a mut wgpu::CommandEncoder, view: &'a wgpu::TextureView
     })
 }
 
-/// How many sub-samples the motion blur needs: roughly one per 1.5 output
-/// pixels of on-screen movement between the two camera states.
-fn blur_samples(layout: &Layout, frame: &FrameState, out_h: f64) -> u32 {
-    let (a, b) = (frame.prev_camera, frame.camera);
+/// How many sub-samples the motion blur needs: about one per output pixel of
+/// blur length at the frame's corners and centre.
+fn blur_samples(layout: &Layout, frame: &FrameState, edit: &EditConfig, out_h: f64) -> u32 {
+    let (a, b) = (frame.blur_from, frame.blur_to);
     if a == b {
         return 1;
     }
-    let map = |cam: Camera, ux: f64, uy: f64| (cam.cx + (ux - layout.aspect * 0.5) / cam.scale, cam.cy + (uy - 0.5) / cam.scale);
     let mut max_px: f64 = 0.0;
     for (ux, uy) in [(0.0, 0.0), (layout.aspect, 0.0), (0.0, 1.0), (layout.aspect, 1.0), (layout.aspect * 0.5, 0.5)] {
-        let (p, q) = (map(a, ux, uy), map(b, ux, uy));
-        let d = ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt() * b.scale * out_h;
-        max_px = max_px.max(d);
+        let (ox, oy) = (ux - layout.aspect * 0.5, uy - 0.5);
+        let dz = 1.0 / b.scale - 1.0 / a.scale;
+        let dx = ox * dz * edit.zoom_blur + (b.cx - a.cx) * edit.pan_blur;
+        let dy = oy * dz * edit.zoom_blur + (b.cy - a.cy) * edit.pan_blur;
+        max_px = max_px.max((dx * dx + dy * dy).sqrt() * frame.camera.scale * out_h);
     }
-    if max_px < 1.5 { 1 } else { ((max_px / 1.5).ceil() as u32).clamp(2, 16) }
+    if max_px < 1.0 { 1 } else { (max_px.ceil() as u32).clamp(2, 48) }
 }

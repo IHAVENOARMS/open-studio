@@ -248,12 +248,17 @@ fn clamp_in_canvas(cx: f64, cy: f64, scale: f64, layout: &Layout) -> (f64, f64) 
     (cx.clamp(hw, layout.aspect - hw), cy.clamp(hh, 1.0 - hh))
 }
 
+/// Shutter length at full blur strength, in frames.
+pub const SHUTTER_FRAMES: f64 = 1.0;
+
 /// Everything the compositor needs for one output frame.
 #[derive(Clone, Debug)]
 pub struct FrameState {
     pub camera: Camera,
-    /// Camera a fraction of a frame earlier, for motion blur.
-    pub prev_camera: Camera,
+    /// Camera at the start and end of the shutter interval, for motion blur.
+    /// Equal to `camera` when blur is off.
+    pub blur_from: Camera,
+    pub blur_to: Camera,
     pub cursor: Option<CursorState>,
 }
 
@@ -294,7 +299,15 @@ fn cursor_shape(rec: &Recording, edit: &EditConfig, t: f64) -> Option<CursorShap
 
 pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, fps: f64) -> FrameState {
     let camera = tracks.camera(t);
-    let prev_camera = if edit.motion_blur { tracks.camera(t - 0.5 / fps) } else { camera };
+    // Camera at both ends of a shutter interval centred on `t`. The renderer
+    // splits the motion between them into zoom and pan parts and weights each
+    // by its own strength.
+    let (blur_from, blur_to) = if edit.motion_blur && (edit.zoom_blur > 0.0 || edit.pan_blur > 0.0) {
+        let s = SHUTTER_FRAMES / fps;
+        (tracks.camera(t - s / 2.0), tracks.camera(t + s / 2.0))
+    } else {
+        (camera, camera)
+    };
     let cursor = if rec.cursor_embedded || rec.events.moves.is_empty() {
         None
     } else {
@@ -304,7 +317,7 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
             CursorState { x, y, scale: edit.cursor.size * click_squish(rec, edit, t), opacity: idle_opacity(rec, edit, t), shape }
         })
     };
-    FrameState { camera, prev_camera, cursor }
+    FrameState { camera, blur_from, blur_to, cursor }
 }
 
 fn click_squish(rec: &Recording, edit: &EditConfig, t: f64) -> f64 {
