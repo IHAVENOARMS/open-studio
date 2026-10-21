@@ -47,6 +47,18 @@ impl State {
         self.cutout_error = None;
     }
 
+    /// Names of camera tasks still running.
+    pub fn running(&self) -> Vec<&'static str> {
+        let mut v = vec![];
+        if self.cutout_job.is_some() {
+            v.push("Background removal");
+        }
+        if self.face_job.is_some() {
+            v.push("Face tracking");
+        }
+        v
+    }
+
     /// Polls the job; returns its progress 0..1 while running.
     pub fn poll_cutout(&mut self, ctx: &egui::Context) -> Option<f32> {
         let (p, rx) = self.cutout_job.as_ref()?;

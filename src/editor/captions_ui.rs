@@ -88,6 +88,12 @@ fn start_job(ui: &Ui, st: &mut State, edit: &EditConfig, rec: &Recording) {
     st.error = None;
 }
 
+impl State {
+    pub fn transcribing(&self) -> bool {
+        self.job.is_some()
+    }
+}
+
 pub fn captions(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recording) -> CaptionsAction {
     poll_job(ui, st);
     heading(ui, "Captions");

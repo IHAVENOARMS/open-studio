@@ -69,9 +69,9 @@ pub fn is_filler(word: &str) -> bool {
 /// Whisper models offered in the Captions tab, with the help text shown
 /// under the chips.
 pub const MODELS: [(&str, &str, &str); 3] = [
-    ("base", "Base", "Fastest. About 140MB, downloaded on first use."),
-    ("small", "Small", "Will download 466MB on first use. 2.5 times slower than Base, but more accurate. Produces good results in most cases."),
-    ("medium", "Medium", "Will download 1.5GB on first use. Slow, but the most accurate."),
+    ("base", "Base", "Will download 148MB on first use. Fastest, good for clear English."),
+    ("small", "Small", "Will download 488MB on first use. 2.5 times slower than Base, but more accurate. Produces good results in most cases."),
+    ("medium", "Medium", "Will download 1.5GB on first use. 8 times slower than Base, but more accurate. Best for other languages and accents."),
 ];
 
 /// Languages offered (Whisper code, label). "" lets Whisper detect it.
@@ -93,7 +93,158 @@ pub const LANGUAGES: [(&str, &str); 14] = [
 ];
 
 pub fn whisper_available() -> bool {
-    which("whisper")
+    whisper_cpp().is_some() || which("whisper")
+}
+
+/// whisper.cpp's command-line program (much faster than Python Whisper on
+/// the CPU): bundled next to our binary, or installed (`whisper-cpp`).
+fn whisper_cpp() -> Option<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = vec![];
+    if let Some(d) = std::env::var_os("APPDIR") {
+        dirs.push(std::path::PathBuf::from(d).join("usr/bin"));
+    }
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        dirs.push(d);
+    }
+    if let Some(p) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&p));
+    }
+    for d in dirs {
+        for name in ["whisper-cli", "whisper-cpp"] {
+            if d.join(name).is_file() {
+                return Some(d.join(name));
+            }
+        }
+    }
+    None
+}
+
+/// The ggml model file for whisper.cpp, downloaded on first use; download
+/// progress goes to `progress` (0..1000) as it arrives.
+fn ggml_model(model: &str, progress: &Progress) -> Result<std::path::PathBuf> {
+    let dir = directories::ProjectDirs::from("", "", "open-studio")
+        .map(|d| d.data_dir().join("models"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".open-studio-models"));
+    let path = dir.join(format!("ggml-{model}.bin"));
+    if path.is_file() {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(&dir)?;
+    let url = format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{model}.bin");
+    let total = Command::new("curl")
+        .args(["-fsIL", &url])
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .rev()
+                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<u64>().ok()))
+        })
+        .unwrap_or(0);
+    let tmp = path.with_extension("part");
+    let mut child = Command::new("curl").args(["-fsSL", "-o"]).arg(&tmp).arg(&url).spawn().context("running curl")?;
+    loop {
+        if progress.cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = std::fs::remove_file(&tmp);
+            bail!("cancelled");
+        }
+        if let Some(status) = child.try_wait()? {
+            if !status.success() {
+                let _ = std::fs::remove_file(&tmp);
+                bail!("could not download the {model} model");
+            }
+            break;
+        }
+        if total > 0 {
+            let got = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+            // Downloading is the first 40% of the bar.
+            progress.permille.store((got * 400 / total).min(400) as u32, Ordering::Relaxed);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+/// Transcribes with whisper.cpp: one segment per word (`-ml 1 -sow`).
+fn generate_cpp(cli: &std::path::Path, audio: &std::path::Path, offset: f64, model: &str, language: &str, prompt: &str, progress: &Progress, dir: &std::path::Path) -> Result<Transcript> {
+    let downloaded = !ggml_model_exists(model);
+    let model_path = ggml_model(model, progress)?;
+    let base = if downloaded { 400 } else { 0 };
+    let wav = dir.join("audio16k.wav");
+    let ok = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(audio)
+        .args(["-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le"])
+        .arg(&wav)
+        .status()?
+        .success();
+    if !ok {
+        bail!("could not read the microphone audio");
+    }
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    let out = dir.join("words");
+    let mut cmd = Command::new(cli);
+    cmd.arg("-m").arg(&model_path).arg("-f").arg(&wav).arg("-of").arg(&out);
+    cmd.args(["-l", if language.is_empty() { "auto" } else { language }]);
+    cmd.args(["-ml", "1", "-sow", "-ojf", "-pp", "-t", &threads.to_string()]);
+    if !prompt.is_empty() {
+        cmd.args(["--prompt", prompt]);
+    }
+    let mut child = cmd.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().context("running whisper-cli")?;
+    let stderr = child.stderr.take().unwrap();
+    let mut last_err = String::new();
+    for line in std::io::BufReader::new(stderr).lines() {
+        if progress.cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("cancelled");
+        }
+        let Ok(line) = line else { break };
+        // "whisper_print_progress_callback: progress =  45%"
+        if let Some(p) = line.split("progress =").nth(1).and_then(|v| v.trim().trim_end_matches('%').parse::<u32>().ok()) {
+            progress.permille.store(base + p.min(100) * (1000 - base) / 100, Ordering::Relaxed);
+        } else if line.to_lowercase().contains("error") {
+            last_err = line;
+        }
+    }
+    if !child.wait()?.success() {
+        bail!("whisper-cli failed: {last_err}");
+    }
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.with_extension("json"))?)?;
+    let mut words = vec![];
+    for seg in json["transcription"].as_array().into_iter().flatten() {
+        let text = seg["text"].as_str().unwrap_or("").trim().to_string();
+        let (Some(a), Some(b)) = (seg["offsets"]["from"].as_f64(), seg["offsets"]["to"].as_f64()) else { continue };
+        // Skip empties and non-speech markers like "[MUSIC]".
+        if text.is_empty() || (text.starts_with('[') && text.ends_with(']')) || (text.starts_with('(') && text.ends_with(')')) {
+            continue;
+        }
+        words.push(Word { start: a / 1000.0 + offset, end: b / 1000.0 + offset, text });
+    }
+    let lang = json["result"]["language"].as_str().unwrap_or(language).to_string();
+    Ok(Transcript { language: lang, model: model.to_string(), words })
+}
+
+fn ggml_model_exists(model: &str) -> bool {
+    directories::ProjectDirs::from("", "", "open-studio").is_some_and(|d| d.data_dir().join("models").join(format!("ggml-{model}.bin")).is_file())
+}
+
+/// Drops words that fall where the microphone was silent: Whisper invents
+/// text for silence and noise.
+fn keep_spoken(rec: &Recording, mut t: Transcript) -> Result<Transcript> {
+    let speech = crate::voice::speech_spans(rec);
+    if speech.is_empty() {
+        bail!("no speech found in the microphone audio");
+    }
+    let pad = 0.4;
+    t.words.retain(|w| speech.iter().any(|(a, b)| w.end > a - pad && w.start < b + pad));
+    if t.words.is_empty() {
+        bail!("no speech found in the microphone audio");
+    }
+    Ok(t)
 }
 
 fn which(cmd: &str) -> bool {
@@ -115,6 +266,20 @@ pub fn generate(rec: &Recording, model: &str, language: &str, prompt: &str, prog
     let out_dir = rec.dir.join(".whisper");
     let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir)?;
+    if let Some(cli) = whisper_cpp() {
+        // The English filler prompt confuses other languages; only use it
+        // when the language is English or the user wrote one.
+        let prompt = match (language, prompt.trim()) {
+            (_, p) if !p.is_empty() => p.to_string(),
+            ("en", _) => "Umm, let me think like, hmm... Okay, here's what I'm, uh, thinking.".to_string(),
+            _ => String::new(),
+        };
+        let r = generate_cpp(&cli, &audio, track.offset, model, language, &prompt, progress, &out_dir);
+        let _ = std::fs::remove_dir_all(&out_dir);
+        let t = keep_spoken(rec, r?)?;
+        progress.permille.store(1000, Ordering::Relaxed);
+        return Ok(t);
+    }
     // Whisper tends to drop filled pauses; a prompt containing them keeps
     // them in, so they can be cut later.
     let mut initial = String::from("Umm, let me think like, hmm... Okay, here's what I'm, uh, thinking.");
@@ -179,7 +344,7 @@ pub fn generate(rec: &Recording, model: &str, language: &str, prompt: &str, prog
         }
     }
     progress.permille.store(1000, Ordering::Relaxed);
-    Ok(Transcript { language: json["language"].as_str().unwrap_or(language).to_string(), model: model.to_string(), words })
+    keep_spoken(rec, Transcript { language: json["language"].as_str().unwrap_or(language).to_string(), model: model.to_string(), words })
 }
 
 /// "mm:ss.mmm" or "hh:mm:ss.mmm" to seconds.

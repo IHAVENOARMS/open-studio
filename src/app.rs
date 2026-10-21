@@ -327,7 +327,7 @@ impl eframe::App for App {
         // Closing the window with unsaved changes asks first.
         if ui.ctx().input(|i| i.viewport().close_requested()) && !self.may_close {
             if let Mode::Editor(ed) = &mut self.mode {
-                if ed.has_unsaved_changes() {
+                if ed.has_unsaved_changes() || !ed.running_tasks().is_empty() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
                     ed.request_leave(Leaving::Quit);
                 }

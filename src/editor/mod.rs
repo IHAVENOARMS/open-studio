@@ -85,6 +85,9 @@ pub struct Editor {
     renaming: Option<String>,
     /// Unsaved-changes prompt.
     leaving: Option<Leaving>,
+    /// "Still working" prompt before leaving while tasks run.
+    busy_prompt: Option<Leaving>,
+    tasks_dismissed: bool,
     saving_as: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
     /// Detected shortcuts by single-key setting, for the shortcuts track.
     shortcuts_cache: Option<(bool, Vec<crate::shortcuts::Shortcut>)>,
@@ -149,6 +152,8 @@ impl Editor {
             saved: edit.clone(),
             renaming: None,
             leaving: None,
+            busy_prompt: None,
+            tasks_dismissed: false,
             saving_as: None,
             shortcuts_cache: None,
             status: None,
@@ -599,7 +604,20 @@ impl Editor {
     }
 
     /// Leaves the editor, asking first when there are unsaved changes.
+    /// Background tasks still running (they stop when the editor closes).
+    pub fn running_tasks(&self) -> Vec<&'static str> {
+        let mut v = self.sidebar.camera.running();
+        if self.sidebar.captions.transcribing() {
+            v.insert(0, "Transcription");
+        }
+        v
+    }
+
     pub fn request_leave(&mut self, why: Leaving) -> Action {
+        if !self.running_tasks().is_empty() && !self.tasks_dismissed {
+            self.busy_prompt = Some(why);
+            return Action::None;
+        }
         if self.has_unsaved_changes() {
             self.leaving = Some(why);
             Action::None
@@ -617,6 +635,58 @@ impl Editor {
 
     /// The unsaved-changes prompt. Screen Studio asks whether to save or
     /// delete a new recording; for a saved project, whether to save changes.
+    /// Shown when leaving while background tasks run: they would stop.
+    fn busy_prompt(&mut self, ctx: &egui::Context) -> Action {
+        let Some(why) = self.busy_prompt else { return Action::None };
+        let tasks = self.running_tasks();
+        if tasks.is_empty() {
+            // Finished meanwhile: carry on leaving.
+            self.busy_prompt = None;
+            return self.request_leave(why);
+        }
+        let mut out = Action::None;
+        let frame = egui::Frame::new()
+            .fill(Color32::from_rgb(0x26, 0x26, 0x29))
+            .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(22)))
+            .corner_radius(egui::CornerRadius::same(16))
+            .inner_margin(egui::Margin { left: 22, right: 22, top: 22, bottom: 20 })
+            .shadow(egui::epaint::Shadow { offset: [0, 18], blur: 50, spread: 0, color: Color32::from_black_alpha(150) });
+        egui::Modal::new(egui::Id::NULL.with("busy-prompt")).frame(frame).backdrop_color(Color32::from_black_alpha(110)).show(ctx, |ui| {
+            let w = 260.0;
+            ui.set_width(w);
+            ui.vertical_centered(|ui| {
+                let what = tasks.join(" and ");
+                let verb = if tasks.len() > 1 { "are" } else { "is" };
+                ui.label(egui::RichText::new(format!("{what} {verb} still running")).font(theme::semibold(14.0)).color(Color32::WHITE));
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(if why == Leaving::Quit {
+                        "If you quit now it stops, and you'll have to start it again next time."
+                    } else {
+                        "If you leave this project now it stops, and you'll have to start it again."
+                    })
+                    .size(12.0)
+                    .color(Color32::from_rgb(0xb4, 0xb4, 0xb9)),
+                );
+                ui.add_space(16.0);
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let button = |ui: &mut egui::Ui, label: &str, fill: Color32, text: Color32| {
+                    ui.add_sized([w, 30.0], egui::Button::new(egui::RichText::new(label).size(13.0).color(text)).fill(fill).corner_radius(egui::CornerRadius::same(8)))
+                };
+                if button(ui, "Keep working", theme::ACCENT, Color32::WHITE).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    self.busy_prompt = None;
+                }
+                let label = if why == Leaving::Quit { "Quit anyway" } else { "Leave anyway" };
+                if button(ui, label, Color32::from_rgb(0x3a, 0x3a, 0x3e), Color32::from_rgb(0xff, 0x6b, 0x61)).clicked() {
+                    self.busy_prompt = None;
+                    self.tasks_dismissed = true;
+                    out = self.request_leave(why);
+                }
+            });
+        });
+        out
+    }
+
     fn leave_prompt(&mut self, ctx: &egui::Context) -> Action {
         let Some(why) = self.leaving else { return Action::None };
         let mut out = Action::None;
@@ -694,6 +764,8 @@ impl Editor {
                     }
                     if button(ui, "Cancel", grey, egui::Color32::WHITE).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                         self.leaving = None;
+                        // Staying: warn about running tasks again next time.
+                        self.tasks_dismissed = false;
                     }
                 });
             });
@@ -900,6 +972,9 @@ impl Editor {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => self.saving_as = None,
                 Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
             }
+        }
+        if let Action::None = action {
+            action = self.busy_prompt(&ctx);
         }
         if let Action::None = action {
             action = self.leave_prompt(&ctx);
