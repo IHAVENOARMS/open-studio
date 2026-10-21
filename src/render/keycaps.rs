@@ -9,13 +9,14 @@ fn font() -> Option<&'static FontVec> {
     raster::font("SF Pro Text:semibold,Inter:semibold,sans-serif:semibold")
 }
 
-/// (symbol, name) for modifier keys.
+/// (symbol, name) for modifier keys, as printed on PC keyboards: Ctrl and
+/// Alt are plain words (symbol ""), Shift has its arrow, and Super uses the
+/// Linux/X11 symbol ❖ (drawn by `Canvas::super_symbol`).
 fn modifier(key: &str) -> Option<(&'static str, &'static str)> {
     Some(match key {
-        "Ctrl" => ("\u{2303}", "control"),
-        "Alt" => ("\u{2325}", "alt"),
+        "Ctrl" => ("", "Ctrl"),
+        "Alt" => ("", "Alt"),
         "Shift" => ("\u{21E7}", "shift"),
-        // Drawn as ❖ (see `Canvas::super_symbol`), the Linux Super key.
         "Super" => ("\u{2756}", "super"),
         _ => return None,
     })
@@ -59,7 +60,14 @@ pub fn render(keys: &[&str], key_h: u32) -> Image {
         cv.rrect(x + rim, pad + rim, kw - 2.0 * rim, h - 2.0 * rim, r - rim, [0.175, 0.175, 0.18, 1.0], [0.135, 0.135, 0.14, 1.0]);
         if let Some(f) = font {
             let white = [1.0, 1.0, 1.0];
-            if let Some((sym, name)) = modifier(k) {
+            if let Some(("", name)) = modifier(k) {
+                // Word-only modifier (Ctrl, Alt): centred like a PC keycap.
+                let size = h * 0.32;
+                let tw = text_width(f, name, size);
+                let sf = f.as_scaled(PxScale::from(size));
+                let baseline = pad + h * 0.5 + (sf.ascent() + sf.descent()) * 0.5 - sf.descent() * 0.15;
+                cv.text(f, name, size, x + (kw - tw) * 0.5, baseline, white);
+            } else if let Some((sym, name)) = modifier(k) {
                 let left = x + h * 0.14;
                 if *k == "Super" {
                     cv.super_symbol(left + h * 0.13, pad + h * 0.3, h * 0.3, white);
@@ -85,7 +93,7 @@ pub fn render(keys: &[&str], key_h: u32) -> Image {
 mod tests {
     #[test]
     fn renders_shortcut() {
-        let img = super::render(&["Super", "Shift", "M"], 96);
+        let img = super::render(&["Ctrl", "Alt", "Super", "Shift", "M"], 96);
         assert_eq!(img.rgba.len(), (img.width * img.height * 4) as usize);
         assert!(img.width > 300 && img.height > 96);
         // Somewhere on the M key there is white text.
