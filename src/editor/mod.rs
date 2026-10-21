@@ -265,10 +265,50 @@ impl Editor {
     /// Project name in the top bar; click it to rename. "Edited" shows while
     /// there are unsaved changes.
     fn title(&mut self, ui: &mut egui::Ui) {
+        // The name is edited in place: same font, no frame, ".openstudio"
+        // still beside it, the row staying centred while you type.
         let font = egui::FontId::proportional(14.0);
+        let small = egui::FontId::proportional(12.5);
+        let status = self.status.as_ref().filter(|(_, t)| t.elapsed().as_secs_f32() < 4.0).map(|(m, _)| m.clone());
+        if status.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        let note = status.map(|m| format!("   {m}")).or_else(|| {
+            self.has_unsaved_changes().then(|| if self.is_new() { "   Not saved".to_string() } else { "   Edited".to_string() })
+        });
+        let name = self.renaming.clone().unwrap_or_else(|| self.name.clone());
+        // Every part is laid out at a fixed spot on one shared top line, so
+        // switching to editing moves nothing.
+        let galley = |text: &str, f: &egui::FontId, c: egui::Color32| ui.painter().layout_no_wrap(text.to_string(), f.clone(), c);
+        let g_name = galley(&name, &font, theme::TEXT);
+        let g_ext = galley(".openstudio", &font, theme::TEXT_DIM);
+        let g_note = note.as_deref().map(|n| galley(n, &small, theme::TEXT_DIM));
+        let name_w = g_name.size().x.max(8.0) + 1.0;
+        let total = name_w + g_ext.size().x + g_note.as_ref().map_or(0.0, |g| g.size().x);
+        let full = ui.max_rect();
+        let top = full.center().y - g_ext.size().y / 2.0;
+        let x0 = full.center().x - total / 2.0;
+        let name_rect = egui::Rect::from_min_size(egui::pos2(x0, top), egui::vec2(name_w, g_ext.size().y));
+        let ext_pos = egui::pos2(x0 + name_w, top);
         if let Some(text) = &mut self.renaming {
-            let r = ui.add(egui::TextEdit::singleline(text).font(font).desired_width(260.0));
-            r.request_focus();
+            let id = egui::Id::NULL.with("rename-project");
+            let mut out = egui::TextEdit::singleline(text)
+                .id(id)
+                .font(font.clone())
+                .text_color(theme::TEXT)
+                .frame(egui::Frame::NONE)
+                .margin(egui::Margin::ZERO)
+                .min_size(name_rect.size())
+                .desired_width(name_w)
+                .show(&mut ui.new_child(egui::UiBuilder::new().max_rect(name_rect)));
+            let r = out.response.response.clone();
+            if !r.has_focus() && !r.lost_focus() {
+                // First frame: focus and select the whole name.
+                r.request_focus();
+                let len = text.chars().count();
+                out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(len))));
+                out.state.store(ui.ctx(), id);
+            }
             let (enter, esc) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
             if esc {
                 self.renaming = None;
@@ -278,23 +318,22 @@ impl Editor {
                     self.notify(format!("Couldn't rename: {e:#}"));
                 }
             }
-            return;
+        } else {
+            ui.painter().galley(name_rect.min, g_name, theme::TEXT);
+            let r = ui
+                .interact(name_rect.union(egui::Rect::from_min_size(ext_pos, g_ext.size())), egui::Id::NULL.with("project-title"), Sense::click())
+                .on_hover_text("Click to rename.  Ctrl+S saves, Ctrl+Shift+S saves to another folder.")
+                .on_hover_cursor(egui::CursorIcon::Text);
+            if r.clicked() {
+                self.renaming = Some(self.name.clone());
+            }
         }
-        let mut job = egui::text::LayoutJob::default();
-        job.append(&self.name, 0.0, egui::TextFormat::simple(font.clone(), theme::TEXT));
-        job.append(".openstudio", 0.0, egui::TextFormat::simple(font.clone(), theme::TEXT_DIM));
-        let status = self.status.as_ref().filter(|(_, t)| t.elapsed().as_secs_f32() < 4.0).map(|(m, _)| m.clone());
-        if let Some(m) = status {
-            job.append(&format!("   {m}"), 0.0, egui::TextFormat::simple(egui::FontId::proportional(12.5), theme::TEXT_DIM));
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-        } else if self.has_unsaved_changes() {
-            let note = if self.is_new() { "   Not saved" } else { "   Edited" };
-            job.append(note, 0.0, egui::TextFormat::simple(egui::FontId::proportional(12.5), theme::TEXT_DIM));
-        }
-        let r = ui.add(egui::Label::new(job).sense(Sense::click()));
-        let r = r.on_hover_text("Click to rename.  Ctrl+S saves, Ctrl+Shift+S saves to another folder.").on_hover_cursor(egui::CursorIcon::Text);
-        if r.clicked() {
-            self.renaming = Some(self.name.clone());
+        let ext_w = g_ext.size().x;
+        ui.painter().galley(ext_pos, g_ext, theme::TEXT_DIM);
+        if let Some(g) = g_note {
+            // Smaller text, centred on the same line.
+            let y = full.center().y - g.size().y / 2.0;
+            ui.painter().galley(egui::pos2(ext_pos.x + ext_w, y), g, theme::TEXT_DIM);
         }
     }
 
