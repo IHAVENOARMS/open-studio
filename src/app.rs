@@ -2,6 +2,7 @@
 
 use crate::control::ControlServer;
 use crate::editor::{Action, Editor};
+use crate::icons::{self, Icon};
 use crate::project::Recording;
 use crate::record::{RecordOptions, Recorder, hyprland};
 use crate::theme;
@@ -113,11 +114,8 @@ impl App {
                     ui.label(RichText::new("Open Studio").font(theme::semibold(28.0)));
                     ui.label(RichText::new("Beautiful screen recordings with automatic zoom").color(theme::TEXT_DIM).size(14.0));
                     ui.add_space(24.0);
-                    let rec_btn = egui::Button::new(RichText::new("  ●   Start recording  ").font(theme::semibold(15.0)).color(Color32::WHITE))
-                        .fill(theme::ACCENT)
-                        .corner_radius(CornerRadius::same(10))
-                        .min_size(vec2(260.0, 46.0));
-                    if ui.add(rec_btn).clicked() {
+                    let rec_btn = icons::button(ui, Icon::Record, "Start recording", theme::semibold(15.0), Color32::WHITE, Some(theme::ACCENT), vec2(260.0, 46.0));
+                    if rec_btn.clicked() {
                         self.start_recording(&ctx);
                     }
                     ui.add_space(10.0);
@@ -198,11 +196,8 @@ impl App {
                 if let Some(t) = timer {
                     ui.label(RichText::new(format_time(t)).size(34.0));
                     ui.add_space(12.0);
-                    let b = egui::Button::new(RichText::new("  ■  Stop recording  ").font(theme::semibold(14.0)).color(Color32::WHITE))
-                        .fill(theme::RECORD)
-                        .corner_radius(CornerRadius::same(10))
-                        .min_size(vec2(220.0, 42.0));
-                    if ui.add(b).clicked() {
+                    let b = icons::button(ui, Icon::Stop, "Stop recording", theme::semibold(14.0), Color32::WHITE, Some(theme::RECORD), vec2(220.0, 42.0));
+                    if b.clicked() {
                         stop.store(true, Ordering::Relaxed);
                     }
                 } else {

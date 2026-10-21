@@ -34,7 +34,7 @@ struct SpriteUniform {
 struct VideoTexture {
     size: (u32, u32),
     texture: wgpu::Texture,
-    scene_bind: wgpu::BindGroup,
+    view: wgpu::TextureView,
     // (target level view, bind group sampling the level above)
     mip_chain: Vec<(wgpu::TextureView, wgpu::BindGroup)>,
 }
@@ -52,6 +52,12 @@ pub struct Compositor {
     sprite_buf: wgpu::Buffer,
     sprite_bind: wgpu::BindGroup,
     video: Option<VideoTexture>,
+    /// Background image (1x1 placeholder when unused) and what it was loaded from.
+    bg_view: wgpu::TextureView,
+    bg_key: Option<String>,
+    bg_aspect: f32,
+    bg_height: u32,
+    scene_bind: Option<wgpu::BindGroup>,
 }
 
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -97,7 +103,7 @@ impl Compositor {
         });
         let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scene"),
-            entries: &[uniform_entry(0), texture_entry(1), sampler_entry(2)],
+            entries: &[uniform_entry(0), texture_entry(1), sampler_entry(2), texture_entry(3)],
         });
         let mip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mip"),
@@ -193,8 +199,27 @@ impl Compositor {
                     resource: wgpu::BindingResource::TextureView(&cursor_tex.create_view(&Default::default())),
                 },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&cursor_tex.create_view(&Default::default())),
+                },
             ],
         });
+        let placeholder = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("bg placeholder"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[0, 0, 0, 255],
+        );
 
         Self {
             device,
@@ -209,7 +234,101 @@ impl Compositor {
             sprite_buf,
             sprite_bind,
             video: None,
+            bg_view: placeholder.create_view(&Default::default()),
+            bg_key: None,
+            bg_aspect: 1.0,
+            bg_height: 1,
+            scene_bind: None,
         }
+    }
+
+    fn rebuild_scene_bind(&mut self) {
+        let Some(v) = &self.video else { return };
+        self.scene_bind = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene"),
+            layout: &self.scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.scene_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&v.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.bg_view) },
+            ],
+        }));
+    }
+
+    /// Loads (once) the image behind a wallpaper/image background. Returns
+    /// false when it isn't available, so the caller can fall back.
+    fn ensure_background_image(&mut self, key: &str) -> bool {
+        if self.bg_key.as_deref() == Some(key) {
+            return true;
+        }
+        let path = crate::wallpapers::resolve(key);
+        let Ok(img) = image::open(&path) else { return false };
+        let img = img.to_rgba8();
+        let (w, h) = img.dimensions();
+        let mips = 32 - w.max(h).leading_zeros();
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("background"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let chain = self.mip_chain(&texture, mips);
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        for (view, bind) in &chain {
+            let mut pass = begin_pass(&mut enc, view);
+            pass.set_pipeline(&self.mip_pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([enc.finish()]);
+        self.bg_view = texture.create_view(&Default::default());
+        self.bg_key = Some(key.to_owned());
+        self.bg_aspect = w as f32 / h as f32;
+        self.bg_height = h;
+        self.rebuild_scene_bind();
+        true
+    }
+
+    /// Per-level render targets and bind groups sampling the level above.
+    fn mip_chain(&self, texture: &wgpu::Texture, mips: u32) -> Vec<(wgpu::TextureView, wgpu::BindGroup)> {
+        let level = |l: u32| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: l,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        };
+        (1..mips)
+            .map(|l| {
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.mip_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&level(l - 1)) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    ],
+                });
+                (level(l), bind)
+            })
+            .collect()
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -237,39 +356,10 @@ impl Compositor {
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        let level = |l: u32| {
-            texture.create_view(&wgpu::TextureViewDescriptor {
-                base_mip_level: l,
-                mip_level_count: Some(1),
-                ..Default::default()
-            })
-        };
-        let mip_chain = (1..mips)
-            .map(|l| {
-                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &self.mip_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&level(l - 1)) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    ],
-                });
-                (level(l), bind)
-            })
-            .collect();
-        let scene_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("scene"),
-            layout: &self.scene_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.scene_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
-                },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-            ],
-        });
-        self.video = Some(VideoTexture { size: (w, h), texture, scene_bind, mip_chain });
+        let mip_chain = self.mip_chain(&texture, mips);
+        let view = texture.create_view(&Default::default());
+        self.video = Some(VideoTexture { size: (w, h), texture, view, mip_chain });
+        self.rebuild_scene_bind();
     }
 
     /// Uploads an RGBA frame and rebuilds its mip chain (needed for clean
@@ -314,20 +404,40 @@ impl Compositor {
         let (ow, oh) = (out.0 as f32, out.1 as f32);
         let cam = frame.camera;
         let c = layout.content;
+        let gradient = |i: usize| {
+            let p = &background::PRESETS[i % background::PRESETS.len()];
+            (1.0, p.corners.map(background::linear))
+        };
+        let image_key = match &edit.background {
+            Background::Wallpaper(k) | Background::Image(k) => Some(k.clone()),
+            _ => None,
+        };
         let bg = match &edit.background {
-            Background::Gradient(i) => {
-                let p = &background::PRESETS[*i % background::PRESETS.len()];
-                (1.0, p.corners.map(background::linear))
-            }
+            Background::Gradient(i) => gradient(*i),
             Background::Color(rgb) => {
                 let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
                 (0.0, [background::linear([to8(rgb[0]), to8(rgb[1]), to8(rgb[2])]); 4])
             }
+            Background::Wallpaper(_) | Background::Image(_) => {
+                if self.ensure_background_image(image_key.as_deref().unwrap()) {
+                    (2.0, [[self.bg_aspect, 0.0, 0.0, 0.0]; 4])
+                } else {
+                    gradient(0)
+                }
+            }
         };
-        let lod = match &self.video {
-            Some(v) => ((v.size.1 as f64 / (c.h * oh as f64 * cam.scale)).log2().max(0.0)) as f32,
-            None => 0.0,
+        // Background mip level: natural minification plus the blur amount.
+        let bg_lod = {
+            let natural = (self.bg_height as f64 / (oh as f64 * cam.scale)).log2().max(0.0);
+            (natural + edit.background_blur * 7.0) as f32
         };
+        // Texels per output pixel; below ~1 we are magnifying.
+        let density = match &self.video {
+            Some(v) => v.size.1 as f64 / (c.h * oh as f64 * cam.scale),
+            None => 1.0,
+        };
+        let lod = density.log2().max(0.0) as f32;
+        let bicubic = if density < 0.9 { 1.0 } else { 0.0 };
         let samples = if edit.motion_blur { blur_samples(layout, frame, oh as f64) } else { 1 };
         let u = SceneUniform {
             out_size: [ow, oh],
@@ -342,7 +452,7 @@ impl Compositor {
                 samples as f32,
             ],
             bg: bg.1,
-            params: [lod, bg.0, 0.0, 0.0],
+            params: [lod, bg.0, bicubic, bg_lod],
         };
         self.queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&u));
 
@@ -367,9 +477,9 @@ impl Compositor {
         let mut enc = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = begin_pass(&mut enc, target);
-            if let Some(v) = &self.video {
+            if let Some(bind) = &self.scene_bind {
                 pass.set_pipeline(&self.scene_pipeline);
-                pass.set_bind_group(0, &v.scene_bind, &[]);
+                pass.set_bind_group(0, bind, &[]);
                 pass.draw(0..3, 0..1);
                 if cursor.is_some() {
                     pass.set_pipeline(&self.sprite_pipeline);

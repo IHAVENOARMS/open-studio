@@ -1,6 +1,11 @@
 //! PipeWire -> GStreamer -> ffmpeg. GStreamer handles format negotiation and
-//! turns the damage-driven PipeWire stream into constant frame rate I420;
+//! turns the damage-driven PipeWire stream into constant frame rate 4:4:4 YUV;
 //! ffmpeg does the encoding so we can use whatever encoders it was built with.
+//!
+//! Quality matters more than usual here: the editor zooms in 2x or more, so
+//! chroma subsampling and block artifacts that are invisible at 1:1 become
+//! obvious. We keep full chroma (4:4:4) and use x264 `veryfast` (which, unlike
+//! `ultrafast`, keeps the deblocking filter) at a low CRF.
 
 use crate::util::monotonic_ns;
 use anyhow::{Context, Result, anyhow};
@@ -57,7 +62,7 @@ impl Capture {
         };
         let desc = format!(
             "{src} ! videorate ! video/x-raw,framerate={fps}/1 ! videoconvert n-threads=0 \
-             ! video/x-raw,format=I420 ! appsink name=sink sync=false max-buffers=16"
+             ! video/x-raw,format=Y444,colorimetry=bt709 ! appsink name=sink sync=false max-buffers=16"
         );
         let pipeline = gst::parse::launch(&desc)
             .context("building GStreamer pipeline")?
@@ -141,10 +146,11 @@ fn spawn_encoder(out: &PathBuf, w: u32, h: u32, fps: u32) -> Result<Child> {
     // Short GOP keeps seeking in the editor cheap.
     let child = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "rawvideo", "-pix_fmt", "yuv420p"])
+        .args(["-f", "rawvideo", "-pix_fmt", "yuv444p"])
+        .args(["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
         .args(["-s", &format!("{w}x{h}"), "-r", &fps.to_string(), "-i", "-"])
-        .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "16", "-g", &fps.to_string()])
-        .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-g", &fps.to_string()])
+        .args(["-pix_fmt", "yuv444p", "-movflags", "+faststart"])
         .arg(out)
         .stdin(Stdio::piped())
         .spawn()
@@ -177,7 +183,7 @@ fn write_sample(w: &mut Writer, sample: &gst::Sample, out: &PathBuf, fps: u32, b
     // Repack planes tightly; GStreamer pads strides, ffmpeg's rawvideo expects none.
     w.scratch.clear();
     for plane in 0..3u32 {
-        let (pw, ph) = if plane == 0 { (width, height) } else { (width.div_ceil(2), height.div_ceil(2)) };
+        let (pw, ph) = (width, height);
         let stride = frame.plane_stride()[plane as usize] as usize;
         let data = frame.plane_data(plane).map_err(|_| anyhow!("plane data"))?;
         for row in 0..ph as usize {

@@ -7,10 +7,12 @@ mod edit;
 mod engine;
 mod export;
 mod gpu;
+mod icons;
 mod project;
 mod record;
 mod render;
 mod util;
+mod wallpapers;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -48,6 +50,11 @@ enum Cmd {
     },
     /// Stop the recording in progress.
     Stop,
+    /// Download the bundled wallpaper collection (or list it with --list).
+    Wallpapers {
+        #[arg(long)]
+        list: bool,
+    },
     /// Open a project in the editor.
     Edit { project: PathBuf },
     /// Render a project to MP4 without opening the editor.
@@ -96,6 +103,23 @@ fn main() -> Result<()> {
             println!("{}", out.display());
         }
         Some(Cmd::Edit { project }) => app::run(Some(project))?,
+        Some(Cmd::Wallpapers { list }) => {
+            if list {
+                for w in wallpapers::manifest() {
+                    let mark = if wallpapers::installed(&w.id) { "installed" } else { "missing" };
+                    println!("{:<10} {:<36} {:<9} {} ({})", w.category, w.id, mark, w.author, w.license);
+                }
+            } else {
+                let total = wallpapers::missing().len();
+                let done = std::sync::atomic::AtomicUsize::new(0);
+                eprintln!("open-studio: downloading {total} wallpapers to {}", wallpapers::data_dir().display());
+                let errors = wallpapers::fetch_missing(&done);
+                for e in &errors {
+                    eprintln!("  failed: {e}");
+                }
+                eprintln!("open-studio: {} downloaded, {} failed", total - errors.len(), errors.len());
+            }
+        }
         None => app::run(None)?,
     }
     Ok(())

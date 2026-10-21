@@ -13,7 +13,8 @@ GIF export are not built yet.
 
 - **Capture**: the xdg-desktop-portal ScreenCast API (so the compositor shows
   its own screen picker) feeds a PipeWire stream into GStreamer, which converts
-  it to a constant 60 fps that ffmpeg encodes. The cursor is captured
+  it to a constant 60 fps. ffmpeg encodes it as H.264 4:4:4 (x264 `veryfast`,
+  CRF 14) so text stays sharp when zoomed in. The cursor is captured
   separately rather than baked into the video.
 - **Cursor and clicks**: the cursor position comes from Hyprland IPC, and clicks
   and keys are read from evdev. Reading evdev requires being in the `input` group.
@@ -26,9 +27,9 @@ GIF export are not built yet.
   - The springs are pre-simulated at a fixed time step, so the preview and the
     export produce identical frames.
 - **Rendering**: a single wgpu compositor draws:
-  - the gradient wallpaper;
+  - the background (wallpaper, gradient, colour or image, with optional blur);
   - the rounded video card with its shadow;
-  - mip-mapped video sampling;
+  - mip-mapped video sampling when zoomed out, bicubic (Catmull-Rom) when zoomed in;
   - shutter-based motion blur;
   - the cursor (a vector-rasterized arrow).
 
@@ -51,7 +52,18 @@ open-studio record [--reuse] [--duration 10]   # headless recording
 open-studio stop                        # stop from a keybinding
 open-studio edit "~/Videos/Open Studio/Recording …"
 open-studio export <project> --height 1080 --fps 60
+open-studio wallpapers [--list]         # download the wallpaper collection
 ```
+
+## Wallpapers
+
+`assets/wallpapers.json` lists a curated set of openly licensed wallpapers
+(CC0, CC BY, CC BY-SA, Unsplash License and similar), with author and
+licence for each; credits are in `assets/WALLPAPERS.md`. The images are not
+stored in the repository. They are downloaded on first use (from the editor's
+Background panel or with `open-studio wallpapers`), scaled to at most 3840 px
+wide, and kept in `~/.local/share/open-studio/wallpapers/`. Any local JPEG,
+PNG or WebP can also be used through the Image background option.
 
 Hyprland keybinding to stop a recording:
 

@@ -34,9 +34,13 @@ impl Decoder {
             cmd.args(["-ss", &format!("{start:.4}")]);
         }
         cmd.arg("-i").arg(path);
-        if (width, height) != src {
-            cmd.args(["-vf", &format!("scale={width}:{height}:flags=area")]);
-        }
+        // Explicit BT.709 (what the recorder tags) and bicubic chroma upsampling.
+        let filter = if (width, height) != src {
+            format!("scale={width}:{height}:flags=area+full_chroma_int:in_color_matrix=bt709")
+        } else {
+            "scale=flags=bicubic+full_chroma_int+accurate_rnd:in_color_matrix=bt709".to_string()
+        };
+        cmd.args(["-vf", &filter]);
         cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
         let mut child = cmd.stdout(Stdio::piped()).stdin(Stdio::null()).spawn().context("launching ffmpeg")?;
         let stdout = child.stdout.take().unwrap();

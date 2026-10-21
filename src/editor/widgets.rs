@@ -174,14 +174,17 @@ pub fn swatch(ui: &mut Ui, corners: [Color32; 4], selected: bool, size: f32) -> 
 
 /// A subtle full-width button like "Set as default".
 pub fn wide_button(ui: &mut Ui, label: &str) -> Response {
+    wide_button_icon(ui, None, label)
+}
+
+pub fn wide_button_icon(ui: &mut Ui, icon: Option<crate::icons::Icon>, label: &str) -> Response {
     let w = ui.available_width();
-    ui.add(
-        egui::Button::new(egui::RichText::new(label).size(13.5))
-            .fill(theme::SURFACE)
-            .stroke(Stroke::new(1.0, theme::BORDER))
-            .corner_radius(CornerRadius::same(8))
-            .min_size(vec2(w, 38.0)),
-    )
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 38.0), Sense::click());
+    let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
+    ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+    crate::icons::paint_with_text(ui.painter(), rect, icon, 16.0, label, egui::FontId::proportional(13.5), theme::TEXT);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 pub fn divider(ui: &mut Ui) {

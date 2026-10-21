@@ -8,6 +8,7 @@ mod widgets;
 use crate::edit::{EditConfig, ZoomFocus};
 use crate::engine::{Tracks, frame_state};
 use crate::export::{self, ExportOptions, Progress};
+use crate::icons::{self, Icon};
 use crate::project::{ProjectPaths, Recording};
 use crate::render::{Compositor, FORMAT};
 use crate::theme;
@@ -63,6 +64,7 @@ pub struct Editor {
     playing: Option<(f64, Instant)>,
     selected: Option<usize>,
     tab: Tab,
+    sidebar: sidebar::State,
     timeline: timeline::State,
     export: Option<ExportDialog>,
 }
@@ -92,6 +94,7 @@ impl Editor {
             playing: None,
             selected: None,
             tab: Tab::Background,
+            sidebar: sidebar::State::default(),
             timeline: timeline::State::default(),
             export: None,
             rec,
@@ -156,12 +159,16 @@ impl Editor {
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(16, 10)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(egui::RichText::new("🗀  Projects").size(13.5)).frame(false)).clicked() {
+                    if icons::button(ui, Icon::Folder, "Projects", egui::FontId::proportional(13.5), theme::TEXT, None, Vec2::ZERO).clicked() {
                         action = Action::GoHome;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if theme::primary_button(ui, "  ⮉  Export  ").clicked() && self.export.is_none() {
-                            self.export = Some(ExportDialog { height: 1080, fps: 60, job: None });
+                        if icons::button(ui, Icon::Export, "Export", theme::semibold(13.5), Color32::WHITE, Some(theme::ACCENT), egui::vec2(0.0, 32.0)).clicked()
+                            && self.export.is_none()
+                        {
+                            // Default to the native resolution so zoomed-in frames keep detail.
+                            let native = self.rec.height.clamp(720, 2160);
+                            self.export = Some(ExportDialog { height: native, fps: 60, job: None });
                         }
                         ui.centered_and_justified(|ui| {
                             let mut job = egui::text::LayoutJob::default();
@@ -200,13 +207,14 @@ impl Editor {
                 let side_w = 404.0;
                 let side_rect = egui::Rect::from_min_max(egui::pos2(full.max.x - side_w, full.min.y + 4.0), full.max - egui::vec2(0.0, 8.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(side_rect), |ui| {
-                    sidebar::show(ui, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec);
+                    sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec);
                 });
                 let main_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x - side_w - 16.0, full.max.y));
                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(main_rect).layout(egui::Layout::top_down(egui::Align::Min)));
                 ui.horizontal(|ui| {
-                    let label = format!("▭  {}", self.edit.aspect.label());
-                    ui.menu_button(egui::RichText::new(label).size(13.5), |ui| {
+                    let label = format!("Aspect  {}", self.edit.aspect.label());
+                    let resp = icons::button(ui, Icon::Aspect, &label, egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), egui::vec2(0.0, 30.0));
+                    egui::Popup::menu(&resp).show(|ui| {
                         for a in crate::edit::Aspect::ALL {
                             if ui.selectable_label(self.edit.aspect == a, a.label()).clicked() {
                                 self.edit.aspect = a;
@@ -392,10 +400,16 @@ impl Editor {
             match &dlg.job {
                 None => {
                     theme::section(ui, "Resolution");
-                    widgets::segmented(
-                        ui,
-                        &mut dlg.height,
-                        &[(720, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")],
+                    let native = self.rec.height.clamp(720, 2160);
+                    let mut opts: Vec<(u32, &str)> = vec![(720, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")];
+                    if !opts.iter().any(|(h, _)| *h == native) {
+                        opts.push((native, "Original"));
+                    }
+                    widgets::segmented(ui, &mut dlg.height, &opts);
+                    ui.label(
+                        egui::RichText::new("Zoomed parts look sharpest at the recording's native size or above.")
+                            .color(theme::TEXT_DIM)
+                            .size(12.0),
                     );
                     theme::section(ui, "Frame rate");
                     widgets::segmented(ui, &mut dlg.fps, &[(30, "30 fps"), (60, "60 fps")]);

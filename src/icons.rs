@@ -1,0 +1,154 @@
+//! Line icons drawn with the painter (no glyph or emoji fonts). Each icon is
+//! designed on a 20x20 grid and scaled into the given rect.
+
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Icon {
+    Folder,
+    Export,
+    Aspect,
+    Sparkle,
+    Image,
+    Cursor,
+    Zoom,
+    Mouse,
+    Back,
+    Record,
+    Stop,
+    Play,
+    Pause,
+    SkipBack,
+    SkipForward,
+    Plus,
+}
+
+struct Pen<'a> {
+    p: &'a Painter,
+    r: Rect,
+    s: Stroke,
+    color: Color32,
+}
+
+impl Pen<'_> {
+    fn pt(&self, x: f32, y: f32) -> Pos2 {
+        let k = self.r.width().min(self.r.height()) / 20.0;
+        let o = self.r.center() - vec2(10.0 * k, 10.0 * k);
+        pos2(o.x + x * k, o.y + y * k)
+    }
+    fn k(&self) -> f32 {
+        self.r.width().min(self.r.height()) / 20.0
+    }
+    fn line(&self, pts: &[(f32, f32)]) {
+        let pts: Vec<Pos2> = pts.iter().map(|&(x, y)| self.pt(x, y)).collect();
+        self.p.add(Shape::line(pts, self.s));
+    }
+    fn closed(&self, pts: &[(f32, f32)]) {
+        let pts: Vec<Pos2> = pts.iter().map(|&(x, y)| self.pt(x, y)).collect();
+        self.p.add(Shape::closed_line(pts, self.s));
+    }
+    fn fill(&self, pts: &[(f32, f32)]) {
+        let pts: Vec<Pos2> = pts.iter().map(|&(x, y)| self.pt(x, y)).collect();
+        self.p.add(Shape::convex_polygon(pts, self.color, Stroke::NONE));
+    }
+    fn rrect(&self, x0: f32, y0: f32, x1: f32, y1: f32, rad: f32) {
+        let r = Rect::from_min_max(self.pt(x0, y0), self.pt(x1, y1));
+        self.p.rect_stroke(r, rad * self.k(), self.s, egui::StrokeKind::Middle);
+    }
+    fn circle(&self, x: f32, y: f32, rad: f32) {
+        self.p.circle_stroke(self.pt(x, y), rad * self.k(), self.s);
+    }
+}
+
+pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
+    let k = rect.width().min(rect.height()) / 20.0;
+    let pen = Pen { p, r: rect, s: Stroke::new((1.5 * k).max(1.2), color), color };
+    match icon {
+        Icon::Folder => pen.closed(&[(2.5, 5.0), (8.0, 5.0), (9.8, 7.0), (17.5, 7.0), (17.5, 15.5), (2.5, 15.5)]),
+        Icon::Export => {
+            pen.line(&[(7.0, 8.0), (4.5, 8.0), (4.5, 17.0), (15.5, 17.0), (15.5, 8.0), (13.0, 8.0)]);
+            pen.line(&[(10.0, 12.0), (10.0, 2.5)]);
+            pen.line(&[(6.8, 5.5), (10.0, 2.5), (13.2, 5.5)]);
+        }
+        Icon::Aspect => {
+            pen.rrect(2.5, 5.0, 17.5, 15.0, 2.0);
+            pen.line(&[(7.0, 5.0), (7.0, 15.0)]);
+        }
+        Icon::Sparkle => {
+            pen.closed(&[(10.0, 2.5), (11.6, 8.4), (17.5, 10.0), (11.6, 11.6), (10.0, 17.5), (8.4, 11.6), (2.5, 10.0), (8.4, 8.4)]);
+        }
+        Icon::Image => {
+            pen.rrect(2.5, 3.5, 17.5, 16.5, 2.5);
+            pen.line(&[(2.8, 14.0), (7.5, 9.5), (11.0, 12.5), (13.5, 10.5), (17.2, 13.5)]);
+            pen.circle(13.0, 7.2, 1.4);
+        }
+        Icon::Cursor => pen.closed(&[(5.0, 2.5), (5.0, 15.5), (8.3, 12.4), (10.6, 17.3), (12.6, 16.4), (10.4, 11.6), (14.8, 11.6)]),
+        Icon::Zoom => {
+            pen.circle(8.5, 8.5, 5.5);
+            pen.line(&[(12.5, 12.5), (17.0, 17.0)]);
+            pen.line(&[(6.0, 8.5), (11.0, 8.5)]);
+            pen.line(&[(8.5, 6.0), (8.5, 11.0)]);
+        }
+        Icon::Mouse => {
+            pen.rrect(5.5, 2.5, 14.5, 17.5, 4.5);
+            pen.line(&[(10.0, 5.0), (10.0, 8.0)]);
+        }
+        Icon::Back => {
+            pen.line(&[(16.0, 10.0), (4.0, 10.0)]);
+            pen.line(&[(8.5, 5.5), (4.0, 10.0), (8.5, 14.5)]);
+        }
+        Icon::Record => {
+            p.circle_filled(pen.pt(10.0, 10.0), 5.0 * k, color);
+        }
+        Icon::Stop => {
+            p.rect_filled(Rect::from_min_max(pen.pt(5.5, 5.5), pen.pt(14.5, 14.5)), 1.5 * k, color);
+        }
+        Icon::Play => pen.fill(&[(6.5, 4.0), (6.5, 16.0), (16.0, 10.0)]),
+        Icon::Pause => {
+            p.rect_filled(Rect::from_min_max(pen.pt(5.5, 4.0), pen.pt(8.5, 16.0)), k, color);
+            p.rect_filled(Rect::from_min_max(pen.pt(11.5, 4.0), pen.pt(14.5, 16.0)), k, color);
+        }
+        Icon::SkipBack => {
+            pen.line(&[(4.5, 4.0), (4.5, 16.0)]);
+            pen.closed(&[(15.5, 4.0), (15.5, 16.0), (7.5, 10.0)]);
+        }
+        Icon::SkipForward => {
+            pen.line(&[(15.5, 4.0), (15.5, 16.0)]);
+            pen.closed(&[(4.5, 4.0), (4.5, 16.0), (12.5, 10.0)]);
+        }
+        Icon::Plus => {
+            pen.line(&[(10.0, 4.0), (10.0, 16.0)]);
+            pen.line(&[(4.0, 10.0), (16.0, 10.0)]);
+        }
+    }
+}
+
+/// Lays out `icon` followed by `text` (either may be empty) centred in `rect`.
+pub fn paint_with_text(p: &Painter, rect: Rect, icon: Option<Icon>, size: f32, text: &str, font: egui::FontId, color: Color32) {
+    let galley = p.layout_no_wrap(text.to_owned(), font, color);
+    let gap = if icon.is_some() && !text.is_empty() { 7.0 } else { 0.0 };
+    let icon_w = if icon.is_some() { size } else { 0.0 };
+    let total = icon_w + gap + galley.size().x;
+    let x = rect.center().x - total / 2.0;
+    if let Some(i) = icon {
+        paint(p, Rect::from_center_size(pos2(x + size / 2.0, rect.center().y), vec2(size, size)), i, color);
+    }
+    p.galley(pos2(x + icon_w + gap, rect.center().y - galley.size().y / 2.0), galley, color);
+}
+
+/// A button with an icon and label. `fill` None draws a frameless button.
+pub fn button(ui: &mut egui::Ui, icon: Icon, text: &str, font: egui::FontId, fg: Color32, fill: Option<Color32>, min: egui::Vec2) -> egui::Response {
+    let galley_w = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), fg).size().x;
+    let icon_size = font.size + 3.0;
+    let pad = if fill.is_some() { 14.0 } else { 4.0 };
+    let w = (icon_size + if text.is_empty() { 0.0 } else { 7.0 + galley_w } + pad * 2.0).max(min.x);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, min.y.max(font.size + 14.0)), egui::Sense::click());
+    let hovered = resp.hovered();
+    if let Some(f) = fill {
+        let f = if hovered { f.gamma_multiply(1.12) } else { f };
+        ui.painter().rect_filled(rect, 8.0, f);
+    }
+    let color = if fill.is_none() && hovered { Color32::WHITE } else { fg };
+    paint_with_text(ui.painter(), rect, Some(icon), icon_size, text, font, color);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}

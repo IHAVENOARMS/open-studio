@@ -43,9 +43,13 @@ impl AnimationSpeed {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub enum Background {
+    /// Wallpaper id from `assets/wallpapers.json`.
+    Wallpaper(String),
     /// Index into `render::background::PRESETS`.
     Gradient(usize),
     Color([f32; 3]),
+    /// Absolute path to a user-chosen image.
+    Image(String),
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +107,8 @@ pub struct EditConfig {
     pub zoom_speed: AnimationSpeed,
     pub default_zoom: f64,
     pub background: Background,
+    /// 0..1, blur applied to wallpaper and image backgrounds.
+    pub background_blur: f64,
     /// Fraction of the shorter canvas side left around the video.
     pub padding: f64,
     /// Corner radius in output pixels at 1080p.
@@ -122,7 +128,8 @@ impl Default for EditConfig {
             zoom_segments: vec![],
             zoom_speed: AnimationSpeed::Mellow,
             default_zoom: 2.0,
-            background: Background::Gradient(0),
+            background: default_background(),
+            background_blur: 0.0,
             padding: 0.08,
             radius: 12.0,
             shadow: 0.6,
@@ -133,6 +140,15 @@ impl Default for EditConfig {
             motion_blur: true,
         }
     }
+}
+
+/// First installed wallpaper, falling back to a built-in gradient.
+fn default_background() -> Background {
+    crate::wallpapers::manifest()
+        .iter()
+        .find(|w| crate::wallpapers::installed(&w.id))
+        .map(|w| Background::Wallpaper(w.id.clone()))
+        .unwrap_or(Background::Gradient(0))
 }
 
 impl EditConfig {

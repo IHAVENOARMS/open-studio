@@ -12,11 +12,8 @@ pub const TEXT_DIM: Color32 = Color32::from_rgb(0x7c, 0x7e, 0x86);
 pub const ACCENT: Color32 = Color32::from_rgb(0x49, 0x30, 0xec);
 pub const KNOB: Color32 = Color32::from_rgb(0x9e, 0x91, 0xf3);
 pub const TRACK: Color32 = Color32::from_rgb(0x2b, 0x2d, 0x32);
-pub const ZOOM_A: Color32 = Color32::from_rgb(0x46, 0x2e, 0xe7);
 pub const ZOOM_B: Color32 = Color32::from_rgb(0x71, 0x5e, 0xee);
 pub const ZOOM: Color32 = ZOOM_B;
-pub const CLIP_A: Color32 = Color32::from_rgb(0xb8, 0x85, 0x30);
-pub const CLIP_B: Color32 = Color32::from_rgb(0xc9, 0x96, 0x42);
 pub const PLAYHEAD: Color32 = Color32::from_rgb(0x5b, 0x45, 0xf0);
 pub const RECORD: Color32 = Color32::from_rgb(0xff, 0x3b, 0x30);
 

@@ -9,12 +9,13 @@ struct Scene {
     bg1: vec4f,
     bg2: vec4f,
     bg3: vec4f,
-    params: vec4f,       // video lod, bg kind, unused, unused
+    params: vec4f,       // video lod, bg kind (0 colour, 1 gradient, 2 image), bicubic flag, bg lod
 };
 
 @group(0) @binding(0) var<uniform> u: Scene;
 @group(0) @binding(1) var video: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var bg_image: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4f,
@@ -44,6 +45,17 @@ fn background(q: vec2f) -> vec3f {
     if (kind < 0.5) {
         return u.bg0.rgb;
     }
+    if (kind > 1.5) {
+        // Image, scaled to cover the canvas.
+        var t = vec2f(q.x / u.aspect, q.y);
+        let ia = u.bg0.x;
+        if (ia > u.aspect) {
+            t.x = 0.5 + (t.x - 0.5) * u.aspect / ia;
+        } else {
+            t.y = 0.5 + (t.y - 0.5) * ia / u.aspect;
+        }
+        return textureSampleLevel(bg_image, samp, t, u.params.w).rgb;
+    }
     // Soft four-corner mesh gradient with a gentle warp, like a macOS wallpaper.
     var t = vec2f(q.x / u.aspect, q.y);
     t += 0.08 * vec2f(sin(t.y * 3.1 + 1.3), cos(t.x * 2.7 + 0.4));
@@ -52,6 +64,34 @@ fn background(q: vec2f) -> vec3f {
     let top = mix(u.bg0.rgb, u.bg1.rgb, s.x);
     let bottom = mix(u.bg2.rgb, u.bg3.rgb, s.x);
     return mix(top, bottom, s.y);
+}
+
+// Catmull-Rom bicubic filter in 9 bilinear taps. Used when the video is
+// magnified (zoomed in), where plain bilinear looks soft and blocky.
+fn sample_bicubic(uv: vec2f) -> vec3f {
+    let size = vec2f(textureDimensions(video));
+    let pos = uv * size;
+    let t1 = floor(pos - 0.5) + 0.5;
+    let f = pos - t1;
+    let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    let w3 = f * f * (-0.5 + 0.5 * f);
+    let w12 = w1 + w2;
+    let p0 = (t1 - 1.0) / size;
+    let p3 = (t1 + 2.0) / size;
+    let p12 = (t1 + w2 / w12) / size;
+    var c = vec3f(0.0);
+    c += textureSampleLevel(video, samp, vec2f(p0.x, p0.y), 0.0).rgb * w0.x * w0.y;
+    c += textureSampleLevel(video, samp, vec2f(p12.x, p0.y), 0.0).rgb * w12.x * w0.y;
+    c += textureSampleLevel(video, samp, vec2f(p3.x, p0.y), 0.0).rgb * w3.x * w0.y;
+    c += textureSampleLevel(video, samp, vec2f(p0.x, p12.y), 0.0).rgb * w0.x * w12.y;
+    c += textureSampleLevel(video, samp, vec2f(p12.x, p12.y), 0.0).rgb * w12.x * w12.y;
+    c += textureSampleLevel(video, samp, vec2f(p3.x, p12.y), 0.0).rgb * w3.x * w12.y;
+    c += textureSampleLevel(video, samp, vec2f(p0.x, p3.y), 0.0).rgb * w0.x * w3.y;
+    c += textureSampleLevel(video, samp, vec2f(p12.x, p3.y), 0.0).rgb * w12.x * w3.y;
+    c += textureSampleLevel(video, samp, vec2f(p3.x, p3.y), 0.0).rgb * w3.x * w3.y;
+    return max(c, vec3f(0.0));
 }
 
 // Scene colour at canvas point q; `px` is the size of one output pixel in canvas units.
@@ -73,7 +113,12 @@ fn scene(q: vec2f, px: f32) -> vec3f {
     let cover = clamp(0.5 - d / px, 0.0, 1.0);
     if (cover > 0.0) {
         let uv = (q - u.content.xy) / u.content.zw;
-        let v = textureSampleLevel(video, samp, uv, u.params.x).rgb;
+        var v: vec3f;
+        if (u.params.z > 0.5) {
+            v = sample_bicubic(uv);
+        } else {
+            v = textureSampleLevel(video, samp, uv, u.params.x).rgb;
+        }
         col = mix(col, v, cover);
     }
     return col;

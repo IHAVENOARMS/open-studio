@@ -7,8 +7,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// Preview frames are decoded at most this wide.
-pub const PREVIEW_MAX_WIDTH: u32 = 2560;
+/// Preview frames are decoded at most this wide. Full resolution up to 4K so
+/// zoomed-in previews stay sharp.
+pub const PREVIEW_MAX_WIDTH: u32 = 3840;
 
 pub struct Frame {
     pub index: i64,
