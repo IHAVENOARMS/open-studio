@@ -115,6 +115,8 @@ pub struct Client {
     pub mapped: bool,
     #[serde(rename = "focusHistoryID", default)]
     pub focus_history: i64,
+    #[serde(default)]
+    pub pid: i64,
 }
 
 #[derive(Deserialize, Clone, Debug)]

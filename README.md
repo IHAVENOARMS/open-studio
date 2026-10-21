@@ -51,6 +51,8 @@ GIF export are not built yet.
 - PipeWire, GStreamer (`gst-plugins-base`, `gst-plugins-good`, `gst-plugin-pipewire`)
 - ffmpeg with libx264
 - Vulkan-capable GPU
+- Optional: `whisper` (openai-whisper) for captions and transcript editing;
+  `scrcpy` and `adb` to record an Android phone or tablet (Device button)
 
 ## Usage
 
@@ -61,6 +63,7 @@ open-studio record [--reuse] [--duration 10]   # headless recording
 open-studio stop                        # stop from a keybinding
 open-studio edit "~/Videos/Open Studio/Recording …"
 open-studio export <project> --height 1080 --fps 60
+open-studio transcribe <project> [--model small] [--srt out.srt]
 open-studio wallpapers [--list]         # download the wallpaper collection
 ```
 
@@ -75,6 +78,17 @@ open-studio wallpapers [--list]         # download the wallpaper collection
 - Cursor: smoothing, size, click animation, hide when idle, detected cursor
   shapes, and cursor themes (built-in vector set, installed XCursor themes,
   or imported archives/folders).
+- Background inset and directional shadow; cursor loop, stop at end, shake
+  removal and tilt; circle and ripple click effects and click sounds.
+- Audio: microphone modes (noise reduction, podcast, loud), per-source mutes,
+  looped background music.
+- Keyboard shortcuts drawn as keycaps in the video.
+- Captions from a local Whisper transcript (size, font, colour, position,
+  line or word display, animation) and SRT export.
+- Edit by transcript: cut words out of the video, remove filler words,
+  tighten long pauses, restore anything cut.
+- Device recording: an Android phone mirrored with scrcpy, recorded with taps
+  shown as circles.
 - Export: MP4 or GIF, 24–60 fps, 720p to 4K, four quality profiles, to a
   file (save dialog, remembered folder) or the clipboard.
 

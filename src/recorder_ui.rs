@@ -59,6 +59,7 @@ enum Mode {
     Display,
     Window,
     Area,
+    Device,
 }
 
 #[derive(Clone, Debug)]
@@ -112,6 +113,13 @@ struct Shared {
     /// Open input dropdown (1 microphone, 2 system audio).
     menu: Option<usize>,
     audio_devices: Vec<crate::record::audio::Device>,
+    /// scrcpy is available, so the Device button works.
+    scrcpy: bool,
+    phones: Vec<record::device::Device>,
+    /// Mirror window of the chosen phone, and its Hyprland window once mapped.
+    mirror: Option<record::device::Mirror>,
+    mirror_window: Option<hyprland::Client>,
+    mirror_checked: Option<Instant>,
     // Recording widget state.
     elapsed: f64,
     paused: bool,
@@ -239,6 +247,11 @@ pub fn run() -> Result<Outcome> {
             cancel: false,
             open_projects: false,
             menu: None,
+            scrcpy: record::device::scrcpy().is_some(),
+            phones: vec![],
+            mirror: None,
+            mirror_window: None,
+            mirror_checked: None,
             audio_devices: crate::record::audio::list_devices(),
             elapsed: 0.0,
             paused: false,
@@ -807,6 +820,7 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
             }
         }
         Mode::Area => area_ui(ui, sh, mon, over_bar),
+        Mode::Device => device_ui(ui, sh, mon, is_bar),
     }
 
     if is_bar {
@@ -815,6 +829,54 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
     if pointer.is_some() {
         ui.ctx().request_repaint();
     }
+}
+
+/// Device mode: the phone's mirror window is highlighted like a window,
+/// with a card to start recording it.
+fn device_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor, is_bar: bool) {
+    let origin = vec2(mon.rect[0] as f32, mon.rect[1] as f32);
+    if sh.mirror.as_mut().is_some_and(|m| !m.running()) {
+        sh.mirror = None;
+        sh.mirror_window = None;
+    }
+    if sh.mirror.is_some() && sh.mirror_checked.is_none_or(|t| t.elapsed().as_millis() > 300) {
+        sh.mirror_window = sh.mirror.as_ref().and_then(|m| m.window());
+        sh.mirror_checked = Some(Instant::now());
+    }
+    let p = ui.painter().clone();
+    let screen = ui.max_rect();
+    let Some(m) = &sh.mirror else {
+        if is_bar {
+            let c = screen.center();
+            p.text(c, Align2::CENTER_CENTER, "Choose a device from the Device menu", theme::semibold(26.0), Color32::WHITE);
+        }
+        return;
+    };
+    let Some(w) = sh.mirror_window.clone() else {
+        if is_bar {
+            p.text(screen.center(), Align2::CENTER_CENTER, format!("Connecting to {}…", m.device.model), theme::semibold(26.0), Color32::WHITE);
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    };
+    let wr = Rect::from_min_size(pos2(w.at[0] as f32, w.at[1] as f32), vec2(w.size[0] as f32, w.size[1] as f32));
+    if !mon.global().intersects(wr) {
+        return;
+    }
+    let r = wr.translate(-origin);
+    p.rect_filled(r, 10.0, TINT);
+    p.rect_stroke(r, 10.0, Stroke::new(2.0, theme::ACCENT), StrokeKind::Inside);
+    let sub = format!("Android • {}×{}", w.size[0] as i32, w.size[1] as i32);
+    // The card is wider than a phone window; keep it on screen.
+    let c = pos2(r.center().x.clamp(screen.left() + 140.0, screen.right() - 140.0), r.center().y);
+    if selection_card(ui, c, &m.device.model, &sub, 1.0) {
+        if let Ok(mut req) = record::direct_window(&w.address) {
+            req.kind = "device".into();
+            req.name = Some(m.device.model.clone());
+            sh.start = Some(req);
+        }
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
 }
 
 fn bar_rect(screen: Rect) -> Rect {
@@ -880,7 +942,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         (Some(Mode::Display), Icon::Display, "Display", true),
         (Some(Mode::Window), Icon::Window, "Window", true),
         (Some(Mode::Area), Icon::Resolution, "Area", true),
-        (None, Icon::Phone, "Device", false),
+        (Some(Mode::Device), Icon::Phone, "Device", sh.scrcpy),
     ] {
         let tile = Rect::from_min_size(pos2(x, bar.top() + 9.0), vec2(70.0, BAR_H - 18.0));
         let resp = ui.interact(tile, ui.scope_id().with(("mode", label)), Sense::click());
@@ -893,7 +955,23 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         let col = if !enabled { BAR_DIM.gamma_multiply(0.6) } else if selected { BAR_TEXT } else { Color32::from_rgb(0xc9, 0xc4, 0xd4) };
         icons::paint(&p, Rect::from_center_size(pos2(tile.center().x, tile.top() + 21.0), vec2(26.0, 26.0)), icon, col);
         p.text(pos2(tile.center().x, tile.bottom() - 12.0), Align2::CENTER_CENTER, label, FontId::proportional(12.5), col);
-        let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text("Recording iPhone or iPad screens isn't available on Linux") };
+        let resp = if enabled {
+            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+        } else {
+            resp.on_hover_text("scrcpy needs to be installed to record an Android phone or tablet")
+        };
+        if mode == Some(Mode::Device) {
+            if enabled && resp.clicked() {
+                sh.phones = record::device::list();
+                sh.menu = if sh.menu == Some(3) { None } else { Some(3) };
+                sh.gear_open = false;
+            }
+            if sh.menu == Some(3) {
+                input_menu(ui, sh, 3, tile);
+            }
+            x += 74.0;
+            continue;
+        }
         if resp.clicked() {
             if let Some(m) = mode {
                 sh.mode = m;
@@ -984,13 +1062,21 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
                 items.push((Some(d.name.clone()), d.description.clone()));
             }
         }
+        3 => {
+            for d in &sh.phones {
+                items.push((Some(d.serial.clone()), d.model.clone()));
+            }
+            if items.is_empty() {
+                items.push((None, "No device found. Connect a phone with USB debugging on.".into()));
+            }
+        }
         _ => {
             items.push((None, "No system audio".into()));
             items.push((Some("on".into()), "Record system audio".into()));
         }
     }
     let row = 34.0;
-    let w = 300.0f32;
+    let w = if which == 3 { 380.0f32 } else { 300.0 };
     let h = items.len() as f32 * row + 16.0;
     let r = Rect::from_min_size(pos2(anchor.left(), anchor.top() - 14.0 - h), vec2(w, h));
     let p = ui.painter().clone();
@@ -999,6 +1085,7 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
     p.rect_stroke(r, 12.0, Stroke::new(1.0, BAR_BORDER), StrokeKind::Inside);
     let current = match which {
         1 => sh.settings.microphone.clone(),
+        3 => sh.mirror.as_ref().map(|m| m.device.serial.clone()),
         _ => sh.settings.system_audio.then(|| "on".to_string()),
     };
     let mut chosen = None;
@@ -1012,7 +1099,8 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
         if selected {
             p.circle_filled(pos2(ir.left() + 14.0, ir.center().y), 4.0, theme::KNOB);
         }
-        let text = if label.chars().count() > 34 { label.chars().take(33).collect::<String>() + "…" } else { label.clone() };
+        let max = if which == 3 { 60 } else { 34 };
+        let text = if label.chars().count() > max { label.chars().take(max - 1).collect::<String>() + "…" } else { label.clone() };
         p.text(pos2(ir.left() + 28.0, ir.center().y), Align2::LEFT_CENTER, text, FontId::proportional(14.0), BAR_TEXT);
         if resp.clicked() {
             chosen = Some(value.clone());
@@ -1020,6 +1108,26 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
     }
     if let Some(v) = chosen {
         match which {
+            3 => {
+                let Some(serial) = v else {
+                    sh.menu = None;
+                    return;
+                };
+                let device = sh.phones.iter().find(|d| d.serial == serial).cloned();
+                if let Some(d) = device {
+                    if sh.mirror.as_ref().map(|m| &m.device) != Some(&d) {
+                        sh.mirror = None;
+                        sh.mirror_window = None;
+                        match record::device::Mirror::open(&d) {
+                            Ok(m) => sh.mirror = Some(m),
+                            Err(e) => eprintln!("open-studio: {e:#}"),
+                        }
+                    }
+                    sh.mode = Mode::Device;
+                }
+                sh.menu = None;
+                return;
+            }
             1 => sh.settings.microphone = v,
             _ => sh.settings.system_audio = v.is_some(),
         }
@@ -1560,6 +1668,11 @@ mod tests {
             cancel: false,
             open_projects: false,
             menu: None,
+            scrcpy: false,
+            phones: vec![],
+            mirror: None,
+            mirror_window: None,
+            mirror_checked: None,
             audio_devices: vec![],
             elapsed: 3.0,
             paused: false,
@@ -1630,10 +1743,16 @@ mod tests {
         assert_eq!(sh.mode, Mode::Area);
         h.click(&mut sh, tile(0));
         assert_eq!(sh.mode, Mode::Display);
-        // Device is disabled.
+        // Device is disabled without scrcpy.
         h.click(&mut sh, tile(3));
         assert_eq!(sh.mode, Mode::Display);
-        assert!(sh.start.is_none() && !sh.cancel);
+        assert!(sh.start.is_none() && !sh.cancel && sh.menu.is_none());
+        // With scrcpy it opens the device menu (empty list here).
+        sh.scrcpy = true;
+        sh.phones = vec![];
+        h.click(&mut sh, tile(3));
+        assert_eq!(sh.menu, Some(3));
+        assert_eq!(sh.mode, Mode::Display);
     }
 
     #[test]

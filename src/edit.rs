@@ -566,6 +566,13 @@ impl EditConfig {
         }
         let mut cfg = Self::default();
         cfg.zoom_segments = crate::engine::auto_zoom_segments(rec, cfg.default_zoom);
+        if rec.source.kind == "device" {
+            // Phone recordings: taps as circles instead of a desktop arrow,
+            // and rounder corners like a phone screen.
+            cfg.cursor.hidden = true;
+            cfg.cursor.click_visual = ClickVisual::Circle;
+            cfg.radius = 48.0;
+        }
         cfg
     }
 

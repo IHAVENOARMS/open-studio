@@ -490,7 +490,8 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
             CursorState { x, y, scale: edit.cursor.size * click_squish(rec, edit, t), opacity: idle_opacity(rec, edit, t), shape, rotation }
         })
     };
-    let click = cursor.as_ref().and_then(|_| click_fx(rec, edit, tracks, t));
+    // Click effects also show with a hidden cursor (taps on phone recordings).
+    let click = if rec.cursor_embedded || rec.events.moves.is_empty() { None } else { click_fx(rec, edit, tracks, t) };
     let caption = caption_frame(rec, edit, tracks, t);
     FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t), click, keys: key_overlay(edit, tracks, t), caption }
 }

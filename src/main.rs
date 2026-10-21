@@ -101,6 +101,9 @@ enum Cmd {
     /// Exercise pause/resume, restart and delete on a direct capture (development aid).
     #[command(hide = true)]
     DebugActions { display: String, dir: PathBuf },
+    /// Mirror the first Android device, record its window briefly, report (development aid).
+    #[command(hide = true)]
+    DebugDevice,
     /// Open a project in the editor.
     Edit { project: PathBuf },
     /// Transcribe a project's microphone track with Whisper (for captions).
@@ -180,6 +183,32 @@ fn main() -> Result<()> {
             recorder_ui::Outcome::Cancelled => std::process::exit(2),
             recorder_ui::Outcome::OpenProjects => std::process::exit(3),
         },
+        Some(Cmd::DebugDevice) => {
+            let devices = record::device::list();
+            println!("scrcpy: {:?}\ndevices: {devices:?}", record::device::scrcpy());
+            let d = devices.first().ok_or_else(|| anyhow::anyhow!("no device"))?;
+            let mirror = record::device::Mirror::open(d)?;
+            let mut win = None;
+            for _ in 0..100 {
+                win = mirror.window();
+                if win.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let w = win.ok_or_else(|| anyhow::anyhow!("mirror window never appeared"))?;
+            let floating = hyprland_floating(&w.address);
+            println!("window {} {:?} {:?} floating={floating}", w.class, w.at, w.size);
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let mut req = record::direct_window(&w.address)?;
+            req.kind = "device".into();
+            let r = record::Recorder::start(record::RecordOptions { direct: Some(req), ..Default::default() })?;
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            let dir = r.stop()?;
+            let rec = project::Recording::load(&dir)?;
+            println!("recorded {}x{} {:.2}s kind={}", rec.width, rec.height, rec.duration, rec.source.kind);
+            std::fs::remove_dir_all(&dir)?;
+        }
         Some(Cmd::Transcribe { project, model, language, srt }) => {
             let rec = project::Recording::load(&project)?;
             let t = transcript::generate(&rec, &model, &language, "", &Default::default())?;
@@ -433,4 +462,12 @@ fn start() -> Result<()> {
         anyhow::bail!("relaunching failed: {err}");
     }
     Ok(())
+}
+
+fn hyprland_floating(address: &str) -> bool {
+    record::hyprland::request("j/clients")
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.as_array()?.iter().find(|c| c["address"] == address)?.get("floating")?.as_bool())
+        .unwrap_or(false)
 }

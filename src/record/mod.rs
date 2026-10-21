@@ -6,6 +6,7 @@ pub mod capture;
 pub mod clock;
 pub mod direct;
 pub mod cursor_shape;
+pub mod device;
 pub mod hyprland;
 pub mod input;
 pub mod portal;
