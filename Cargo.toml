@@ -1,0 +1,24 @@
+[package]
+name = "open-studio"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+ashpd = { version = "0.13", features = ["screencast"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
+directories = "6.0.0"
+eframe = { version = "0.37.0", features = ["wgpu"] }
+egui = "0.37"
+egui-wgpu = "0.37.0"
+evdev = "0.13.2"
+gstreamer = "0.25.4"
+gstreamer-app = "0.25.2"
+gstreamer-video = "0.25.4"
+ksni = { version = "0.3.7", features = ["blocking"] }
+libc = "0.2.191"
+pollster = "1.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "sync"] }

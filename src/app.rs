@@ -1,0 +1,300 @@
+//! Top-level window: home screen, recording state and the editor.
+
+use crate::control::ControlServer;
+use crate::editor::{Action, Editor};
+use crate::project::Recording;
+use crate::record::{RecordOptions, Recorder, hyprland};
+use crate::theme;
+use crate::util::{format_time, recordings_dir};
+use egui::{Color32, CornerRadius, RichText, Sense, vec2};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+enum RecPhase {
+    Selecting,
+    Recording { since: Instant },
+    Saving,
+}
+
+struct RecordingSession {
+    phase: Arc<Mutex<RecPhase>>,
+    stop: Arc<AtomicBool>,
+    done: Receiver<Result<PathBuf, String>>,
+}
+
+enum Mode {
+    Home,
+    Recording(RecordingSession),
+    Editor(Box<Editor>),
+}
+
+struct ProjectEntry {
+    dir: PathBuf,
+    name: String,
+    duration: f64,
+    modified: std::time::SystemTime,
+}
+
+pub struct App {
+    mode: Mode,
+    projects: Vec<ProjectEntry>,
+    options: RecordOptions,
+    hide_while_recording: bool,
+    error: Option<String>,
+    control: Option<Arc<ControlServer>>,
+}
+
+fn scan_projects() -> Vec<ProjectEntry> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(recordings_dir()) else { return out };
+    for e in entries.flatten() {
+        let dir = e.path();
+        let Ok(rec) = Recording::load(&dir) else { continue };
+        let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        let name = crate::project::ProjectPaths::new(&dir).name();
+        out.push(ProjectEntry { dir, name, duration: rec.duration, modified });
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    out
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext, open: Option<PathBuf>) -> Self {
+        theme::apply(&cc.egui_ctx);
+        let mut app = Self {
+            mode: Mode::Home,
+            projects: scan_projects(),
+            options: RecordOptions::default(),
+            hide_while_recording: hyprland::available(),
+            error: None,
+            control: ControlServer::start().ok().map(Arc::new),
+        };
+        if let (Some(dir), Some(rs)) = (open, cc.wgpu_render_state.as_ref()) {
+            app.open_editor(dir, &cc.egui_ctx, rs);
+        }
+        app
+    }
+
+    fn open_editor(&mut self, dir: PathBuf, ctx: &egui::Context, rs: &egui_wgpu::RenderState) {
+        match Editor::open(dir, ctx, rs) {
+            Ok(ed) => self.mode = Mode::Editor(Box::new(ed)),
+            Err(e) => self.error = Some(format!("Couldn't open project: {e:#}")),
+        }
+    }
+
+    fn start_recording(&mut self, ctx: &egui::Context) {
+        let phase = Arc::new(Mutex::new(RecPhase::Selecting));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, done) = channel();
+        let (ph, st, opts, hide, ctx2) = (phase.clone(), stop.clone(), self.options.clone(), self.hide_while_recording, ctx.clone());
+        let control = self.control.clone();
+        if let Some(c) = &control {
+            c.take_stop();
+        }
+        std::thread::spawn(move || {
+            let res = supervise(opts, hide, ph, st, control, &ctx2);
+            let _ = tx.send(res.map_err(|e| format!("{e:#}")));
+            ctx2.request_repaint();
+        });
+        self.mode = Mode::Recording(RecordingSession { phase, stop, done });
+    }
+
+    fn home(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
+        let ctx = ui.ctx().clone();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(32)))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(560.0);
+                    ui.add_space(20.0);
+                    ui.label(RichText::new("Open Studio").font(theme::semibold(28.0)));
+                    ui.label(RichText::new("Beautiful screen recordings with automatic zoom").color(theme::TEXT_DIM).size(14.0));
+                    ui.add_space(24.0);
+                    let rec_btn = egui::Button::new(RichText::new("  ●   Start recording  ").font(theme::semibold(15.0)).color(Color32::WHITE))
+                        .fill(theme::ACCENT)
+                        .corner_radius(CornerRadius::same(10))
+                        .min_size(vec2(260.0, 46.0));
+                    if ui.add(rec_btn).clicked() {
+                        self.start_recording(&ctx);
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space((ui.available_width() - 470.0).max(0.0) / 2.0);
+                        ui.checkbox(&mut self.options.reuse_selection, "Reuse last screen");
+                        ui.checkbox(&mut self.options.show_system_cursor, "Bake in system cursor");
+                        if hyprland::available() {
+                            ui.checkbox(&mut self.hide_while_recording, "Hide this window");
+                        }
+                    });
+                    ui.label(
+                        RichText::new("Stop from the tray icon, or bind `open-studio stop` to a key.")
+                            .color(theme::TEXT_DIM)
+                            .size(12.0),
+                    );
+                    if let Some(e) = &self.error {
+                        ui.add_space(8.0);
+                        ui.colored_label(theme::RECORD, e);
+                    }
+                    ui.add_space(28.0);
+                });
+                ui.label(RichText::new("Recent projects").font(theme::semibold(14.0)));
+                ui.add_space(6.0);
+                let mut open = None;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if self.projects.is_empty() {
+                        ui.label(RichText::new("No recordings yet.").color(theme::TEXT_DIM));
+                    }
+                    for p in &self.projects {
+                        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+                        let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::PANEL };
+                        ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+                        ui.painter().text(rect.left_center() + vec2(16.0, 0.0), egui::Align2::LEFT_CENTER, &p.name, egui::FontId::proportional(14.0), theme::TEXT);
+                        ui.painter().text(rect.right_center() - vec2(16.0, 0.0), egui::Align2::RIGHT_CENTER, format_time(p.duration), egui::FontId::proportional(13.0), theme::TEXT_DIM);
+                        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            open = Some(p.dir.clone());
+                        }
+                    }
+                });
+                if let Some(dir) = open {
+                    self.open_editor(dir, &ctx, rs);
+                }
+            });
+    }
+
+    fn recording(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
+        let ctx = ui.ctx().clone();
+        let Mode::Recording(session) = &self.mode else { return };
+        if let Ok(res) = session.done.try_recv() {
+            self.projects = scan_projects();
+            match res {
+                Ok(dir) => self.open_editor(dir, &ctx, rs),
+                Err(e) => {
+                    self.error = Some(e);
+                    self.mode = Mode::Home;
+                }
+            }
+            return;
+        }
+        let (text, timer) = match &*session.phase.lock().unwrap() {
+            RecPhase::Selecting => ("Choose what to record…".to_string(), None),
+            RecPhase::Recording { since } => ("Recording".to_string(), Some(since.elapsed().as_secs_f64())),
+            RecPhase::Saving => ("Saving…".to_string(), None),
+        };
+        let stop = session.stop.clone();
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.3);
+                ui.horizontal(|ui| {
+                    ui.add_space((ui.available_width() - 160.0).max(0.0) / 2.0);
+                    if timer.is_some() {
+                        let (r, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                        ui.painter().circle_filled(r.center(), 6.0, theme::RECORD);
+                    }
+                    ui.label(RichText::new(&text).font(theme::semibold(18.0)));
+                });
+                if let Some(t) = timer {
+                    ui.label(RichText::new(format_time(t)).size(34.0));
+                    ui.add_space(12.0);
+                    let b = egui::Button::new(RichText::new("  ■  Stop recording  ").font(theme::semibold(14.0)).color(Color32::WHITE))
+                        .fill(theme::RECORD)
+                        .corner_radius(CornerRadius::same(10))
+                        .min_size(vec2(220.0, 42.0));
+                    if ui.add(b).clicked() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                } else {
+                    ui.add(egui::Spinner::new().size(28.0));
+                }
+            });
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Runs a whole recording on a worker thread: portal selection, capture,
+/// waiting for a stop request (UI button, tray, or `open-studio stop`) and
+/// writing the project.
+fn supervise(
+    opts: RecordOptions,
+    hide: bool,
+    phase: Arc<Mutex<RecPhase>>,
+    stop: Arc<AtomicBool>,
+    control: Option<Arc<ControlServer>>,
+    ctx: &egui::Context,
+) -> anyhow::Result<PathBuf> {
+    let recorder = Recorder::start(opts)?;
+    *phase.lock().unwrap() = RecPhase::Recording { since: Instant::now() };
+    ctx.request_repaint();
+    let tray = control.as_ref().and_then(|c| c.tray());
+    let pid = std::process::id();
+    if hide {
+        let _ = hyprland::request(&format!("dispatch movetoworkspacesilent special:open-studio,pid:{pid}"));
+    }
+    let mut failure = None;
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Some(e) = recorder.error() {
+            failure = Some(e);
+            break;
+        }
+        if stop.load(Ordering::Relaxed) || control.as_ref().is_some_and(|c| c.take_stop()) {
+            break;
+        }
+    }
+    drop(tray);
+    *phase.lock().unwrap() = RecPhase::Saving;
+    if hide {
+        if let Ok(ws) = hyprland::active_workspace() {
+            let _ = hyprland::request(&format!("dispatch movetoworkspace {ws},pid:{pid}"));
+        }
+    }
+    ctx.request_repaint();
+    let dir = recorder.stop();
+    if let Some(e) = failure {
+        anyhow::bail!("recording failed: {e}");
+    }
+    dir
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let Some(rs) = frame.wgpu_render_state().cloned() else {
+            ui.label("Open Studio needs the wgpu renderer.");
+            return;
+        };
+        match &mut self.mode {
+            Mode::Home => self.home(ui, &rs),
+            Mode::Recording(_) => self.recording(ui, &rs),
+            Mode::Editor(ed) => {
+                if let Action::GoHome = ed.ui(ui, &rs) {
+                    ed.save();
+                    self.projects = scan_projects();
+                    self.mode = Mode::Home;
+                }
+            }
+        }
+    }
+
+    fn on_exit(&mut self) {
+        if let Mode::Editor(ed) = &mut self.mode {
+            ed.save();
+        }
+    }
+}
+
+pub fn run(open: Option<PathBuf>) -> anyhow::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Open Studio")
+            .with_app_id("open-studio")
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([960.0, 640.0]),
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
+    eframe::run_native("Open Studio", options, Box::new(move |cc| Ok(Box::new(App::new(cc, open)))))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
