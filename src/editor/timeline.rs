@@ -601,24 +601,40 @@ const WAVE: Color32 = Color32::from_rgb(0x9a, 0x6c, 0x22);
 
 fn paint_waveform(p: &egui::Painter, clip: Rect, geo: &Geo, env: &[f32], t0: f64, t1: f64) {
     let rate = super::audio::ENVELOPE_RATE;
-    let inner = clip.shrink2(vec2(4.0, 3.0));
+    // Sits on the bar's bottom border, inset from the rounded ends.
+    let inner = Rect::from_min_max(pos2(clip.left() + 4.0, clip.top() + 3.0), pos2(clip.right() - 4.0, clip.bottom() - 1.0));
     let max_h = inner.height() * 0.78;
-    let cols = inner.width().max(1.0) as usize;
+    // Half-point columns for a finer outline on HiDPI screens.
+    let step = 0.5f32;
+    let cols = (inner.width() / step).max(1.0) as usize;
+    let span = geo.duration / geo.width as f64 * step as f64;
+    let sample = |t: f64| -> f32 {
+        if span > 1.0 / rate {
+            // Zoomed out: peak over the time this column covers.
+            let (a, b) = (((t - span / 2.0) * rate).max(0.0) as usize, ((t + span / 2.0) * rate).ceil() as usize);
+            env.get(a.min(env.len())..b.min(env.len()).max(a.min(env.len()))).map(|s| s.iter().cloned().fold(0f32, f32::max)).unwrap_or(0.0)
+        } else {
+            // Zoomed in: interpolate between envelope points.
+            let f = (t * rate).max(0.0);
+            let i = f.floor() as usize;
+            let (a, b) = (env.get(i).copied().unwrap_or(0.0), env.get(i + 1).copied().unwrap_or(0.0));
+            a + (b - a) * (f - f.floor()) as f32
+        }
+    };
+    let raw: Vec<f32> = (0..=cols).map(|c| sample(geo.t(inner.left() + c as f32 * step).clamp(t0, t1))).collect();
+    // Gaussian blur across columns so the outline is rounded, not stepped.
+    const K: [f32; 9] = [0.03, 0.06, 0.12, 0.18, 0.22, 0.18, 0.12, 0.06, 0.03];
+    let vals: Vec<f32> = (0..raw.len())
+        .map(|i| {
+            K.iter().enumerate().map(|(k, w)| raw[(i as isize + k as isize - 4).clamp(0, raw.len() as isize - 1) as usize] * w).sum()
+        })
+        .collect();
     let mut mesh = egui::Mesh::default();
-    let mut prev: Option<f32> = None;
-    for c in 0..=cols {
-        let x = inner.left() + c as f32;
-        let t = geo.t(x).clamp(t0, t1);
-        // Peak over the time span one pixel covers, lightly smoothed.
-        let span = (geo.duration / geo.width as f64).max(1.0 / rate);
-        let (a, b) = (((t - span) * rate).max(0.0) as usize, ((t + span) * rate) as usize);
-        let v = env.get(a.min(env.len())..b.min(env.len())).map(|s| s.iter().cloned().fold(0f32, f32::max)).unwrap_or(0.0);
-        let v = match prev {
-            Some(pv) => pv * 0.35 + v * 0.65,
-            None => v,
-        };
-        prev = Some(v);
+    let mut outline = Vec::with_capacity(vals.len());
+    for (c, v) in vals.iter().enumerate() {
+        let x = inner.left() + c as f32 * step;
         let top = inner.bottom() - v * max_h;
+        outline.push(pos2(x, top));
         let i = mesh.vertices.len() as u32;
         mesh.colored_vertex(pos2(x, top), WAVE);
         mesh.colored_vertex(pos2(x, inner.bottom()), WAVE);
@@ -628,4 +644,6 @@ fn paint_waveform(p: &egui::Painter, clip: Rect, geo: &Geo, env: &[f32], t0: f64
         }
     }
     p.add(mesh);
+    // Anti-aliased edge along the top of the fill.
+    p.add(egui::Shape::line(outline, Stroke::new(1.0, WAVE)));
 }
