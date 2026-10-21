@@ -1,5 +1,6 @@
 //! The editor window: preview canvas, settings sidebar and timeline.
 
+mod audio;
 mod cursors;
 mod curve;
 mod mask_overlay;
@@ -71,6 +72,9 @@ pub struct Editor {
     saved: EditConfig,
     changed_at: Option<Instant>,
     player: Player,
+    audio: audio::AudioPreview,
+    /// Waveform envelope for the clip track (computed in the background).
+    waveform: Arc<Mutex<Option<Vec<f32>>>>,
     comp: Compositor,
     target: Option<PreviewTarget>,
     shown_index: i64,
@@ -101,6 +105,8 @@ impl Editor {
             changed_at: None,
             edit,
             player,
+            audio: audio::AudioPreview::new(&rec),
+            waveform: audio::envelope_async(&rec, ctx.clone()),
             comp: Compositor::new(rs.device.clone(), rs.queue.clone()),
             target: None,
             shown_index: -1,
@@ -124,9 +130,11 @@ impl Editor {
             let now = Instant::now();
             self.playing = Some((self.time, now));
             self.player.play(self.time, now);
+            self.audio.play(self.time);
         } else {
             self.playing = None;
             self.player.pause();
+            self.audio.pause();
             self.player.seek(self.time);
         }
     }
@@ -137,6 +145,7 @@ impl Editor {
             let now = Instant::now();
             self.playing = Some((self.time, now));
             self.player.play(self.time, now);
+            self.audio.play(self.time);
         } else {
             self.player.seek(self.time);
         }
@@ -180,6 +189,7 @@ impl Editor {
         }
 
         self.handle_keys(&ctx);
+        self.audio.set_volumes(self.edit.audio.microphone_volume, self.edit.audio.system_volume, self.edit.audio.mute);
 
         egui::Panel::top("topbar")
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(16, 10)))
@@ -231,6 +241,7 @@ impl Editor {
                     self.time,
                     self.playing.is_some(),
                     &mut self.selected,
+                    self.waveform.lock().unwrap().as_deref(),
                 );
                 if let Some(t) = out.seek {
                     self.seek(t);

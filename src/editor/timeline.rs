@@ -181,6 +181,7 @@ pub fn show(
     time: f64,
     _playing: bool,
     selected: &mut Option<Selection>,
+    waveform: Option<&[f32]>,
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
@@ -220,6 +221,9 @@ pub fn show(
     gradient_bar(&p, full_clip, 10.0, &CLIP_STOPS, CLIP_EDGE, 0.5, CLIP_BORDER, 0.3);
     let clip_r = Rect::from_x_y_ranges(geo.x(trim_s)..=geo.x(trim_e), clip.y_range());
     gradient_bar(&p, clip_r, 10.0, &CLIP_STOPS, CLIP_EDGE, 0.5, CLIP_BORDER, 1.0);
+    if let Some(env) = waveform {
+        paint_waveform(&p, clip_r, &geo, env, trim_s, trim_e);
+    }
     // Faint second markers, as in Screen Studio.
     let mut t = 1.0;
     while t < trim_e {
@@ -589,4 +593,39 @@ fn paint_mask(p: &egui::Painter, r: Rect, m: &Mask, selected: bool) {
     } else if r.width() > 30.0 {
         icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), Icon::Mask, Color32::WHITE);
     }
+}
+
+/// Audio waveform on the clip bar: a filled shape in a darker shade of the
+/// clip colour, rising from the bottom of the bar.
+const WAVE: Color32 = Color32::from_rgb(0x9a, 0x6c, 0x22);
+
+fn paint_waveform(p: &egui::Painter, clip: Rect, geo: &Geo, env: &[f32], t0: f64, t1: f64) {
+    let rate = super::audio::ENVELOPE_RATE;
+    let inner = clip.shrink2(vec2(4.0, 3.0));
+    let max_h = inner.height() * 0.78;
+    let cols = inner.width().max(1.0) as usize;
+    let mut mesh = egui::Mesh::default();
+    let mut prev: Option<f32> = None;
+    for c in 0..=cols {
+        let x = inner.left() + c as f32;
+        let t = geo.t(x).clamp(t0, t1);
+        // Peak over the time span one pixel covers, lightly smoothed.
+        let span = (geo.duration / geo.width as f64).max(1.0 / rate);
+        let (a, b) = (((t - span) * rate).max(0.0) as usize, ((t + span) * rate) as usize);
+        let v = env.get(a.min(env.len())..b.min(env.len())).map(|s| s.iter().cloned().fold(0f32, f32::max)).unwrap_or(0.0);
+        let v = match prev {
+            Some(pv) => pv * 0.35 + v * 0.65,
+            None => v,
+        };
+        prev = Some(v);
+        let top = inner.bottom() - v * max_h;
+        let i = mesh.vertices.len() as u32;
+        mesh.colored_vertex(pos2(x, top), WAVE);
+        mesh.colored_vertex(pos2(x, inner.bottom()), WAVE);
+        if c > 0 {
+            mesh.add_triangle(i - 2, i - 1, i);
+            mesh.add_triangle(i - 1, i + 1, i);
+        }
+    }
+    p.add(mesh);
 }
