@@ -73,6 +73,7 @@ pub struct State {
     pub cursors: super::cursors::State,
     picking_music: Option<Receiver<Vec<std::path::PathBuf>>>,
     pub captions: super::captions_ui::State,
+    pub camera: super::camera_ui::State,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,7 +174,7 @@ pub fn show(
                     match tab {
                         Tab::Background => background(ui, state, edit),
                         Tab::Cursor => cursor(ui, state, edit, rec),
-                        Tab::CameraLayout | Tab::CameraStyle => super::camera_ui::show(ui, edit, rec, *tab == Tab::CameraLayout),
+                        Tab::CameraLayout | Tab::CameraStyle => super::camera_ui::show(ui, &mut state.camera, edit, rec, *tab == Tab::CameraLayout),
                         Tab::Captions => {
                             if let super::captions_ui::CaptionsAction::OpenTranscript = super::captions_ui::captions(ui, &mut state.captions, edit, rec) {
                                 *tab = Tab::Transcript;

@@ -5,6 +5,7 @@ pub mod background;
 pub mod cursor_image;
 pub mod captions;
 pub mod keycaps;
+pub mod looks;
 pub mod raster;
 
 use crate::edit::{Background, EditConfig};
@@ -60,6 +61,11 @@ struct CameraUniform {
     params: [f32; 4],
     uv: [f32; 4],
     lod: [f32; 4],
+    /// Look: [exposure, contrast, saturation, temperature], [tint, fade, split, mono].
+    grade0: [f32; 4],
+    grade1: [f32; 4],
+    /// Look strength, LUT size (0 = none), unused x2.
+    grade2: [f32; 4],
 }
 
 #[repr(C)]
@@ -114,6 +120,8 @@ pub struct Compositor {
     camera: Option<VideoTexture>,
     camera_buf: wgpu::Buffer,
     camera_bind: Option<wgpu::BindGroup>,
+    /// Camera LUT (path, view, size); a 1x1 placeholder when none.
+    lut: (Option<String>, wgpu::TextureView, u32),
     /// Background image (1x1 placeholder when unused) and what it was loaded from.
     bg_view: wgpu::TextureView,
     bg_key: Option<String>,
@@ -253,6 +261,21 @@ impl Compositor {
             &[0, 0, 0, 255],
         );
 
+        let placeholder_lut = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("lut placeholder"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[0, 0, 0, 255],
+        );
         Self {
             device,
             queue,
@@ -271,6 +294,7 @@ impl Compositor {
             camera: None,
             camera_buf,
             camera_bind: None,
+            lut: (None, placeholder_lut.create_view(&Default::default()), 0),
             bg_view: placeholder.create_view(&Default::default()),
             bg_key: None,
             bg_aspect: 1.0,
@@ -463,20 +487,74 @@ impl Compositor {
     /// Uploads a camera frame (RGBA) and rebuilds its mip chain.
     pub fn upload_camera_frame(&mut self, rgba: &[u8], w: u32, h: u32) {
         if !self.camera.as_ref().is_some_and(|v| v.size == (w, h)) {
-            let tex = self.video_texture(w, h);
-            self.camera_bind = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("camera"),
-                layout: &self.scene_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tex.view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&tex.view) },
-                ],
-            }));
-            self.camera = Some(tex);
+            self.camera = Some(self.video_texture(w, h));
+            self.rebuild_camera_bind();
         }
         self.upload_into(self.camera.as_ref().unwrap(), rgba);
+    }
+
+    fn rebuild_camera_bind(&mut self) {
+        let Some(tex) = &self.camera else { return };
+        self.camera_bind = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera"),
+            layout: &self.scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tex.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.lut.1) },
+            ],
+        }));
+    }
+
+    /// Loads the camera LUT when the setting changes. Returns its size (0 = none).
+    fn ensure_lut(&mut self, path: Option<&String>) -> u32 {
+        if self.lut.0.as_ref() == path {
+            return self.lut.2;
+        }
+        let loaded = path.and_then(|p| looks::load_cube(std::path::Path::new(p)).ok());
+        let (view, size) = match loaded {
+            Some(lut) => {
+                let n = lut.size;
+                let tex = self.device.create_texture_with_data(
+                    &self.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("camera lut"),
+                        size: wgpu::Extent3d { width: n * n, height: n, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &lut.rgba,
+                );
+                (tex.create_view(&Default::default()), n)
+            }
+            None => {
+                let tex = self.device.create_texture_with_data(
+                    &self.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("lut placeholder"),
+                        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &[0, 0, 0, 255],
+                );
+                (tex.create_view(&Default::default()), 0)
+            }
+        };
+        self.lut = (path.cloned(), view, size);
+        self.rebuild_camera_bind();
+        size
     }
 
     fn video_texture(&self, w: u32, h: u32) -> VideoTexture {
@@ -587,6 +665,7 @@ impl Compositor {
         let cam = frame.camera;
         let c = layout.content;
         let card = layout.card;
+        let lut_size = if frame.camera_view.is_some() { self.ensure_lut(edit.camera.lut.as_ref()) } else { 0 };
         let gradient = |i: usize| {
             let p = &background::PRESETS[i % background::PRESETS.len()];
             (1.0, p.corners.map(background::linear))
@@ -736,17 +815,23 @@ impl Compositor {
             // Room around the picture for its shadow.
             let m = w.max(h) * 0.12;
             let corners = [ndc(ow, oh, x - m, y - m), ndc(ow, oh, x + w + m, y - m), ndc(ow, oh, x - m, y + h + m), ndc(ow, oh, x + w + m, y + h + m)];
-            // Cover-crop the source to the picture's aspect.
-            let (tw, th) = (tex.size.0 as f64, tex.size.1 as f64);
+            // Cover-crop the kept part of the source (Camera crop, moved by
+            // face tracking) to the picture's aspect.
+            let [cx0, cy0, cw, ch] = cv.crop;
+            let (tw, th) = (tex.size.0 as f64 * cw, tex.size.1 as f64 * ch);
             let (src, dst) = (tw / th, w / h.max(1e-6));
-            let uv = if src > dst {
+            let local = if src > dst {
                 let f = dst / src;
                 [(1.0 - f) / 2.0, 0.0, (1.0 + f) / 2.0, 1.0]
             } else {
                 let f = src / dst;
                 [0.0, (1.0 - f) / 2.0, 1.0, (1.0 + f) / 2.0]
             };
-            let texels = th * (uv[3] - uv[1]) / h.max(1.0);
+            let uv = [cx0 + local[0] * cw, cy0 + local[1] * ch, cx0 + local[2] * cw, cy0 + local[3] * ch];
+            let texels = th * (local[3] - local[1]) / h.max(1.0);
+            let st = &edit.camera;
+            let [grade0, grade1] = st.look.grade().uniform();
+            let strength = if st.look == looks::Look::None && lut_size == 0 { 0.0 } else { st.look_strength as f32 };
             let u = CameraUniform {
                 a: [corners[0][0], corners[0][1], corners[1][0], corners[1][1]],
                 b: [corners[2][0], corners[2][1], corners[3][0], corners[3][1]],
@@ -754,6 +839,9 @@ impl Compositor {
                 params: [(cv.radius * k) as f32, cv.opacity as f32, cv.shadow as f32, if cv.mirror { 1.0 } else { 0.0 }],
                 uv: uv.map(|v| v as f32),
                 lod: [texels.log2().max(0.0) as f32, 0.0, 0.0, 0.0],
+                grade0,
+                grade1,
+                grade2: [strength, lut_size as f32, 0.0, 0.0],
             };
             self.queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&u));
         }

@@ -652,6 +652,10 @@ impl Editor {
                 let side_w = 404.0;
                 let side_rect = egui::Rect::from_min_max(egui::pos2(full.max.x - side_w, full.min.y + 4.0), full.max - egui::vec2(0.0, 8.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(side_rect), |ui| {
+                    self.sidebar.camera.frame = self.camera.as_ref().and_then(|(p, _)| p.latest());
+                    if std::mem::take(&mut self.sidebar.camera.face_ready) {
+                        self.tracks = Tracks::build(&self.rec, &self.edit);
+                    }
                     if let Some(t) = sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec, self.time) {
                         self.seek(t);
                     }

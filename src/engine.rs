@@ -161,6 +161,10 @@ pub struct Tracks {
     pub shortcuts: Vec<crate::shortcuts::Shortcut>,
     /// Caption lines (empty when captions are off or there is no transcript).
     pub captions: Vec<crate::transcript::Line>,
+    /// Speech spans, for "Hide during silence" (empty when off).
+    speech: Vec<(f64, f64)>,
+    /// Face positions in the camera, for face tracking.
+    face: Option<crate::face::FaceTrack>,
 }
 
 impl Tracks {
@@ -314,7 +318,9 @@ impl Tracks {
             Some(t) if edit.captions.show => crate::transcript::lines(t, edit, 42),
             _ => vec![],
         };
-        Self { layout, cameras, cursor, duration: rec.duration, shortcuts, captions }
+        let speech = if edit.camera.hide_during_silence && rec.camera.is_some() { crate::voice::speech_spans(rec) } else { vec![] };
+        let face = if edit.camera.face_tracking { crate::face::FaceTrack::load(&rec.dir) } else { None };
+        Self { layout, cameras, cursor, duration: rec.duration, shortcuts, captions, speech, face }
     }
 
     fn index(&self, t: f64) -> (usize, f64) {
@@ -383,6 +389,22 @@ pub struct CameraFrame {
     pub opacity: f64,
     pub mirror: bool,
     pub shadow: f64,
+    /// Part of the camera picture shown: x, y, w, h (normalized).
+    pub crop: [f64; 4],
+}
+
+/// Camera crop at camera time `t`: the chosen crop, moved to keep the face
+/// centred when face tracking is on.
+fn camera_crop(edit: &EditConfig, tracks: &Tracks, t: f64) -> [f64; 4] {
+    let [x, y, w, h] = edit.camera.crop;
+    let (w, h) = (w.clamp(0.1, 1.0), h.clamp(0.1, 1.0));
+    let (mut x, mut y) = (x.clamp(0.0, 1.0 - w), y.clamp(0.0, 1.0 - h));
+    if let Some((fx, fy)) = tracks.face.as_ref().and_then(|f| f.at(t)) {
+        // Centre on the face, a little above it so the shoulders show.
+        x = (fx - w / 2.0).clamp(0.0, 1.0 - w);
+        y = (fy + h * 0.08 - h / 2.0).clamp(0.0, 1.0 - h);
+    }
+    [x, y, w, h]
 }
 
 /// Glass Loupe lens: magnifies a spot of the video in place.
@@ -540,6 +562,15 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
     };
     if let Some(track) = &rec.camera {
         apply_camera_layout(&mut fs, edit, &tracks.layout, track.width as f64 / track.height.max(1) as f64, t);
+        if let Some(view) = &mut fs.camera_view {
+            if edit.camera.hide_during_silence {
+                view.opacity *= crate::voice::visibility(&tracks.speech, t);
+            }
+            view.crop = camera_crop(edit, tracks, t - track.offset - edit.camera.delay);
+        }
+        if fs.camera_view.as_ref().is_some_and(|v| v.opacity <= 0.001) {
+            fs.camera_view = None;
+        }
     }
     fs
 }
@@ -718,6 +749,7 @@ fn apply_camera_layout(fs: &mut FrameState, edit: &EditConfig, layout: &Layout, 
             opacity: p.opacity,
             mirror: edit.camera.mirror,
             shadow: edit.camera.shadow,
+            crop: edit.camera.crop,
         });
     }
 }

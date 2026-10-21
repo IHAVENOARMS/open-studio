@@ -337,10 +337,51 @@ struct CameraU {
     params: vec4f,   // corner radius (px), opacity, shadow, mirror
     uv: vec4f,       // source crop: u0, v0, u1, v1
     lod: vec4f,      // mip level
+    grade0: vec4f,   // look: exposure, contrast, saturation, temperature
+    grade1: vec4f,   // look: tint, fade, split toning, mono
+    grade2: vec4f,   // strength, LUT size (0 = none)
 };
 
 @group(0) @binding(0) var<uniform> camu: CameraU;
 @group(0) @binding(1) var camera_tex: texture_2d<f32>;
+@group(0) @binding(3) var camera_lut: texture_2d<f32>;
+
+fn to_srgb(c: vec3f) -> vec3f {
+    return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3f(0.0031308));
+}
+fn to_linear(c: vec3f) -> vec3f {
+    return select(pow((c + 0.055) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+}
+
+// Look grade on display-encoded colour; matches looks::Grade::apply.
+fn grade(c_in: vec3f) -> vec3f {
+    var c = c_in * exp2(camu.grade0.x);
+    let temp = camu.grade0.w;
+    let tint = camu.grade1.x;
+    c = c * vec3f(1.0 + temp * 0.5 + tint * 0.15, 1.0 - tint * 0.3, 1.0 - temp * 0.5 + tint * 0.15);
+    c = (c - 0.5) * camu.grade0.y + 0.5;
+    let l = dot(c, vec3f(0.2126, 0.7152, 0.0722));
+    c = vec3f(l) + (c - vec3f(l)) * camu.grade0.z;
+    let s = camu.grade1.z * 0.12;
+    let w = clamp(l, 0.0, 1.0) - 0.5;
+    c = c + vec3f(s * w * 2.0, s * w * 0.4, -s * w * 2.0);
+    c = vec3f(l) + (c - vec3f(l)) * (1.0 - camu.grade1.w);
+    return clamp(camu.grade1.y + c * (1.0 - camu.grade1.y), vec3f(0.0), vec3f(1.0));
+}
+
+// 3D LUT stored as an (n*n) x n image (blue slices side by side).
+fn apply_lut(c: vec3f) -> vec3f {
+    let n = camu.grade2.y;
+    let size = vec2f(n * n, n);
+    let cc = clamp(c, vec3f(0.0), vec3f(1.0)) * (n - 1.0);
+    let b0 = floor(cc.b);
+    let b1 = min(b0 + 1.0, n - 1.0);
+    let f = cc.b - b0;
+    let xy = cc.rg + 0.5;
+    let a = textureSampleLevel(camera_lut, samp, (vec2f(b0 * n, 0.0) + xy) / size, 0.0).rgb;
+    let b = textureSampleLevel(camera_lut, samp, (vec2f(b1 * n, 0.0) + xy) / size, 0.0).rgb;
+    return mix(a, b, f);
+}
 
 @vertex
 fn vs_camera(@builtin(vertex_index) i: u32) -> VsOut {
@@ -372,7 +413,16 @@ fn fs_camera(in: VsOut) -> @location(0) vec4f {
         t.x = 1.0 - t.x;
     }
     let suv = mix(camu.uv.xy, camu.uv.zw, clamp(t, vec2f(0.0), vec2f(1.0)));
-    let c = textureSampleLevel(camera_tex, samp, suv, camu.lod.x).rgb;
+    var c = textureSampleLevel(camera_tex, samp, suv, camu.lod.x).rgb;
+    // Colour grading happens on display-encoded values, like the LUTs expect.
+    if (camu.grade2.x > 0.0) {
+        let e = to_srgb(c);
+        var g = grade(e);
+        if (camu.grade2.y > 1.5) {
+            g = apply_lut(g);
+        }
+        c = to_linear(mix(e, g, camu.grade2.x));
+    }
     let blur = max(camu.rect.z, camu.rect.w) * 0.06;
     let ds = sd_round_rect(p - center - vec2f(0.0, blur * 0.35), half, r);
     let sa = camu.params.z * 0.55 * (1.0 - smoothstep(-blur * 0.4, blur, ds));

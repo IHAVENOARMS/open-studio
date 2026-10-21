@@ -468,6 +468,16 @@ pub struct CameraSettings {
     pub shadow: f64,
     /// Lip-sync correction in seconds; positive shows the camera later.
     pub delay: f64,
+    /// Part of the camera picture kept: x, y, w, h (normalized).
+    pub crop: [f64; 4],
+    /// Keep the face centred by moving the crop (uses face_track.json).
+    pub face_tracking: bool,
+    /// Hide the camera while nobody is speaking.
+    pub hide_during_silence: bool,
+    /// Colour grading: a built-in look, its strength, or a .cube LUT file.
+    pub look: crate::render::looks::Look,
+    pub look_strength: f64,
+    pub lut: Option<String>,
 }
 
 impl Default for CameraSettings {
@@ -484,6 +494,12 @@ impl Default for CameraSettings {
             mirror: false,
             shadow: 0.6,
             delay: 0.0,
+            crop: [0.0, 0.0, 1.0, 1.0],
+            face_tracking: false,
+            hide_during_silence: false,
+            look: crate::render::looks::Look::None,
+            look_strength: 1.0,
+            lut: None,
         }
     }
 }

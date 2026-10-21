@@ -5,7 +5,9 @@ mod cursor_themes;
 mod editor;
 mod settings;
 mod shortcuts;
+mod face;
 mod theme;
+mod voice;
 mod transcript;
 mod decode;
 mod dialogs;
@@ -107,6 +109,9 @@ enum Cmd {
     /// Mirror the first Android device, record its window briefly, report (development aid).
     #[command(hide = true)]
     DebugDevice,
+    /// Run face tracking on a project's camera video (development aid).
+    #[command(hide = true)]
+    DebugFace { project: PathBuf },
     /// Open a project in the editor.
     Edit { project: PathBuf },
     /// Transcribe a project's microphone track with Whisper (for captions).
@@ -226,6 +231,12 @@ fn main() -> Result<()> {
             let rec = project::Recording::load(&dir)?;
             println!("recorded {}x{} {:.2}s kind={}", rec.width, rec.height, rec.duration, rec.source.kind);
             std::fs::remove_dir_all(&dir)?;
+        }
+        Some(Cmd::DebugFace { project }) => {
+            let rec = project::Recording::load(&project)?;
+            let t = std::time::Instant::now();
+            let track = face::analyze(&rec, &Default::default())?;
+            println!("{} face samples in {:.1}s", track.samples.len(), t.elapsed().as_secs_f32());
         }
         Some(Cmd::Transcribe { project, model, language, srt }) => {
             let rec = project::Recording::load(&project)?;
