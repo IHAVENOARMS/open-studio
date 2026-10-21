@@ -162,6 +162,10 @@ pub fn show(
                                 seek = mask_editor(ui, edit, sel.index, selected);
                                 return;
                             }
+                            Track::Camera if sel.index < edit.camera_layouts.len() => {
+                                super::camera_ui::segment_editor(ui, edit, sel.index, selected);
+                                return;
+                            }
                             _ => *selected = None,
                         }
                     }

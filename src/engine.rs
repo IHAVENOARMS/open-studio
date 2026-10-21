@@ -366,6 +366,23 @@ pub struct FrameState {
     pub keys: Option<KeyOverlay>,
     pub caption: Option<CaptionFrame>,
     pub loupe: Option<LoupeFrame>,
+    /// Camera picture (webcam / phone camera) in canvas units.
+    pub camera_view: Option<CameraFrame>,
+    /// Where the screen card is drawn: canvas point p goes to
+    /// `(ox + s * p.x, oy + s * p.y)` (Split layout moves and shrinks it).
+    pub screen_xf: [f64; 3],
+}
+
+/// The camera picture for one frame.
+#[derive(Clone, Copy, Debug)]
+pub struct CameraFrame {
+    /// Canvas units.
+    pub rect: Rect,
+    /// Corner radius, canvas units.
+    pub radius: f64,
+    pub opacity: f64,
+    pub mirror: bool,
+    pub shadow: f64,
 }
 
 /// Glass Loupe lens: magnifies a spot of the video in place.
@@ -508,7 +525,201 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
     let click = if rec.cursor_embedded || rec.events.moves.is_empty() { None } else { click_fx(rec, edit, tracks, t) };
     let caption = caption_frame(rec, edit, tracks, t);
     let loupe = loupe_frame(edit, tracks, t);
-    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t), click, keys: key_overlay(edit, tracks, t), caption, loupe }
+    let mut fs = FrameState {
+        camera,
+        blur_from,
+        blur_to,
+        cursor,
+        masks: active_masks(edit, t),
+        click,
+        keys: key_overlay(edit, tracks, t),
+        caption,
+        loupe,
+        camera_view: None,
+        screen_xf: [0.0, 0.0, 1.0],
+    };
+    if let Some(track) = &rec.camera {
+        apply_camera_layout(&mut fs, edit, &tracks.layout, track.width as f64 / track.height.max(1) as f64, t);
+    }
+    fs
+}
+
+// ---- Camera layouts ---------------------------------------------------------
+
+/// Layout changes animate over this long.
+pub const LAYOUT_TRANSITION: f64 = 0.45;
+
+/// Where things go for one camera layout, before transitions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub camera: Rect,
+    pub radius: f64,
+    pub opacity: f64,
+    /// Screen card transform (ox, oy, scale).
+    pub screen: [f64; 3],
+    /// 1 = the screen zoom is switched off (split, fullscreen).
+    pub no_zoom: f64,
+}
+
+impl Placement {
+    fn lerp(a: Self, b: Self, f: f64) -> Self {
+        let l = |x: f64, y: f64| x + (y - x) * f;
+        Self {
+            camera: Rect { x: l(a.camera.x, b.camera.x), y: l(a.camera.y, b.camera.y), w: l(a.camera.w, b.camera.w), h: l(a.camera.h, b.camera.h) },
+            radius: l(a.radius, b.radius),
+            opacity: l(a.opacity, b.opacity),
+            screen: [l(a.screen[0], b.screen[0]), l(a.screen[1], b.screen[1]), l(a.screen[2], b.screen[2])],
+            no_zoom: l(a.no_zoom, b.no_zoom),
+        }
+    }
+}
+
+/// The layout in effect at `t`: an enabled segment, or the project default.
+fn layout_at(edit: &EditConfig, t: f64) -> (crate::edit::CameraLayoutKind, [u8; 2], Option<f64>) {
+    use crate::edit::{CameraDefaultLayout, CameraLayoutKind};
+    let cam = &edit.camera;
+    if let Some(seg) = edit.camera_layouts.iter().find(|s| !s.disabled && t >= s.start && t < s.end) {
+        return (seg.kind, seg.position.unwrap_or(cam.position), seg.custom_size);
+    }
+    let kind = match cam.layout {
+        CameraDefaultLayout::Overlay => CameraLayoutKind::Default,
+        CameraDefaultLayout::Split => CameraLayoutKind::Split,
+    };
+    (kind, cam.position, None)
+}
+
+/// Placement of camera and screen for one layout. `zoom` is the screen zoom
+/// scale (the camera shrinks while zoomed in).
+pub fn placement(
+    layout: &Layout,
+    edit: &EditConfig,
+    camera_aspect: f64,
+    kind: crate::edit::CameraLayoutKind,
+    position: [u8; 2],
+    size: Option<f64>,
+    zoom: f64,
+) -> Placement {
+    use crate::edit::CameraLayoutKind;
+    let cam = &edit.camera;
+    let a = layout.aspect;
+    let ar = cam.aspect.ratio(camera_aspect).clamp(0.3, 3.0);
+    let pad = edit.padding * a.min(1.0);
+    let screen_radius = edit.radius / 1080.0;
+    let identity = [0.0, 0.0, 1.0];
+    let overlay = |shrink: f64| {
+        let mut h = size.unwrap_or(cam.size);
+        if cam.shrink_on_zoom && size.is_none() {
+            let f = ((zoom - 1.0) / 0.6).clamp(0.0, 1.0);
+            h += (cam.zoom_size - h) * f * f * (3.0 - 2.0 * f);
+        }
+        let mut w = h * ar;
+        if w > a * 0.9 {
+            w = a * 0.9;
+            h = w / ar;
+        }
+        let m = 0.04;
+        let x = [m, (a - w) / 2.0, a - w - m][position[0].min(2) as usize];
+        let y = [m, (1.0 - h) / 2.0, 1.0 - h - m][position[1].min(2) as usize];
+        let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+        let (w, h) = (w * shrink, h * shrink);
+        Rect { x: cx - w / 2.0, y: cy - h / 2.0, w, h }
+    };
+    let round = |r: &Rect| cam.roundness.clamp(0.0, 1.0) * r.w.min(r.h) / 2.0;
+    match kind {
+        CameraLayoutKind::Default => {
+            let r = overlay(1.0);
+            Placement { radius: round(&r), camera: r, opacity: 1.0, screen: identity, no_zoom: 0.0 }
+        }
+        CameraLayoutKind::Hide => {
+            let r = overlay(0.8);
+            Placement { radius: round(&r), camera: r, opacity: 0.0, screen: identity, no_zoom: 0.0 }
+        }
+        CameraLayoutKind::Fullscreen => {
+            let r = Rect { x: pad, y: pad, w: a - 2.0 * pad, h: 1.0 - 2.0 * pad };
+            Placement { camera: r, radius: screen_radius, opacity: 1.0, screen: identity, no_zoom: 1.0 }
+        }
+        CameraLayoutKind::Split => {
+            let area = Rect { x: pad, y: pad, w: a - 2.0 * pad, h: 1.0 - 2.0 * pad };
+            let gap = (pad * 0.5).max(0.02);
+            let card = layout.card;
+            let card_ar = card.w / card.h;
+            let fit = |w: f64, h: f64| if w / h > card_ar { (h * card_ar, h) } else { (w, w / card_ar) };
+            let (screen, camera) = if a >= 1.0 {
+                // Side by side: camera column on the right, as tall as the screen.
+                let cw = area.w * 0.34;
+                let (sw, sh) = fit(area.w - cw - gap, area.h);
+                let x = area.x + (area.w - (sw + gap + cw)) / 2.0;
+                let y = area.y + (area.h - sh) / 2.0;
+                (Rect { x, y, w: sw, h: sh }, Rect { x: x + sw + gap, y, w: cw, h: sh })
+            } else {
+                // Stacked: camera below the screen, as wide as it.
+                let ch = area.h * 0.36;
+                let (sw, sh) = fit(area.w, area.h - ch - gap);
+                let x = area.x + (area.w - sw) / 2.0;
+                let y = area.y + (area.h - (sh + gap + ch)) / 2.0;
+                (Rect { x, y, w: sw, h: sh }, Rect { x, y: y + sh + gap, w: sw, h: ch })
+            };
+            let s = screen.w / card.w;
+            Placement {
+                camera,
+                radius: screen_radius,
+                opacity: 1.0,
+                screen: [screen.x - s * card.x, screen.y - s * card.y, s],
+                no_zoom: 1.0,
+            }
+        }
+    }
+}
+
+/// Placement at `t`, animating for [`LAYOUT_TRANSITION`] after each layout change.
+pub fn placement_at(layout: &Layout, edit: &EditConfig, camera_aspect: f64, t: f64, zoom: f64) -> Placement {
+    let at = |t: f64| {
+        let (kind, pos, size) = layout_at(edit, t);
+        placement(layout, edit, camera_aspect, kind, pos, size, zoom)
+    };
+    let now = at(t);
+    let last_change = edit
+        .camera_layouts
+        .iter()
+        .filter(|s| !s.disabled)
+        .flat_map(|s| [s.start, s.end])
+        .filter(|b| *b <= t && t - *b < LAYOUT_TRANSITION)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if last_change.is_finite() {
+        let before = at(last_change - 1e-4);
+        if before != now {
+            let p = crate::edit::cubic_bezier(0.32, 0.72, 0.0, 1.0, (t - last_change) / LAYOUT_TRANSITION);
+            return Placement::lerp(before, now, p);
+        }
+    }
+    now
+}
+
+fn apply_camera_layout(fs: &mut FrameState, edit: &EditConfig, layout: &Layout, camera_aspect: f64, t: f64) {
+    let p = placement_at(layout, edit, camera_aspect, t, fs.camera.scale);
+    // Split and fullscreen show the whole screen card: blend the zoom out.
+    let id = Camera::identity(layout);
+    fs.camera = Camera::lerp(fs.camera, id, p.no_zoom);
+    fs.blur_from = Camera::lerp(fs.blur_from, id, p.no_zoom);
+    fs.blur_to = Camera::lerp(fs.blur_to, id, p.no_zoom);
+    let [ox, oy, s] = p.screen;
+    fs.screen_xf = p.screen;
+    if let Some(c) = &mut fs.cursor {
+        (c.x, c.y) = (ox + s * c.x, oy + s * c.y);
+        c.scale *= s;
+    }
+    if let Some(c) = &mut fs.click {
+        (c.x, c.y) = (ox + s * c.x, oy + s * c.y);
+    }
+    if !edit.camera.hidden && p.opacity > 0.001 {
+        fs.camera_view = Some(CameraFrame {
+            rect: p.camera,
+            radius: p.radius,
+            opacity: p.opacity,
+            mirror: edit.camera.mirror,
+            shadow: edit.camera.shadow,
+        });
+    }
 }
 
 /// The loupe active at `t`: grows in and out over 0.3s with a soft overshoot
@@ -727,5 +938,38 @@ mod tests {
         let t = Tracks::build(&rec(), &edit);
         assert!((t.camera(1.01).scale - 2.0).abs() < 1e-6);
         assert!((t.camera(5.01).scale - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn camera_layout_placement_and_transition() {
+        use crate::edit::{CameraLayoutKind, CameraLayoutSegment};
+        let r = rec();
+        let mut edit = EditConfig { zoom_segments: vec![], ..Default::default() };
+        let layout = Layout::new(&r, &edit);
+        let ar = 16.0 / 9.0;
+        // Default: bottom-right corner, inside the canvas.
+        let d = placement(&layout, &edit, ar, CameraLayoutKind::Default, [2, 2], None, 1.0);
+        assert!((d.camera.x + d.camera.w - (layout.aspect - 0.04)).abs() < 1e-9);
+        assert!((d.camera.y + d.camera.h - 0.96).abs() < 1e-9);
+        assert_eq!(d.screen, [0.0, 0.0, 1.0]);
+        // Zoomed in, the camera shrinks.
+        let z = placement(&layout, &edit, ar, CameraLayoutKind::Default, [2, 2], None, 2.0);
+        assert!(z.camera.h < d.camera.h);
+        // Split: screen shrinks to the left, camera to its right.
+        let s = placement(&layout, &edit, ar, CameraLayoutKind::Split, [2, 2], None, 1.0);
+        assert!(s.screen[2] < 1.0 && s.no_zoom == 1.0);
+        let screen_right = s.screen[0] + s.screen[2] * (layout.card.x + layout.card.w);
+        assert!(s.camera.x > screen_right);
+
+        // A Fullscreen layout from 2s: animates in, then holds.
+        edit.camera_layouts.push(CameraLayoutSegment::new(2.0, 4.0, CameraLayoutKind::Fullscreen));
+        let full = placement(&layout, &edit, ar, CameraLayoutKind::Fullscreen, [2, 2], None, 1.0);
+        let mid = placement_at(&layout, &edit, ar, 2.0 + LAYOUT_TRANSITION / 2.0, 1.0);
+        assert!(mid.camera.w > d.camera.w && mid.camera.w < full.camera.w);
+        let done = placement_at(&layout, &edit, ar, 2.0 + LAYOUT_TRANSITION + 0.01, 1.0);
+        assert_eq!(done, full);
+        // Disabled layouts are ignored.
+        edit.camera_layouts[0].disabled = true;
+        assert_eq!(placement_at(&layout, &edit, ar, 3.0, 1.0), d);
     }
 }

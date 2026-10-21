@@ -74,6 +74,10 @@ pub struct Settings {
     pub system_audio: bool,
     /// Phone mirroring (Device button).
     pub scrcpy: ScrcpyOptions,
+    /// Camera to record (see `record::camera::Source::id`), or None.
+    pub camera: Option<String>,
+    /// Show the live camera bubble above the recording bar.
+    pub camera_preview: bool,
 }
 
 /// scrcpy settings for the Device button.
@@ -151,6 +155,8 @@ impl Default for Settings {
             microphone: None,
             system_audio: false,
             scrcpy: ScrcpyOptions::default(),
+            camera: None,
+            camera_preview: true,
         }
     }
 }

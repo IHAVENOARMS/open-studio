@@ -89,6 +89,8 @@ pub struct Editor {
     /// Short message under the title ("Saved", errors).
     status: Option<(String, Instant)>,
     player: Player,
+    /// Camera track player and the frame index on the GPU.
+    camera: Option<(Player, i64)>,
     audio: audio::AudioPreview,
     /// Waveform envelope for the clip track (computed in the background).
     waveform: Arc<Mutex<Option<Vec<f32>>>>,
@@ -114,6 +116,11 @@ impl Editor {
         let (start, _) = edit.trim_range(rec.duration);
         player.seek(start);
         let audio = audio::AudioPreview::new(&rec, &edit);
+        let camera = rec.camera.as_ref().map(|c| {
+            let p = Player::new(dir.join(&c.file), (c.width, c.height), c.fps, ctx.clone());
+            p.seek((start - c.offset - edit.camera.delay).max(0.0));
+            (p, -1)
+        });
         Ok(Self {
             name: paths.name(),
             dir,
@@ -126,6 +133,7 @@ impl Editor {
             status: None,
             edit,
             player,
+            camera,
             audio,
             waveform: audio::envelope_async(&rec, ctx.clone()),
             comp: Compositor::new(rs.device.clone(), rs.queue.clone()),
@@ -152,11 +160,27 @@ impl Editor {
             self.playing = Some((self.time, now));
             self.player.play(self.time, now);
             self.audio.play(self.time);
+            self.camera_follow(Some(now));
         } else {
             self.playing = None;
             self.player.pause();
             self.audio.pause();
             self.player.seek(self.time);
+            self.camera_follow(None);
+        }
+    }
+
+    /// Keeps the camera player on the playhead: playing from `now`, or
+    /// paused at the current time.
+    fn camera_follow(&self, now: Option<Instant>) {
+        let (Some((p, _)), Some(c)) = (&self.camera, &self.rec.camera) else { return };
+        let t = (self.time - c.offset - self.edit.camera.delay).max(0.0);
+        match now {
+            Some(at) => p.play(t, at),
+            None => {
+                p.pause();
+                p.seek(t);
+            }
         }
     }
 
@@ -167,8 +191,10 @@ impl Editor {
             self.playing = Some((self.time, now));
             self.player.play(self.time, now);
             self.audio.play(self.time);
+            self.camera_follow(Some(now));
         } else {
             self.player.seek(self.time);
+            self.camera_follow(None);
         }
     }
 
@@ -184,6 +210,20 @@ impl Editor {
         mask.kind = kind;
         let index = timeline::add_mask(&mut self.edit, mask);
         self.selected = Some(Selection { track: Track::Mask, index });
+    }
+
+    /// Sets the camera layout under the playhead to `kind`, or adds a layout
+    /// of that kind there.
+    fn add_layout_at_playhead(&mut self, kind: crate::edit::CameraLayoutKind) {
+        if let Some(i) = self.edit.camera_layouts.iter().position(|l| self.time >= l.start && self.time < l.end) {
+            self.edit.camera_layouts[i].kind = kind;
+            self.selected = Some(Selection { track: Track::Camera, index: i });
+            return;
+        }
+        let start = self.time.min(self.rec.duration - 0.3).max(0.0);
+        let Some((s, e)) = timeline::free_span_on(&self.edit, Track::Camera, start, 3.0, self.rec.duration) else { return };
+        let index = timeline::add_layout(&mut self.edit, crate::edit::CameraLayoutSegment::new(s, e, kind));
+        self.selected = Some(Selection { track: Track::Camera, index });
     }
 
     /// Selects the zoom under the playhead, or adds a zoom or loupe there.
@@ -210,10 +250,10 @@ impl Editor {
             &[(Icon::Zoom, "Add zoom", 0), (Icon::Loupe, "Add Glass Loupe: magnify a detail under a glass lens", 1)],
             &[
                 (Icon::CamPip, "Camera in a corner", 10),
-                (Icon::CamSplit, "Split screen", 10),
-                (Icon::CamFull, "Camera fullscreen", 10),
-                (Icon::CamOnly, "Camera only", 10),
-                (Icon::CamHidden, "Hide camera", 10),
+                (Icon::CamSplit, "Split screen", 11),
+                (Icon::CamFull, "Camera fullscreen", 12),
+                (Icon::CamOnly, "Camera only", 12),
+                (Icon::CamHidden, "Hide camera", 13),
             ],
             &[(Icon::MaskHighlight, "Add highlight mask", 2), (Icon::MaskBlur, "Add sensitive data mask", 3)],
         ];
@@ -234,7 +274,7 @@ impl Editor {
             }
             for (icon, tip, action) in g.iter().copied() {
                 let r = egui::Rect::from_min_size(egui::pos2(pill.left() + 5.0, y + 1.0), egui::vec2(40.0, step - 2.0));
-                let enabled = action != 10 || has_camera;
+                let enabled = action < 10 || has_camera;
                 let resp = ui.interact(r, ui.scope_id().with(("tool", tip)), egui::Sense::click());
                 if enabled && resp.hovered() {
                     ui.painter().rect_filled(r, 10.0, egui::Color32::from_white_alpha(14));
@@ -258,6 +298,10 @@ impl Editor {
             Some(1) => self.add_zoom_at_playhead(ZoomKind::Loupe),
             Some(2) => self.add_mask_at_playhead(MaskKind::Highlight),
             Some(3) => self.add_mask_at_playhead(MaskKind::Blur),
+            Some(10) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Default),
+            Some(11) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Split),
+            Some(12) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Fullscreen),
+            Some(13) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Hide),
             _ => {}
         }
     }
@@ -563,7 +607,7 @@ impl Editor {
 
         egui::Panel::bottom("timeline")
             .resizable(false)
-            .exact_size(278.0)
+            .exact_size(if self.rec.camera.is_some() { 348.0 } else { 278.0 })
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 6, bottom: 14 }))
             .show(ui, |ui| {
                 let out = timeline::show(
@@ -575,6 +619,7 @@ impl Editor {
                     self.playing.is_some(),
                     &mut self.selected,
                     self.waveform.lock().unwrap().as_deref(),
+                    self.rec.camera.is_some(),
                 );
                 if let Some(t) = out.seek {
                     self.seek(t);
@@ -640,6 +685,9 @@ impl Editor {
         // Rebuild motion tracks when edits change. Nothing is written to
         // disk until the project is saved.
         if self.edit != self.tracks_for {
+            if self.edit.camera.delay != self.tracks_for.camera.delay && self.playing.is_none() {
+                self.camera_follow(None);
+            }
             self.tracks = Tracks::build(&self.rec, &self.edit);
             self.tracks_for = self.edit.clone();
         }
@@ -698,6 +746,9 @@ impl Editor {
                     Track::Mask if sel.index < self.edit.masks.len() => {
                         self.edit.masks.remove(sel.index);
                     }
+                    Track::Camera if sel.index < self.edit.camera_layouts.len() => {
+                        self.edit.camera_layouts.remove(sel.index);
+                    }
                     _ => {}
                 }
             }
@@ -727,6 +778,14 @@ impl Editor {
         let ppp = ui.ctx().pixels_per_point();
         let px = (((size.x * ppp) as u32).max(2), ((size.y * ppp) as u32).max(2));
 
+        if let Some((p, shown)) = &mut self.camera {
+            if let Some(f) = p.latest() {
+                if f.index != *shown {
+                    self.comp.upload_camera_frame(&f.rgba, f.width, f.height);
+                    *shown = f.index;
+                }
+            }
+        }
         if let Some(f) = self.player.latest() {
             if f.index != self.shown_index {
                 self.comp.upload_frame(&f.rgba, f.width, f.height);

@@ -22,6 +22,7 @@ struct Scene {
     click2: vec4f,       // base radius
     loupe: vec4f,        // lens centre (video uv), radius (video heights), magnification
     loupe2: vec4f,       // grow amount (0 = off), video aspect
+    screen_xf: vec4f,    // screen card placement: offset x, y, scale (camera Split layout)
 };
 
 @group(0) @binding(0) var<uniform> u: Scene;
@@ -159,8 +160,12 @@ fn apply_masks(v_in: vec3f, uv: vec2f) -> vec3f {
 }
 
 // Scene colour at canvas point q; `px` is the size of one output pixel in canvas units.
-fn scene(q: vec2f, px: f32) -> vec3f {
-    var col = background(q);
+fn scene(q_canvas: vec2f, px_canvas: f32) -> vec3f {
+    var col = background(q_canvas);
+    // Everything below belongs to the screen card, which a camera layout may
+    // move and shrink.
+    let q = (q_canvas - u.screen_xf.xy) / u.screen_xf.z;
+    let px = px_canvas / u.screen_xf.z;
     let half = u.card.zw * 0.5;
     let center = u.card.xy + half;
     let r = min(u.radius, min(half.x, half.y));
@@ -321,6 +326,58 @@ fn vs_sprite(@builtin(vertex_index) i: u32) -> VsOut {
 fn fs_sprite(in: VsOut) -> @location(0) vec4f {
     let c = textureSample(sprite_tex, sprite_samp, in.uv);
     return c * sprite.tint.w; // premultiplied
+}
+
+// ---- Camera ----------------------------------------------------------------
+
+struct CameraU {
+    a: vec4f,        // NDC corners of the drawn quad: top-left xy, top-right zw
+    b: vec4f,        // bottom-left xy, bottom-right zw
+    rect: vec4f,     // picture rect in output pixels: x, y, w, h
+    params: vec4f,   // corner radius (px), opacity, shadow, mirror
+    uv: vec4f,       // source crop: u0, v0, u1, v1
+    lod: vec4f,      // mip level
+};
+
+@group(0) @binding(0) var<uniform> camu: CameraU;
+@group(0) @binding(1) var camera_tex: texture_2d<f32>;
+
+@vertex
+fn vs_camera(@builtin(vertex_index) i: u32) -> VsOut {
+    var corner: vec2f;
+    switch i {
+        case 0u: { corner = camu.a.xy; }
+        case 1u: { corner = camu.a.zw; }
+        case 2u: { corner = camu.b.xy; }
+        default: { corner = camu.b.zw; }
+    }
+    var o: VsOut;
+    o.pos = vec4f(corner, 0.0, 1.0);
+    o.uv = vec2f(0.0);
+    return o;
+}
+
+// Camera picture: cover-cropped, rounded, with a soft drop shadow.
+// Premultiplied output.
+@fragment
+fn fs_camera(in: VsOut) -> @location(0) vec4f {
+    let p = in.pos.xy;
+    let half = camu.rect.zw * 0.5;
+    let center = camu.rect.xy + half;
+    let r = min(camu.params.x, min(half.x, half.y));
+    let d = sd_round_rect(p - center, half, r);
+    let cover = clamp(0.5 - d, 0.0, 1.0);
+    var t = (p - camu.rect.xy) / camu.rect.zw;
+    if (camu.params.w > 0.5) {
+        t.x = 1.0 - t.x;
+    }
+    let suv = mix(camu.uv.xy, camu.uv.zw, clamp(t, vec2f(0.0), vec2f(1.0)));
+    let c = textureSampleLevel(camera_tex, samp, suv, camu.lod.x).rgb;
+    let blur = max(camu.rect.z, camu.rect.w) * 0.06;
+    let ds = sd_round_rect(p - center - vec2f(0.0, blur * 0.35), half, r);
+    let sa = camu.params.z * 0.55 * (1.0 - smoothstep(-blur * 0.4, blur, ds));
+    let alpha = cover + sa * (1.0 - cover);
+    return vec4f(c * cover, alpha) * camu.params.y;
 }
 
 // ---- Mipmap generation ---------------------------------------------------

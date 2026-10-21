@@ -2,7 +2,7 @@
 //! track and the pink mask track. Items on the two lower tracks are added,
 //! moved, resized and selected the same way.
 
-use crate::edit::{EditConfig, Mask, MaskKind, ZoomFocus, ZoomSegment};
+use crate::edit::{CameraLayoutKind, CameraLayoutSegment, EditConfig, Mask, MaskKind, ZoomFocus, ZoomSegment};
 use crate::icons::{self, Icon};
 use crate::theme;
 use crate::util::format_time;
@@ -17,6 +17,8 @@ const MIN_SEG: f64 = 0.3;
 pub enum Track {
     Zoom,
     Mask,
+    /// Camera layouts (only with a camera track).
+    Camera,
 }
 
 /// A selected timeline item.
@@ -49,6 +51,7 @@ fn spans(edit: &EditConfig, track: Track) -> Vec<(f64, f64)> {
     match track {
         Track::Zoom => edit.zoom_segments.iter().map(|z| (z.start, z.end)).collect(),
         Track::Mask => edit.masks.iter().map(|m| (m.start, m.end)).collect(),
+        Track::Camera => edit.camera_layouts.iter().map(|l| (l.start, l.end)).collect(),
     }
 }
 
@@ -62,6 +65,10 @@ fn set_span(edit: &mut EditConfig, sel: Selection, start: f64, end: f64) {
             let m = &mut edit.masks[sel.index];
             (m.start, m.end) = (start, end);
         }
+        Track::Camera => {
+            let l = &mut edit.camera_layouts[sel.index];
+            (l.start, l.end) = (start, end);
+        }
     }
 }
 
@@ -74,8 +81,16 @@ fn add_item(edit: &mut EditConfig, track: Track, start: f64, end: f64) -> Select
             edit.zoom_segments.iter().position(|z| z.start == start).unwrap_or(0)
         }
         Track::Mask => add_mask(edit, Mask::new(start, end)),
+        Track::Camera => add_layout(edit, CameraLayoutSegment::new(start, end, CameraLayoutKind::Fullscreen)),
     };
     Selection { track, index }
+}
+
+/// Inserts a camera layout keeping the list sorted; returns its index.
+pub fn add_layout(edit: &mut EditConfig, seg: CameraLayoutSegment) -> usize {
+    edit.camera_layouts.push(seg);
+    edit.camera_layouts.sort_by(|a, b| a.start.total_cmp(&b.start));
+    edit.camera_layouts.iter().position(|l| l.start == seg.start).unwrap_or(0)
 }
 
 /// Inserts a mask keeping the list sorted; returns its index.
@@ -182,6 +197,7 @@ pub fn show(
     _playing: bool,
     selected: &mut Option<Selection>,
     waveform: Option<&[f32]>,
+    has_camera: bool,
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
@@ -190,8 +206,15 @@ pub fn show(
     let clip = Rect::from_min_max(pos2(full.left(), ruler.bottom() + 6.0), pos2(full.right(), ruler.bottom() + 66.0));
     let zoom = Rect::from_min_max(pos2(full.left(), clip.bottom() + 10.0), pos2(full.right(), clip.bottom() + 70.0));
     let mask = Rect::from_min_max(pos2(full.left(), zoom.bottom() + 10.0), pos2(full.right(), zoom.bottom() + 70.0));
-    let track_rect = |t: Track| if t == Track::Zoom { zoom } else { mask };
-    let area = Rect::from_min_max(full.min, pos2(full.right(), mask.bottom()));
+    let cam = Rect::from_min_max(pos2(full.left(), mask.bottom() + 10.0), pos2(full.right(), mask.bottom() + 70.0));
+    let track_rect = |t: Track| match t {
+        Track::Zoom => zoom,
+        Track::Mask => mask,
+        Track::Camera => cam,
+    };
+    let tracks: &[Track] = if has_camera { &[Track::Zoom, Track::Mask, Track::Camera] } else { &[Track::Zoom, Track::Mask] };
+    let bottom = if has_camera { cam.bottom() } else { mask.bottom() };
+    let area = Rect::from_min_max(full.min, pos2(full.right(), bottom));
     let resp = ui.allocate_rect(area, Sense::click_and_drag());
     let p = ui.painter_at(area.expand(4.0));
     let (trim_s, trim_e) = edit.trim_range(duration);
@@ -279,7 +302,7 @@ pub fn show(
                 return Hit::TrimEnd;
             }
         }
-        for track in [Track::Zoom, Track::Mask] {
+        for &track in tracks {
             if !track_rect(track).contains(pos) {
                 continue;
             }
@@ -309,7 +332,7 @@ pub fn show(
         _ => None,
     };
     let dragged_item = state.drag.and_then(Drag::item);
-    for track in [Track::Zoom, Track::Mask] {
+    for &track in tracks {
         for (i, (s, e)) in spans(edit, track).into_iter().enumerate() {
             let sel = Selection { track, index: i };
             let up = hovered_item == Some(sel) || dragged_item == Some(sel);
@@ -328,10 +351,16 @@ pub fn show(
             match track {
                 Track::Zoom => paint_zoom(&p, r, &edit.zoom_segments[i], is_sel),
                 Track::Mask => paint_mask(&p, r, &edit.masks[i], is_sel),
+                Track::Camera => paint_layout(&p, r, &edit.camera_layouts[i], is_sel),
             }
         }
     }
-    for (track, hint) in [(Track::Zoom, "Click or drag to add zoom on cursor"), (Track::Mask, "Click to add a blur or highlight mask")] {
+    let hints = [
+        (Track::Zoom, "Click or drag to add zoom on cursor"),
+        (Track::Mask, "Click to add a blur or highlight mask"),
+        (Track::Camera, "Click to add a camera layout"),
+    ];
+    for (track, hint) in hints.into_iter().filter(|(t, _)| tracks.contains(t)) {
         let r = track_rect(track);
         if spans(edit, track).is_empty() && hover.is_none_or(|h| !r.contains(h)) {
             p.text(r.center(), egui::Align2::CENTER_CENTER, hint, egui::FontId::proportional(13.0), Color32::from_rgb(0x4a, 0x4c, 0x52));
@@ -349,6 +378,7 @@ pub fn show(
                         let (stops, edge, border, label): (&[(f32, Color32)], _, _, _) = match track {
                             Track::Zoom => (&ZOOM_STOPS, ZOOM_EDGE, ZOOM_BORDER, "Zoom"),
                             Track::Mask => (&MASK_STOPS, MASK_EDGE, MASK_BORDER, "Mask"),
+                            Track::Camera => (&LAYOUT_STOPS, LAYOUT_EDGE, LAYOUT_BORDER, "Layout"),
                         };
                         gradient_bar(&p, r, 10.0, stops, edge, 0.55, border, 0.35);
                         icons::paint_with_text(&p, r, Some(Icon::Plus), 13.0, label, egui::FontId::proportional(13.0), Color32::from_white_alpha(180));
@@ -436,7 +466,7 @@ pub fn show(
 
     // Playhead.
     let x = geo.x(time);
-    p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, mask.bottom())], Stroke::new(1.5, theme::PLAYHEAD));
+    p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, bottom)], Stroke::new(1.5, theme::PLAYHEAD));
     p.circle_filled(pos2(x, ruler.top() + 4.0), 6.0, theme::PLAYHEAD);
     out
 }
@@ -447,6 +477,36 @@ fn neighbours(edit: &EditConfig, sel: Selection, duration: f64) -> (f64, f64) {
     let lo = if sel.index > 0 { items[sel.index - 1].1 } else { 0.0 };
     let hi = items.get(sel.index + 1).map(|s| s.0).unwrap_or(duration);
     (lo, hi)
+}
+
+/// Mauve-grey "Layout" pills, as on Screen Studio's layouts track.
+const LAYOUT_STOPS: [(f32, Color32); 3] = [
+    (0.0, Color32::from_rgb(0x8f, 0x80, 0x87)),
+    (0.5, Color32::from_rgb(0x7f, 0x71, 0x78)),
+    (1.0, Color32::from_rgb(0x70, 0x63, 0x6a)),
+];
+const LAYOUT_EDGE: Color32 = Color32::from_rgb(0xa8, 0x9a, 0xa1);
+const LAYOUT_BORDER: Color32 = Color32::from_rgb(0x5c, 0x51, 0x57);
+
+fn paint_layout(p: &egui::Painter, r: Rect, seg: &CameraLayoutSegment, selected: bool) {
+    let rad = 10.0f32.min(r.width() / 2.0);
+    gradient_bar(p, r, rad, &LAYOUT_STOPS, LAYOUT_EDGE, 0.55, LAYOUT_BORDER, if seg.disabled { 0.4 } else { 1.0 });
+    if selected {
+        p.rect_stroke(r.expand(2.0), CornerRadius::same(rad as u8 + 2), Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
+    }
+    let icon = match seg.kind {
+        CameraLayoutKind::Default => Icon::CamPip,
+        CameraLayoutKind::Split => Icon::CamSplit,
+        CameraLayoutKind::Fullscreen => Icon::CamFull,
+        CameraLayoutKind::Hide => Icon::Window,
+    };
+    if r.width() > 70.0 {
+        p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Layout", egui::FontId::proportional(12.0), Color32::from_white_alpha(120));
+        let label_rect = Rect::from_center_size(r.center() + vec2(0.0, 9.0), vec2(r.width(), 18.0));
+        icons::paint_with_text(p, label_rect, Some(icon), 14.0, seg.kind.label(), egui::FontId::proportional(13.5), Color32::WHITE);
+    } else if r.width() > 24.0 {
+        icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), icon, Color32::WHITE);
+    }
 }
 
 fn paint_zoom(p: &egui::Painter, r: Rect, seg: &ZoomSegment, selected: bool) {

@@ -49,6 +49,12 @@ pub struct CameraTrack {
     pub height: u32,
     /// Start relative to the first screen frame, in seconds.
     pub offset: f64,
+    #[serde(default = "default_camera_fps")]
+    pub fps: u32,
+}
+
+fn default_camera_fps() -> u32 {
+    30
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

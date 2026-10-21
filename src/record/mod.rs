@@ -2,6 +2,7 @@
 //! out as a project directory.
 
 pub mod audio;
+pub mod camera;
 pub mod capture;
 pub mod clock;
 pub mod direct;
@@ -24,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RecordOptions {
     pub out_dir: Option<PathBuf>,
     pub fps: u32,
@@ -40,7 +41,15 @@ pub struct RecordOptions {
     pub microphone: Option<String>,
     /// Record what the computer plays.
     pub system_audio: bool,
+    /// Camera to record alongside (already open for the live preview).
+    pub camera: Option<Arc<camera::CameraFeed>>,
 }
+
+/// Camera frames being encoded to camera.mp4 during a recording.
+type CameraRec = Arc<Mutex<Option<Result<Capture, String>>>>;
+
+/// Camera frames rate in camera.mp4.
+const CAMERA_FPS: u32 = 30;
 
 /// What to record when bypassing the portal (chosen in our own picker).
 #[derive(Clone, Debug)]
@@ -55,7 +64,7 @@ pub struct DirectRequest {
 
 impl Default for RecordOptions {
     fn default() -> Self {
-        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false }
+        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false, camera: None }
     }
 }
 
@@ -74,6 +83,7 @@ pub struct Recorder {
     /// Timestamps run on `clock` (direct capture) rather than raw monotonic.
     paused_clock: bool,
     direct_error: Arc<Mutex<Option<String>>>,
+    camera: Option<(Arc<camera::CameraFeed>, CameraRec)>,
     _portal: Option<(tokio::runtime::Runtime, portal::PortalStream)>,
 }
 
@@ -154,6 +164,26 @@ impl Recorder {
                 }
             }
         }
+        // Camera: frames from the open feed, stamped with the recording
+        // clock (dropped while paused), encoded as they arrive.
+        let camera = opts.camera.clone().map(|feed| {
+            let rec: CameraRec = Arc::default();
+            let (r, cl, path) = (rec.clone(), clock.clone(), dir.join(CAMERA_FILE));
+            feed.set_sink(Some(Box::new(move |f: &camera::CamFrame| {
+                let Some(t) = cl.now() else { return };
+                let mut slot = r.lock().unwrap();
+                if slot.is_none() {
+                    let info = direct::FrameInfo { width: f.width, height: f.height, gst_format: "RGBA" };
+                    *slot = Some(Capture::start(CaptureSource::Direct(info), &path, CAMERA_FPS).map_err(|e| format!("{e:#}")));
+                }
+                if let Some(Ok(cap)) = slot.as_ref() {
+                    if let Some(push) = cap.pusher() {
+                        push(&f.rgba, t);
+                    }
+                }
+            })));
+            (feed, rec)
+        });
         let (tx, input_rx) = channel();
         if !opts.test_source && input::spawn(stop.clone(), tx) == 0 {
             eprintln!("open-studio: no readable input devices; clicks won't be tracked (add yourself to the `input` group)");
@@ -172,6 +202,7 @@ impl Recorder {
             audio: audio_caps,
             paused_clock,
             direct_error,
+            camera,
             _portal: portal,
         })
     }
@@ -212,6 +243,14 @@ impl Recorder {
     pub fn stop(self) -> Result<PathBuf> {
         self.stop.store(true, Ordering::Relaxed);
         let fps = self.capture.fps;
+        let camera_result = self.camera.as_ref().map(|(feed, rec)| {
+            feed.set_sink(None);
+            match rec.lock().unwrap().take() {
+                Some(Ok(cap)) => cap.stop().map_err(|e| format!("{e:#}")),
+                Some(Err(e)) => Err(e),
+                None => Err("the camera sent no frames".into()),
+            }
+        });
         let result = self.capture.stop()?;
         let audio_results: Vec<(String, Option<audio::AudioResult>)> =
             self.audio.into_iter().map(|(k, c)| (k, c.stop().unwrap_or(None))).collect();
@@ -266,6 +305,17 @@ impl Recorder {
             dir: self.dir.clone(),
             transcript: None,
         };
+        match camera_result {
+            Some(Ok(c)) => {
+                let offset = if paused_clock { (c.first_frame_ns - t0) as f64 / 1e9 } else { 0.0 };
+                rec.camera = Some(crate::project::CameraTrack { file: CAMERA_FILE.into(), width: c.width, height: c.height, offset, fps: CAMERA_FPS });
+            }
+            Some(Err(e)) => {
+                eprintln!("open-studio: camera not recorded: {e}");
+                let _ = std::fs::remove_file(self.dir.join(CAMERA_FILE));
+            }
+            None => {}
+        }
         for (kind, res) in audio_results {
             let file = format!("{kind}.wav");
             match res {
@@ -313,6 +363,8 @@ impl Recorder {
         Ok(self.dir)
     }
 }
+
+const CAMERA_FILE: &str = "camera.mp4";
 
 /// When the portal doesn't report where the stream sits in the layout, pick
 /// the monitor whose pixel size matches the video, preferring the one the

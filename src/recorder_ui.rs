@@ -122,6 +122,13 @@ struct Shared {
     mirror_checked: Option<Instant>,
     /// Phone whose scrcpy options panel is open.
     device_options: Option<record::device::Device>,
+    /// Cameras offered in the camera menu.
+    cameras: Vec<record::camera::Source>,
+    /// The chosen camera, open for the preview and handed to the recorder.
+    camera: Option<Arc<record::camera::CameraFeed>>,
+    /// A camera being opened in the background (phones take a second).
+    camera_opening: Option<std::sync::mpsc::Receiver<Result<record::camera::CameraFeed, String>>>,
+    camera_error: Option<String>,
     // Recording widget state.
     elapsed: f64,
     paused: bool,
@@ -255,6 +262,10 @@ pub fn run() -> Result<Outcome> {
             mirror_window: None,
             mirror_checked: None,
             device_options: None,
+            cameras: vec![],
+            camera: None,
+            camera_opening: None,
+            camera_error: None,
             audio_devices: crate::record::audio::list_devices(),
             elapsed: 0.0,
             paused: false,
@@ -506,7 +517,7 @@ impl Rt {
         let recorded = req.name.clone().unwrap_or_default();
         self.shared.elapsed = 0.0;
         self.shared.paused = false;
-        match start_recorder(&req, &self.shared.settings) {
+        match start_recorder(&req, &self.shared.settings, self.shared.camera.clone()) {
             Ok(r) => {
                 self.shared.can_pause = r.can_pause();
                 self.recording = Some(Recording { recorder: Some(r), request: req });
@@ -580,7 +591,7 @@ impl Rt {
                 if let Some(r) = rec.recorder.take() {
                     r.discard();
                 }
-                match start_recorder(&rec.request, &self.shared.settings) {
+                match start_recorder(&rec.request, &self.shared.settings, self.shared.camera.clone()) {
                     Ok(r) => rec.recorder = Some(r),
                     Err(e) => self.error = Some(format!("{e:#}")),
                 }
@@ -716,14 +727,113 @@ impl Rt {
     }
 }
 
-fn start_recorder(req: &DirectRequest, settings: &Settings) -> Result<Recorder> {
+fn start_recorder(req: &DirectRequest, settings: &Settings, camera: Option<Arc<record::camera::CameraFeed>>) -> Result<Recorder> {
     Recorder::start(RecordOptions {
         direct: Some(req.clone()),
         show_system_cursor: settings.bake_cursor,
         microphone: settings.microphone.clone(),
         system_audio: settings.system_audio,
+        camera,
         ..Default::default()
     })
+}
+
+/// Opens the camera with this id in the background; the bar picks it up
+/// when ready.
+fn open_camera(sh: &mut Shared, id: Option<String>, ctx: &egui::Context) {
+    sh.camera = None;
+    sh.camera_error = None;
+    sh.camera_opening = None;
+    let Some(id) = id else { return };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let known = sh.cameras.clone();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let src = known.into_iter().find(|c| c.id() == id).or_else(|| record::camera::list().into_iter().find(|c| c.id() == id));
+        let r = match src {
+            Some(src) => record::camera::CameraFeed::open(&src).map_err(|e| format!("{e:#}")),
+            None => Err("camera not connected".into()),
+        };
+        let _ = tx.send(r);
+        ctx.request_repaint();
+    });
+    sh.camera_opening = Some(rx);
+}
+
+fn poll_camera(sh: &mut Shared) {
+    if let Some(rx) = &sh.camera_opening {
+        match rx.try_recv() {
+            Ok(Ok(feed)) => {
+                sh.camera = Some(Arc::new(feed));
+                sh.camera_opening = None;
+            }
+            Ok(Err(e)) => {
+                sh.camera_error = Some(e);
+                sh.camera_opening = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => sh.camera_opening = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+    if let Some(e) = sh.camera.as_ref().and_then(|c| c.error()) {
+        sh.camera_error = Some(e);
+        sh.camera = None;
+    }
+}
+
+fn camera_preview_rect(bar: Rect) -> Rect {
+    Rect::from_min_size(pos2(bar.right() - 230.0, bar.top() - 16.0 - 230.0), vec2(230.0, 230.0))
+}
+
+/// Live camera bubble above the bar, as Screen Studio shows it: a squircle
+/// with the picture cropped to fill it.
+fn camera_preview(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
+    if !sh.settings.camera_preview || sh.settings.camera.is_none() || sh.gear_open || sh.menu.is_some() || sh.device_options.is_some() {
+        return;
+    }
+    let r = camera_preview_rect(bar);
+    let p = ui.painter().clone();
+    let radius = 56u8;
+    p.add(egui::epaint::Shadow { offset: [0, 10], blur: 36, spread: 0, color: Color32::from_black_alpha(120) }.as_shape(r, CornerRadius::same(radius)));
+    let Some(frame) = sh.camera.as_ref().and_then(|c| c.latest()) else {
+        p.rect_filled(r, CornerRadius::same(radius), BAR_BG);
+        let msg = sh.camera_error.clone().unwrap_or_else(|| "Starting camera…".into());
+        p.text(r.center(), Align2::CENTER_CENTER, msg, FontId::proportional(13.0), BAR_DIM);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        return;
+    };
+    let id = egui::Id::NULL.with("camera-preview");
+    let cached: Option<(egui::TextureHandle, u64)> = ui.ctx().data(|d| d.get_temp(id));
+    let tex = match cached {
+        Some((tex, seq)) if seq == frame.seq => tex,
+        Some((mut tex, _)) => {
+            tex.set(egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba), egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, (tex.clone(), frame.seq)));
+            tex
+        }
+        None => {
+            let tex = ui.ctx().load_texture(
+                "camera-preview",
+                egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba),
+                egui::TextureOptions::LINEAR,
+            );
+            ui.ctx().data_mut(|d| d.insert_temp(id, (tex.clone(), frame.seq)));
+            tex
+        }
+    };
+    // Cover crop to a square, mirrored like a mirror.
+    let (fw, fh) = (frame.width as f32, frame.height as f32);
+    let (u0, u1, v0, v1) = if fw > fh {
+        let m = (1.0 - fh / fw) / 2.0;
+        (m, 1.0 - m, 0.0, 1.0)
+    } else {
+        let m = (1.0 - fw / fh) / 2.0;
+        (0.0, 1.0, m, 1.0 - m)
+    };
+    let uv = Rect::from_min_max(pos2(u1, v0), pos2(u0, v1));
+    p.add(egui::epaint::RectShape::filled(r, CornerRadius::same(radius), Color32::WHITE).with_texture(tex.id(), uv));
+    p.rect_stroke(r, CornerRadius::same(radius), Stroke::new(1.0, Color32::from_white_alpha(30)), StrokeKind::Inside);
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 fn map_cursor(c: egui::CursorIcon) -> CursorIcon {
@@ -762,6 +872,7 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
             bar.expand(6.0).contains(p)
                 || ((sh.gear_open || sh.menu.is_some()) && menu_area.contains(p))
                 || (sh.device_options.is_some() && device_options_rect(ui.ctx(), bar).contains(p))
+                || (sh.settings.camera.is_some() && sh.settings.camera_preview && camera_preview_rect(bar).contains(p))
         });
     let p = ui.painter().clone();
 
@@ -926,6 +1037,13 @@ fn selection_card(ui: &mut egui::Ui, c: Pos2, title: &str, sub: &str, a: f32) ->
 }
 
 fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
+    // The remembered camera opens when the bar first shows.
+    if sh.settings.camera.is_some() && sh.camera.is_none() && sh.camera_opening.is_none() && sh.camera_error.is_none() {
+        let id = sh.settings.camera.clone();
+        open_camera(sh, id, ui.ctx());
+    }
+    poll_camera(sh);
+    camera_preview(ui, sh, bar);
     let p = ui.painter().clone();
     p.add(egui::epaint::Shadow { offset: [0, 10], blur: 40, spread: 0, color: Color32::from_black_alpha(120) }.as_shape(bar, CornerRadius::same(18)));
     p.rect_filled(bar, 18.0, BAR_BG);
@@ -1004,8 +1122,20 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
     });
     let sys_on = sh.settings.system_audio;
     let short = |s: &str| if s.chars().count() > 16 { s.chars().take(15).collect::<String>() + "…" } else { s.to_string() };
+    let cam_label = sh.settings.camera.as_ref().map(|id| {
+        sh.camera
+            .as_ref()
+            .map(|c| c.source.clone())
+            .or_else(|| sh.cameras.iter().find(|c| &c.id() == id).cloned())
+            .map(|c| match c {
+                // Short form in the bar; the menu has the full name.
+                record::camera::Source::Phone { facing, .. } => format!("Phone ({facing})"),
+                c => c.label(),
+            })
+            .unwrap_or_else(|| "Camera".into())
+    });
     let entries = [
-        (Icon::CameraOff, "No camera".to_string(), 140.0, false, false),
+        (if cam_label.is_some() { Icon::CameraOn } else { Icon::CameraOff }, cam_label.as_deref().map(short).unwrap_or("No camera".into()), 160.0, true, cam_label.is_some()),
         (if mic_name.is_some() { Icon::Mic } else { Icon::MicOff }, mic_name.as_deref().map(short).unwrap_or("No microphone".into()), 176.0, true, mic_name.is_some()),
         (Icon::SystemAudio, if sys_on { "System audio".into() } else { "No system audio".into() }, 176.0, true, sys_on),
     ];
@@ -1018,10 +1148,14 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         }
         icons::paint(&p, Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(22.0, 22.0)), icon, col);
         p.text(pos2(r.left() + 36.0, cy), Align2::LEFT_CENTER, label, FontId::proportional(15.0), col);
-        let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text("Camera recording isn't available yet") };
+        let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if enabled && resp.clicked() {
             sh.menu = if sh.menu == Some(i) { None } else { Some(i) };
             sh.gear_open = false;
+            sh.device_options = None;
+            if i == 0 {
+                sh.cameras = record::camera::list();
+            }
             if i == 1 {
                 sh.audio_devices = crate::record::audio::list_devices();
             }
@@ -1200,6 +1334,17 @@ fn device_options_content(ui: &mut egui::Ui, sh: &mut Shared, device: &record::d
 fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
     let mut items: Vec<(Option<String>, String)> = vec![];
     match which {
+        0 => {
+            for c in &sh.cameras {
+                items.push((Some(c.id()), c.label()));
+            }
+            if sh.cameras.is_empty() {
+                items.push((Some(String::new()), "No camera found".into()));
+            }
+            let preview = if sh.settings.camera_preview { "Hide camera preview" } else { "Show camera preview" };
+            items.push((Some("preview".into()), preview.into()));
+            items.push((None, "Don't record camera".into()));
+        }
         1 => {
             items.push((None, "No microphone".into()));
             items.push((Some(crate::record::audio::DEFAULT_MIC.into()), "Default microphone".into()));
@@ -1233,6 +1378,7 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
     p.rect_stroke(r, 12.0, Stroke::new(1.0, BAR_BORDER), StrokeKind::Inside);
     let current = match which {
         1 => sh.settings.microphone.clone(),
+        0 => sh.settings.camera.clone(),
         3 => sh.mirror.as_ref().map(|m| m.device.serial.clone()),
         _ => sh.settings.system_audio.then(|| "on".to_string()),
     };
@@ -1256,6 +1402,21 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
     }
     if let Some(v) = chosen {
         match which {
+            0 => {
+                match v.as_deref() {
+                    Some("") => return,
+                    Some("preview") => sh.settings.camera_preview = !sh.settings.camera_preview,
+                    _ => {
+                        if v != sh.settings.camera || sh.camera.is_none() {
+                            sh.settings.camera = v.clone();
+                            open_camera(sh, v, ui.ctx());
+                        }
+                    }
+                }
+                sh.settings.save();
+                sh.menu = None;
+                return;
+            }
             3 => {
                 // Choosing a phone (or "Mirror options…") opens its options;
                 // the panel's Connect button starts the mirror.
@@ -1813,6 +1974,10 @@ mod tests {
             mirror_window: None,
             mirror_checked: None,
             device_options: None,
+            cameras: vec![],
+            camera: None,
+            camera_opening: None,
+            camera_error: None,
             audio_devices: vec![],
             elapsed: 3.0,
             paused: false,

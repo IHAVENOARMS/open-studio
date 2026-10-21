@@ -106,6 +106,16 @@ pub fn export(
     let mut src_index = first_src - 1; // index of the frame currently in `frame`
     let mut frame = Vec::new();
     let mut row = vec![0u8; (w * 4 * h) as usize];
+    // Camera track, stepped alongside: camera time = video time - offset - delay.
+    let cam_time = |t: f64, c: &crate::project::CameraTrack| (t - c.offset - edit.camera.delay).max(0.0);
+    let mut camera = match &rec.camera {
+        Some(c) => {
+            let t0 = cam_time(times[0], c);
+            let d = Decoder::open(&dir.join(&c.file), t0, (c.width, c.height), Some(1920))?;
+            Some((d, (t0 * c.fps as f64).round() as i64 - 1, Vec::new(), c.clone()))
+        }
+        None => None,
+    };
 
     for (i, &t) in times.iter().enumerate() {
         let i = i as u64;
@@ -129,6 +139,20 @@ pub fn export(
         }
         if !comp.has_frame() {
             bail!("no video frames decoded");
+        }
+        if let Some((dec, index, buf, track)) = &mut camera {
+            let want = (cam_time(t, track) * track.fps as f64 + 1e-6).floor() as i64;
+            let mut fresh = false;
+            while *index < want {
+                if !dec.read(buf)? {
+                    break;
+                }
+                *index += 1;
+                fresh = true;
+            }
+            if fresh {
+                comp.upload_camera_frame(buf, dec.width, dec.height);
+            }
         }
         let fs = frame_state(rec, edit, &tracks, t, opts.fps as f64);
         comp.render(&view, (w, h), &tracks.layout, edit, &fs);

@@ -47,6 +47,19 @@ struct SceneUniform {
     loupe: [f32; 4],
     /// Loupe grow amount (0 = off), video aspect.
     loupe2: [f32; 4],
+    /// Screen card placement: offset x, y, scale.
+    screen_xf: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    a: [f32; 4],
+    b: [f32; 4],
+    rect: [f32; 4],
+    params: [f32; 4],
+    uv: [f32; 4],
+    lod: [f32; 4],
 }
 
 #[repr(C)]
@@ -84,6 +97,7 @@ pub struct Compositor {
     queue: wgpu::Queue,
     scene_pipeline: wgpu::RenderPipeline,
     sprite_pipeline: wgpu::RenderPipeline,
+    camera_pipeline: wgpu::RenderPipeline,
     mip_pipeline: wgpu::RenderPipeline,
     scene_layout: wgpu::BindGroupLayout,
     mip_layout: wgpu::BindGroupLayout,
@@ -96,6 +110,10 @@ pub struct Compositor {
     /// Caption image for the line on screen.
     caption: Option<(String, Sprite)>,
     video: Option<VideoTexture>,
+    /// Camera picture (webcam or phone camera track).
+    camera: Option<VideoTexture>,
+    camera_buf: wgpu::Buffer,
+    camera_bind: Option<wgpu::BindGroup>,
     /// Background image (1x1 placeholder when unused) and what it was loaded from.
     bg_view: wgpu::TextureView,
     bg_key: Option<String>,
@@ -169,7 +187,7 @@ impl Compositor {
                     buffers: &[],
                 },
                 primitive: wgpu::PrimitiveState {
-                    topology: if vs == "vs_sprite" {
+                    topology: if vs == "vs_sprite" || vs == "vs_camera" {
                         wgpu::PrimitiveTopology::TriangleStrip
                     } else {
                         wgpu::PrimitiveTopology::TriangleList
@@ -196,6 +214,14 @@ impl Compositor {
         let sprite_pipeline =
             pipeline(&scene_layout, "vs_sprite", "fs_sprite", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
         let mip_pipeline = pipeline(&mip_layout, "vs_full", "fs_mip", None);
+        let camera_pipeline =
+            pipeline(&scene_layout, "vs_camera", "fs_camera", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
+        let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera uniform"),
+            size: std::mem::size_of::<CameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
@@ -232,6 +258,7 @@ impl Compositor {
             queue,
             scene_pipeline,
             sprite_pipeline,
+            camera_pipeline,
             mip_pipeline,
             scene_layout,
             mip_layout,
@@ -241,6 +268,9 @@ impl Compositor {
             keycaps: None,
             caption: None,
             video: None,
+            camera: None,
+            camera_buf,
+            camera_bind: None,
             bg_view: placeholder.create_view(&Default::default()),
             bg_key: None,
             bg_aspect: 1.0,
@@ -430,6 +460,67 @@ impl Compositor {
         &self.queue
     }
 
+    /// Uploads a camera frame (RGBA) and rebuilds its mip chain.
+    pub fn upload_camera_frame(&mut self, rgba: &[u8], w: u32, h: u32) {
+        if !self.camera.as_ref().is_some_and(|v| v.size == (w, h)) {
+            let tex = self.video_texture(w, h);
+            self.camera_bind = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("camera"),
+                layout: &self.scene_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tex.view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&tex.view) },
+                ],
+            }));
+            self.camera = Some(tex);
+        }
+        self.upload_into(self.camera.as_ref().unwrap(), rgba);
+    }
+
+    fn video_texture(&self, w: u32, h: u32) -> VideoTexture {
+        let mips = 32 - w.max(h).leading_zeros();
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("video"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: mips,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let mip_chain = self.mip_chain(&texture, mips);
+        let view = texture.create_view(&Default::default());
+        VideoTexture { size: (w, h), texture, view, mip_chain }
+    }
+
+    fn upload_into(&self, v: &VideoTexture, rgba: &[u8]) {
+        let (w, h) = v.size;
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &v.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let mut enc = self.device.create_command_encoder(&Default::default());
+        for (view, bind) in &v.mip_chain {
+            let mut pass = begin_pass(&mut enc, view);
+            pass.set_pipeline(&self.mip_pipeline);
+            pass.set_bind_group(0, bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([enc.finish()]);
+    }
+
     fn ensure_video(&mut self, w: u32, h: u32) {
         if self.video.as_ref().is_some_and(|v| v.size == (w, h)) {
             return;
@@ -592,9 +683,10 @@ impl Compositor {
                 };
                 [k.x as f32, k.y as f32, k.progress as f32, kind]
             }),
-            click2: [(c.h * 0.035 * edit.cursor.size) as f32, 0.0, 0.0, 0.0],
+            click2: [(c.h * 0.035 * edit.cursor.size * frame.screen_xf[2]) as f32, 0.0, 0.0, 0.0],
             loupe: frame.loupe.map_or([0.0; 4], |l| [l.x as f32, l.y as f32, l.radius as f32, l.magnification as f32]),
             loupe2: [frame.loupe.map_or(0.0, |l| l.amount.max(0.0) as f32), (layout.video_w / layout.video_h) as f32, 0.0, 0.0],
+            screen_xf: [frame.screen_xf[0] as f32, frame.screen_xf[1] as f32, frame.screen_xf[2].max(1e-3) as f32, 0.0],
         };
         self.queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&u));
 
@@ -633,6 +725,37 @@ impl Compositor {
             };
             let s = quad([corner(0.0, 0.0), corner(w, 0.0), corner(0.0, h), corner(w, h)], cs.opacity);
             self.queue.write_buffer(&sp.buf, 0, bytemuck::bytes_of(&s));
+        }
+
+        // Camera picture, in canvas space (not affected by the screen zoom).
+        let camera = frame.camera_view.filter(|_| self.camera.is_some());
+        if let (Some(cv), Some(tex)) = (camera, &self.camera) {
+            let k = oh as f64; // output pixels per canvas unit
+            let r = cv.rect;
+            let (x, y, w, h) = (r.x * k, r.y * k, r.w * k, r.h * k);
+            // Room around the picture for its shadow.
+            let m = w.max(h) * 0.12;
+            let corners = [ndc(ow, oh, x - m, y - m), ndc(ow, oh, x + w + m, y - m), ndc(ow, oh, x - m, y + h + m), ndc(ow, oh, x + w + m, y + h + m)];
+            // Cover-crop the source to the picture's aspect.
+            let (tw, th) = (tex.size.0 as f64, tex.size.1 as f64);
+            let (src, dst) = (tw / th, w / h.max(1e-6));
+            let uv = if src > dst {
+                let f = dst / src;
+                [(1.0 - f) / 2.0, 0.0, (1.0 + f) / 2.0, 1.0]
+            } else {
+                let f = src / dst;
+                [0.0, (1.0 - f) / 2.0, 1.0, (1.0 + f) / 2.0]
+            };
+            let texels = th * (uv[3] - uv[1]) / h.max(1.0);
+            let u = CameraUniform {
+                a: [corners[0][0], corners[0][1], corners[1][0], corners[1][1]],
+                b: [corners[2][0], corners[2][1], corners[3][0], corners[3][1]],
+                rect: [x as f32, y as f32, w as f32, h as f32],
+                params: [(cv.radius * k) as f32, cv.opacity as f32, cv.shadow as f32, if cv.mirror { 1.0 } else { 0.0 }],
+                uv: uv.map(|v| v as f32),
+                lod: [texels.log2().max(0.0) as f32, 0.0, 0.0, 0.0],
+            };
+            self.queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&u));
         }
 
         // Captions: centred near the bottom (or top) of the frame.
@@ -698,6 +821,11 @@ impl Compositor {
                 if let (Some(_), Some(sp)) = (cursor, sprite) {
                     pass.set_pipeline(&self.sprite_pipeline);
                     pass.set_bind_group(0, &sp.bind, &[]);
+                    pass.draw(0..4, 0..1);
+                }
+                if let (Some(_), Some(bind)) = (camera, &self.camera_bind) {
+                    pass.set_pipeline(&self.camera_pipeline);
+                    pass.set_bind_group(0, bind, &[]);
                     pass.draw(0..4, 0..1);
                 }
                 if let (Some(_), Some((_, sp))) = (caption, &self.caption) {

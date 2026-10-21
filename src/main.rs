@@ -67,6 +67,9 @@ enum Cmd {
         /// Record a microphone ("default" or a Pulse source name).
         #[arg(long)]
         mic: Option<String>,
+        /// Record a camera: an id from `--camera list`, e.g. v4l2:/dev/video1 or phone:SERIAL:front.
+        #[arg(long)]
+        camera: Option<String>,
         /// Record system audio (what the computer plays).
         #[arg(long)]
         system_audio: bool,
@@ -149,7 +152,7 @@ extern "C" fn on_sigint(_: libc::c_int) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Some(Cmd::Record { out, fps, system_cursor, reuse, duration, test, display, area, window, mic, system_audio }) => {
+        Some(Cmd::Record { out, fps, system_cursor, reuse, duration, test, display, area, window, mic, system_audio, camera }) => {
             let direct = match (display, window) {
                 (Some(d), _) => {
                     let area = area
@@ -174,6 +177,19 @@ fn main() -> Result<()> {
                 show_system_cursor: system_cursor,
                 reuse_selection: reuse,
                 test_source: test,
+                camera: match camera.as_deref() {
+                    None => None,
+                    Some("list") => {
+                        for c in record::camera::list() {
+                            println!("{}  {}", c.id(), c.label());
+                        }
+                        return Ok(());
+                    }
+                    Some(id) => {
+                        let src = record::camera::list().into_iter().find(|c| c.id() == id).ok_or_else(|| anyhow::anyhow!("no camera {id}"))?;
+                        Some(std::sync::Arc::new(record::camera::CameraFeed::open(&src)?))
+                    }
+                },
             };
             let dir = record_blocking(opts, duration)?;
             println!("{}", dir.display());

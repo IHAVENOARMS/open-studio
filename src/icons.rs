@@ -36,11 +36,13 @@ pub enum Icon {
     CamHidden,
     MaskHighlight,
     MaskBlur,
+    EyeSlash,
     Mask,
     Display,
     Window,
     Phone,
     CameraOff,
+    CameraOn,
     MicOff,
     SystemAudio,
     Gear,
@@ -229,6 +231,10 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             pen.line(&[(9.0, 15.2), (11.0, 15.2)]);
         }
+        Icon::CameraOn => {
+            pen.rrect(2.5, 6.0, 13.0, 15.0, 2.0);
+            pen.closed(&[(13.0, 9.0), (17.5, 6.5), (17.5, 14.5), (13.0, 12.0)]);
+        }
         Icon::CameraOff => {
             pen.rrect(2.5, 6.0, 13.0, 15.0, 2.0);
             pen.closed(&[(13.0, 9.0), (17.5, 6.5), (17.5, 14.5), (13.0, 12.0)]);
@@ -404,6 +410,21 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);
             pen.circle(10.0, 10.0, 3.6);
             pen.line(&[(7.4, 12.6), (12.6, 7.4)]);
+        }
+        Icon::EyeSlash => {
+            // Eye outline with a pupil, struck through.
+            let top: Vec<Pos2> = (0..=12).map(|i| {
+                let t = i as f32 / 12.0;
+                pen.pt(2.5 + 15.0 * t, 10.0 - 5.5 * (std::f32::consts::PI * t).sin())
+            }).collect();
+            let bottom: Vec<Pos2> = (0..=12).map(|i| {
+                let t = i as f32 / 12.0;
+                pen.pt(2.5 + 15.0 * t, 10.0 + 5.5 * (std::f32::consts::PI * t).sin())
+            }).collect();
+            p.add(egui::Shape::line(top, pen.s));
+            p.add(egui::Shape::line(bottom, pen.s));
+            pen.circle(10.0, 10.0, 2.4);
+            pen.line(&[(3.5, 3.0), (16.5, 17.0)]);
         }
         Icon::MaskBlur => {
             pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);

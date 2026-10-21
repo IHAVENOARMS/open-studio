@@ -14,8 +14,28 @@ pub fn scrcpy() -> Option<PathBuf> {
     find("scrcpy", "OPEN_STUDIO_SCRCPY")
 }
 
-fn adb() -> Option<PathBuf> {
+pub fn adb() -> Option<PathBuf> {
     find("adb", "OPEN_STUDIO_ADB")
+}
+
+/// scrcpy's phone-side server (used for phone cameras); it must match the
+/// installed scrcpy's version.
+pub fn scrcpy_server() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("SCRCPY_SERVER_PATH").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let mut dirs = vec![PathBuf::from("/usr/share/scrcpy"), PathBuf::from("/usr/local/share/scrcpy")];
+    if let Some(d) = std::env::var_os("APPDIR") {
+        dirs.insert(0, PathBuf::from(d).join("usr/share/scrcpy"));
+    }
+    adb()?;
+    dirs.into_iter().map(|d| d.join("scrcpy-server")).find(|p| p.is_file())
+}
+
+/// "4.1" from `scrcpy --version`.
+pub fn scrcpy_version() -> Option<String> {
+    let out = Command::new(scrcpy()?).arg("--version").output().ok()?;
+    String::from_utf8_lossy(&out.stdout).split_whitespace().nth(1).map(str::to_string)
 }
 
 fn find(name: &str, env: &str) -> Option<PathBuf> {

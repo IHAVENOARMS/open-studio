@@ -386,6 +386,124 @@ impl Default for ShortcutOverlay {
     }
 }
 
+/// Camera placement for a stretch of the video (the Layouts track).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraLayoutKind {
+    /// Camera over the screen at its position.
+    Default,
+    /// Screen and camera side by side (stacked on portrait canvases).
+    Split,
+    /// Camera fills the frame.
+    Fullscreen,
+    /// Screen only.
+    Hide,
+}
+
+impl CameraLayoutKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::Split => "Split screen",
+            Self::Fullscreen => "Fullscreen",
+            Self::Hide => "Hide camera",
+        }
+    }
+}
+
+/// The project-wide layout ("Default layout" cards).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraDefaultLayout {
+    Overlay,
+    Split,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraAspect {
+    Original,
+    Square,
+    Portrait,
+    Landscape,
+}
+
+impl CameraAspect {
+    pub const ALL: [CameraAspect; 4] = [Self::Original, Self::Square, Self::Portrait, Self::Landscape];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Original => "Original",
+            Self::Square => "1:1",
+            Self::Portrait => "3:4",
+            Self::Landscape => "16:9",
+        }
+    }
+    /// Width / height, given the camera's own aspect.
+    pub fn ratio(self, source: f64) -> f64 {
+        match self {
+            Self::Original => source,
+            Self::Square => 1.0,
+            Self::Portrait => 0.75,
+            Self::Landscape => 16.0 / 9.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct CameraSettings {
+    /// Hide the camera for the whole video.
+    pub hidden: bool,
+    pub layout: CameraDefaultLayout,
+    /// Column and row on the 3x3 position grid (the centre is not used).
+    pub position: [u8; 2],
+    /// Height as a fraction of the canvas height, when not zoomed in.
+    pub size: f64,
+    /// Shrink the camera while the screen is zoomed in.
+    pub shrink_on_zoom: bool,
+    pub zoom_size: f64,
+    pub aspect: CameraAspect,
+    /// 0 = square corners, 1 = fully round.
+    pub roundness: f64,
+    pub mirror: bool,
+    pub shadow: f64,
+    /// Lip-sync correction in seconds; positive shows the camera later.
+    pub delay: f64,
+}
+
+impl Default for CameraSettings {
+    fn default() -> Self {
+        Self {
+            hidden: false,
+            layout: CameraDefaultLayout::Overlay,
+            position: [2, 2],
+            size: 0.3,
+            shrink_on_zoom: true,
+            zoom_size: 0.2,
+            aspect: CameraAspect::Square,
+            roundness: 0.45,
+            mirror: false,
+            shadow: 0.6,
+            delay: 0.0,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct CameraLayoutSegment {
+    pub start: f64,
+    pub end: f64,
+    pub kind: CameraLayoutKind,
+    /// Overrides the project position (Default layout only).
+    pub position: Option<[u8; 2]>,
+    /// Overrides the project size while this layout is active.
+    pub custom_size: Option<f64>,
+    pub disabled: bool,
+}
+
+impl CameraLayoutSegment {
+    pub fn new(start: f64, end: f64, kind: CameraLayoutKind) -> Self {
+        Self { start, end, kind, position: None, custom_size: None, disabled: false }
+    }
+}
+
 /// A removed stretch of the recording, in recording time.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct Cut {
@@ -529,6 +647,9 @@ pub struct EditConfig {
     /// Removed stretches, sorted and non-overlapping.
     pub cuts: Vec<Cut>,
     pub captions: CaptionSettings,
+    pub camera: CameraSettings,
+    /// Layout changes over time (the Layouts track), sorted.
+    pub camera_layouts: Vec<CameraLayoutSegment>,
     /// 0..1, radial blur while the camera zooms.
     pub zoom_blur: f64,
     /// 0..1, directional blur while the camera pans.
@@ -564,6 +685,8 @@ impl Default for EditConfig {
             shortcuts: ShortcutOverlay::default(),
             cuts: vec![],
             captions: CaptionSettings::default(),
+            camera: CameraSettings::default(),
+            camera_layouts: vec![],
             zoom_blur: 0.5,
             pan_blur: 0.25,
         }
