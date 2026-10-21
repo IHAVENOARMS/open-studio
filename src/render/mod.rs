@@ -3,6 +3,7 @@
 
 pub mod background;
 pub mod cursor_image;
+pub mod keycaps;
 
 use crate::edit::{Background, EditConfig};
 use crate::engine::{CursorShape, FrameState, Layout};
@@ -30,12 +31,25 @@ struct SceneUniform {
     mask_params: [[f32; 4]; 8],
     bg: [[f32; 4]; 4],
     params: [f32; 4],
+    /// Card rect (screen plus inset), canvas units.
+    card: [f32; 4],
+    /// Inset colour (linear) and opacity; w = 0 when there is no inset.
+    inset: [f32; 4],
+    /// Shadow offset x, y, blur radius, inner screen radius.
+    shadow: [f32; 4],
+    /// Click effect: x, y, progress, kind (0 none, 1 circle, 2 ripple).
+    click: [f32; 4],
+    /// Click effect base radius, unused x3.
+    click2: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SpriteUniform {
-    rect: [f32; 4],
+    /// Corners in NDC, strip order: top-left, top-right (a); bottom-left,
+    /// bottom-right (b).
+    a: [f32; 4],
+    b: [f32; 4],
     tint: [f32; 4],
 }
 
@@ -43,6 +57,7 @@ struct SpriteUniform {
 /// (see [`cursor_image::PX_PER_UNIT`]).
 struct Sprite {
     bind: wgpu::BindGroup,
+    buf: wgpu::Buffer,
     size: (f32, f32),
     hotspot: (f32, f32),
 }
@@ -68,9 +83,10 @@ pub struct Compositor {
     mip_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     scene_buf: wgpu::Buffer,
-    sprite_buf: wgpu::Buffer,
     /// Cursor sprites by shape key, created on first use.
     sprites: std::collections::HashMap<String, Option<Sprite>>,
+    /// Keycap overlay image for the shortcut on screen.
+    keycaps: Option<(String, Sprite)>,
     video: Option<VideoTexture>,
     /// Background image (1x1 placeholder when unused) and what it was loaded from.
     bg_view: wgpu::TextureView,
@@ -186,12 +202,6 @@ impl Compositor {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let sprite_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("sprite uniform"),
-            size: std::mem::size_of::<SpriteUniform>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
         let placeholder = device.create_texture_with_data(
             &queue,
@@ -219,8 +229,8 @@ impl Compositor {
             mip_layout,
             sampler,
             scene_buf,
-            sprite_buf,
             sprites: Default::default(),
+            keycaps: None,
             video: None,
             bg_view: placeholder.create_view(&Default::default()),
             bg_key: None,
@@ -247,17 +257,23 @@ impl Compositor {
             rgba_premul,
         );
         let view = tex.create_view(&Default::default());
+        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sprite uniform"),
+            size: std::mem::size_of::<SpriteUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cursor"),
             layout: &self.scene_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.sprite_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view) },
             ],
         });
-        Sprite { bind, size, hotspot }
+        Sprite { bind, buf, size, hotspot }
     }
 
     /// Loads the sprite for a cursor shape: our vector drawing when we have
@@ -470,6 +486,7 @@ impl Compositor {
         let (ow, oh) = (out.0 as f32, out.1 as f32);
         let cam = frame.camera;
         let c = layout.content;
+        let card = layout.card;
         let gradient = |i: usize| {
             let p = &background::PRESETS[i % background::PRESETS.len()];
             (1.0, p.corners.map(background::linear))
@@ -532,6 +549,41 @@ impl Compositor {
             }),
             bg: bg.1,
             params: [lod, bg.0, bicubic, bg_lod],
+            card: [card.x as f32, card.y as f32, card.w as f32, card.h as f32],
+            inset: {
+                let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+                let i = &edit.inset;
+                let rgb = background::linear(i.color.map(to8));
+                let on = i.enabled && (c.w < card.w || c.h < card.h);
+                [rgb[0], rgb[1], rgb[2], if on { i.opacity as f32 } else { 0.0 }]
+            },
+            shadow: {
+                let radius = (edit.radius / 1080.0) as f32;
+                let inner = if edit.inset.enabled {
+                    let i = ((card.h - c.h) * 0.5) as f32;
+                    (radius - i).max(radius * 0.4)
+                } else {
+                    radius
+                };
+                match edit.shadow_style {
+                    crate::edit::ShadowStyle::Classic => [0.0, 0.012, 0.035, inner],
+                    crate::edit::ShadowStyle::Directional => {
+                        // Angle 0 = light from the top, so the shadow falls down.
+                        let a = edit.shadow_angle.to_radians();
+                        let d = edit.shadow_distance * 0.06;
+                        [(-a.sin() * d) as f32, (a.cos() * d) as f32, (0.008 + edit.shadow_softness * 0.07) as f32, inner]
+                    }
+                }
+            },
+            click: frame.click.map_or([0.0; 4], |k| {
+                let kind = match k.kind {
+                    crate::edit::ClickVisual::None => 0.0,
+                    crate::edit::ClickVisual::Circle => 1.0,
+                    crate::edit::ClickVisual::Ripple => 2.0,
+                };
+                [k.x as f32, k.y as f32, k.progress as f32, kind]
+            }),
+            click2: [(c.h * 0.035 * edit.cursor.size) as f32, 0.0, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&u));
 
@@ -561,14 +613,36 @@ impl Compositor {
             // Output pixels per cursor unit; an arrow is ~3.5% of the video height at size 1.
             let k = c.h * 0.035 * cs.scale * cam.scale * oh as f64 / 176.0 * cursor_image::PX_PER_UNIT as f64;
             let (w, h) = (sp.size.0 as f64 * k, sp.size.1 as f64 * k);
-            let x0 = px - sp.hotspot.0 as f64 * k;
-            let y0 = py - sp.hotspot.1 as f64 * k;
-            let ndc = |x: f64, y: f64| [(x / ow as f64 * 2.0 - 1.0) as f32, (1.0 - y / oh as f64 * 2.0) as f32];
-            let a = ndc(x0, y0);
-            let b = ndc(x0 + w, y0 + h);
-            // Strip order (0,0),(1,0),(0,1),(1,1) with uv y down.
-            let s = SpriteUniform { rect: [a[0], a[1], b[0], b[1]], tint: [1.0, 1.0, 1.0, cs.opacity as f32] };
-            self.queue.write_buffer(&self.sprite_buf, 0, bytemuck::bytes_of(&s));
+            // Corners relative to the hotspot, rotated about it.
+            let (hx, hy) = (sp.hotspot.0 as f64 * k, sp.hotspot.1 as f64 * k);
+            let (sn, cn) = cs.rotation.sin_cos();
+            let corner = |x: f64, y: f64| {
+                let (dx, dy) = (x - hx, y - hy);
+                ndc(ow, oh, px + dx * cn - dy * sn, py + dx * sn + dy * cn)
+            };
+            let s = quad([corner(0.0, 0.0), corner(w, 0.0), corner(0.0, h), corner(w, h)], cs.opacity);
+            self.queue.write_buffer(&sp.buf, 0, bytemuck::bytes_of(&s));
+        }
+
+        // Keycap overlay: bottom centre of the frame, outside the camera.
+        let keys = frame.keys.as_ref().filter(|k| k.opacity > 0.0 && !k.keys.is_empty());
+        if let Some(ko) = keys {
+            let key_h = (oh as f64 * 0.075 * ko.size).round().max(12.0) as u32;
+            let id = format!("{}|{key_h}", ko.keys.join("+"));
+            if self.keycaps.as_ref().map(|(k, _)| k) != Some(&id) {
+                let img = keycaps::render(&ko.keys, key_h);
+                let sp = self.make_sprite(&img.rgba, img.width, img.height, (img.width as f32, img.height as f32), (0.0, 0.0));
+                self.keycaps = Some((id, sp));
+            }
+            let (_, sp) = self.keycaps.as_ref().unwrap();
+            let (w, h) = (sp.size.0 as f64 * ko.scale, sp.size.1 as f64 * ko.scale);
+            let (cx, cy) = (ow as f64 * 0.5, oh as f64 - oh as f64 * 0.06 - sp.size.1 as f64 * 0.5);
+            let (x0, y0) = (cx - w * 0.5, cy - h * 0.5);
+            let s = quad(
+                [ndc(ow, oh, x0, y0), ndc(ow, oh, x0 + w, y0), ndc(ow, oh, x0, y0 + h), ndc(ow, oh, x0 + w, y0 + h)],
+                ko.opacity,
+            );
+            self.queue.write_buffer(&sp.buf, 0, bytemuck::bytes_of(&s));
         }
 
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -583,9 +657,26 @@ impl Compositor {
                     pass.set_bind_group(0, &sp.bind, &[]);
                     pass.draw(0..4, 0..1);
                 }
+                if let (Some(_), Some((_, sp))) = (keys, &self.keycaps) {
+                    pass.set_pipeline(&self.sprite_pipeline);
+                    pass.set_bind_group(0, &sp.bind, &[]);
+                    pass.draw(0..4, 0..1);
+                }
             }
         }
         self.queue.submit([enc.finish()])
+    }
+}
+
+fn ndc(ow: f32, oh: f32, x: f64, y: f64) -> [f32; 2] {
+    [(x / ow as f64 * 2.0 - 1.0) as f32, (1.0 - y / oh as f64 * 2.0) as f32]
+}
+
+fn quad(c: [[f32; 2]; 4], opacity: f64) -> SpriteUniform {
+    SpriteUniform {
+        a: [c[0][0], c[0][1], c[1][0], c[1][1]],
+        b: [c[2][0], c[2][1], c[3][0], c[3][1]],
+        tint: [1.0, 1.0, 1.0, opacity as f32],
     }
 }
 

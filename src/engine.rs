@@ -57,6 +57,9 @@ pub struct Rect {
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
     pub aspect: f64,
+    /// The rounded card (screen plus inset frame).
+    pub card: Rect,
+    /// Where the video sits.
     pub content: Rect,
     pub video_w: f64,
     pub video_h: f64,
@@ -69,8 +72,23 @@ impl Layout {
         let pad = edit.padding * aspect.min(1.0);
         let (aw, ah) = ((aspect - 2.0 * pad).max(0.05), (1.0 - 2.0 * pad).max(0.05));
         let (w, h) = if aw / ah > vr { (ah * vr, ah) } else { (aw, aw / vr) };
-        let content = Rect { x: (aspect - w) * 0.5, y: (1.0 - h) * 0.5, w, h };
-        Self { aspect, content, video_w: rec.width as f64, video_h: rec.height as f64 }
+        let card = Rect { x: (aspect - w) * 0.5, y: (1.0 - h) * 0.5, w, h };
+        let mut content = card;
+        if edit.inset.enabled && edit.inset.size > 0.0 {
+            // Shrink the video inside the card, keeping its aspect; the
+            // position setting moves it towards an edge.
+            let i = edit.inset.size * h;
+            let (aw, ah) = ((w - 2.0 * i).max(0.01), (h - 2.0 * i).max(0.01));
+            let (iw, ih) = if aw / ah > vr { (ah * vr, ah) } else { (aw, aw / vr) };
+            let [ox, oy] = edit.inset.offset.map(|v| v.clamp(-1.0, 1.0));
+            content = Rect {
+                x: card.x + (w - iw) * 0.5 + ox * ((w - iw) * 0.5),
+                y: card.y + (h - ih) * 0.5 + oy * ((h - ih) * 0.5),
+                w: iw,
+                h: ih,
+            };
+        }
+        Self { aspect, card, content, video_w: rec.width as f64, video_h: rec.height as f64 }
     }
 
     pub fn video_to_canvas(&self, x: f64, y: f64) -> (f64, f64) {
@@ -139,6 +157,8 @@ pub struct Tracks {
     cameras: Vec<Camera>,
     cursor: Vec<(f64, f64)>,
     duration: f64,
+    /// Shortcuts shown by the keycap overlay.
+    pub shortcuts: Vec<crate::shortcuts::Shortcut>,
 }
 
 impl Tracks {
@@ -154,9 +174,32 @@ impl Tracks {
         // Feed the spring a slightly future target so the smoothed cursor
         // stays in sync with the video instead of trailing it.
         let lead = cs.damping / cs.stiffness;
+        let style = &edit.cursor;
+        // Shake removal: the target only moves once the pointer leaves a
+        // small dead zone around it, which drops hand tremor.
+        let dead = layout.video_h * 0.006;
+        let mut held = start;
         for i in 0..n {
             let t = i as f64 * DT;
-            let (tx, ty) = rec.cursor_at(if edit.cursor.smooth { t + lead } else { t }).unwrap_or(start);
+            let mut ts = if style.smooth { t + lead } else { t };
+            if style.stop_at_end > 0.0 {
+                ts = ts.min((rec.duration - style.stop_at_end).max(0.0));
+            }
+            let (mut tx, mut ty) = rec.cursor_at(ts).unwrap_or(start);
+            if style.remove_shakes {
+                let (dx, dy) = (tx - held.0, ty - held.1);
+                let d = (dx * dx + dy * dy).sqrt();
+                if d > dead {
+                    held = (tx - dx / d * dead, ty - dy / d * dead);
+                }
+                (tx, ty) = held;
+            }
+            if style.loop_position && style.loop_duration > 0.0 {
+                // Glide back to where the cursor started so the video loops.
+                let f = ((t - (rec.duration - style.loop_duration)) / style.loop_duration).clamp(0.0, 1.0);
+                let e = f * f * (3.0 - 2.0 * f);
+                (tx, ty) = (tx + (start.0 - tx) * e, ty + (start.1 - ty) * e);
+            }
             if edit.cursor.smooth {
                 cs.step(&mut x, &mut vx, tx, DT);
                 cs.step(&mut y, &mut vy, ty, DT);
@@ -217,6 +260,17 @@ impl Tracks {
             let segment_changed = active != seg_idx;
             active = seg_idx;
             match curve {
+                _ if edit.instant_animation => {
+                    // Cut straight to the target, then follow the cursor.
+                    if segment_changed || i == 0 {
+                        (cam.cx, cam.cy, ls) = (target.0, target.1, target_scale.ln());
+                        (vcx, vcy, vls) = (0.0, 0.0, 0.0);
+                    } else {
+                        spring.step(&mut cam.cx, &mut vcx, target.0, DT);
+                        spring.step(&mut cam.cy, &mut vcy, target.1, DT);
+                        ls = target_scale.ln();
+                    }
+                }
                 ZoomCurve::Spring { .. } => {
                     spring.step(&mut cam.cx, &mut vcx, target.0, DT);
                     spring.step(&mut cam.cy, &mut vcy, target.1, DT);
@@ -248,7 +302,13 @@ impl Tracks {
             let (cx, cy) = clamp_in_canvas(cam.cx, cam.cy, cam.scale, &layout);
             cameras.push(Camera { cx, cy, scale: cam.scale });
         }
-        Self { layout, cameras, cursor, duration: rec.duration }
+        let o = &edit.shortcuts;
+        let shortcuts = if o.show {
+            crate::shortcuts::detect(rec, o.single_keys).into_iter().filter(|s| !o.disabled.contains(&s.id)).collect()
+        } else {
+            vec![]
+        };
+        Self { layout, cameras, cursor, duration: rec.duration, shortcuts }
     }
 
     fn index(&self, t: f64) -> (usize, f64) {
@@ -296,6 +356,30 @@ pub struct FrameState {
     pub blur_to: Camera,
     pub cursor: Option<CursorState>,
     pub masks: Vec<ActiveMask>,
+    pub click: Option<ClickFx>,
+    pub keys: Option<KeyOverlay>,
+}
+
+/// Click highlight drawn under the cursor.
+#[derive(Clone, Copy, Debug)]
+pub struct ClickFx {
+    /// Canvas units.
+    pub x: f64,
+    pub y: f64,
+    /// 0..1 through the animation.
+    pub progress: f64,
+    pub kind: crate::edit::ClickVisual,
+}
+
+/// Keycaps for the shortcut being shown.
+#[derive(Clone, Debug)]
+pub struct KeyOverlay {
+    pub keys: Vec<&'static str>,
+    /// Fade and pop-in, 0..1.
+    pub opacity: f64,
+    pub scale: f64,
+    /// Size multiplier from the settings.
+    pub size: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -337,6 +421,8 @@ pub struct CursorState {
     pub scale: f64,
     pub opacity: f64,
     pub shape: CursorShape,
+    /// Tilt in radians (rotate while moving).
+    pub rotation: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -376,16 +462,69 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
     } else {
         (camera, camera)
     };
-    let cursor = if rec.cursor_embedded || rec.events.moves.is_empty() {
+    let cursor = if rec.cursor_embedded || rec.events.moves.is_empty() || edit.cursor.hidden {
         None
     } else {
         cursor_shape(rec, edit, t).map(|shape| {
             let (vx, vy) = tracks.cursor(t);
             let (x, y) = tracks.layout.video_to_canvas(vx, vy);
-            CursorState { x, y, scale: edit.cursor.size * click_squish(rec, edit, t), opacity: idle_opacity(rec, edit, t), shape }
+            let rotation = cursor_tilt(tracks, edit, t);
+            CursorState { x, y, scale: edit.cursor.size * click_squish(rec, edit, t), opacity: idle_opacity(rec, edit, t), shape, rotation }
         })
     };
-    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t) }
+    let click = cursor.as_ref().and_then(|_| click_fx(rec, edit, tracks, t));
+    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t), click, keys: key_overlay(edit, tracks, t) }
+}
+
+/// Tilt following horizontal speed, up to about 25 degrees at full setting.
+fn cursor_tilt(tracks: &Tracks, edit: &EditConfig, t: f64) -> f64 {
+    if edit.cursor.rotate <= 0.0 {
+        return 0.0;
+    }
+    let h = 0.03;
+    let (a, b) = (tracks.cursor(t - h), tracks.cursor(t + h));
+    // Screen heights per second.
+    let v = (b.0 - a.0) / (2.0 * h) / tracks.layout.video_h;
+    (v * 0.35).tanh() * 0.44 * edit.cursor.rotate
+}
+
+/// Circle or ripple at the most recent click, for 0.5s.
+fn click_fx(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64) -> Option<ClickFx> {
+    const LEN: f64 = 0.5;
+    if edit.cursor.click_visual == crate::edit::ClickVisual::None {
+        return None;
+    }
+    let clicks = &rec.events.clicks;
+    let i = clicks.partition_point(|c| c.t <= t);
+    let c = clicks[..i].iter().rev().find(|c| c.down)?;
+    let progress = (t - c.t) / LEN;
+    if progress >= 1.0 {
+        return None;
+    }
+    // Drawn where the rendered cursor is, so smoothing doesn't detach it.
+    let (vx, vy) = tracks.cursor(c.t);
+    let (x, y) = tracks.layout.video_to_canvas(vx, vy);
+    Some(ClickFx { x, y, progress, kind: edit.cursor.click_visual })
+}
+
+/// The shortcut on screen at `t`: shown for 1.4s or until the next one.
+fn key_overlay(edit: &EditConfig, tracks: &Tracks, t: f64) -> Option<KeyOverlay> {
+    const SHOW: f64 = 1.4;
+    const FADE_IN: f64 = 0.12;
+    const FADE_OUT: f64 = 0.25;
+    let list = &tracks.shortcuts;
+    let i = list.partition_point(|s| s.t <= t);
+    let s = list[..i].last()?;
+    let end = list.get(i).map_or(s.t + SHOW, |n| n.t.min(s.t + SHOW));
+    let age = t - s.t;
+    if t >= end {
+        return None;
+    }
+    let fin = (age / FADE_IN).min(1.0);
+    let fout = ((end - t) / FADE_OUT).min(1.0);
+    // Back-out pop: 0.9 -> ~1.02 -> 1.
+    let pop = 1.0 - 0.1 * (1.0 - fin).powi(2) + 0.02 * (fin * std::f64::consts::PI).sin();
+    Some(KeyOverlay { keys: s.keys.clone(), opacity: fin.min(fout), scale: pop, size: edit.shortcuts.size })
 }
 
 fn click_squish(rec: &Recording, edit: &EditConfig, t: f64) -> f64 {
@@ -438,6 +577,7 @@ mod tests {
             events: Events { moves: vec![[0.0, 960.0, 540.0], [6.0, 960.0, 540.0]], ..Default::default() },
             custom_cursors: vec![],
             audio: vec![],
+            camera: None,
             dir: Default::default(),
         }
     }
@@ -467,5 +607,42 @@ mod tests {
     fn spring_presets_match_previous_behaviour() {
         let s = scales(ZoomCurve::from_speed(crate::edit::AnimationSpeed::Mellow));
         assert!(s[0] < 1.05 && s[40] > 1.9);
+    }
+
+    fn moving_rec() -> Recording {
+        let mut r = rec();
+        r.events.moves = (0..=60).map(|i| [i as f64 * 0.1, 100.0 + i as f64 * 20.0, 540.0]).collect();
+        r
+    }
+
+    #[test]
+    fn cursor_options() {
+        let r = moving_rec();
+        let mut edit = EditConfig { zoom_segments: vec![], ..Default::default() };
+        edit.cursor.smooth = false;
+        edit.cursor.stop_at_end = 2.0;
+        let t = Tracks::build(&r, &edit);
+        assert!((t.cursor(5.5).0 - t.cursor(4.2).0).abs() < 1.0, "stopped in the last 2s");
+
+        edit.cursor.stop_at_end = 0.0;
+        edit.cursor.loop_position = true;
+        edit.cursor.loop_duration = 1.0;
+        let t = Tracks::build(&r, &edit);
+        assert!((t.cursor(6.0).0 - 100.0).abs() < 1.0, "back at start: {}", t.cursor(6.0).0);
+
+        edit.cursor.hidden = true;
+        assert!(frame_state(&r, &edit, &t, 1.0, 60.0).cursor.is_none());
+    }
+
+    #[test]
+    fn instant_animation_cuts() {
+        let mut edit = EditConfig {
+            zoom_segments: vec![ZoomSegment { start: 1.0, end: 5.0, scale: 2.0, focus: ZoomFocus::Auto }],
+            ..Default::default()
+        };
+        edit.instant_animation = true;
+        let t = Tracks::build(&rec(), &edit);
+        assert!((t.camera(1.01).scale - 2.0).abs() < 1e-6);
+        assert!((t.camera(5.01).scale - 1.0).abs() < 1e-6);
     }
 }

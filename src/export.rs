@@ -152,8 +152,12 @@ pub fn export(
     if !status.success() {
         bail!("ffmpeg exited with {status}");
     }
-    if !gif && !rec.audio.is_empty() && !edit.audio.mute {
-        mux_audio(dir, rec, edit, &video_out, start, end)?;
+    if !gif && !edit.audio.mute {
+        let clicks = crate::clicks::render_track(rec, edit);
+        let tracks = audio_tracks(rec, edit, clicks.as_deref());
+        if !tracks.is_empty() {
+            mux_audio(dir, &tracks, &video_out, start, end)?;
+        }
     }
     if gif {
         let filter = "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle";
@@ -172,29 +176,68 @@ pub fn export(
     Ok(())
 }
 
-/// Mixes the recording's audio tracks into the exported MP4: each track is
-/// shifted by its offset, trimmed to the edited range and gain-adjusted.
-fn mux_audio(dir: &Path, rec: &Recording, edit: &EditConfig, video: &Path, start: f64, end: f64) -> Result<()> {
+/// One input to the export mix.
+pub struct MixTrack {
+    pub path: std::path::PathBuf,
+    /// Start on the video timeline, seconds.
+    pub offset: f64,
+    pub gain: f64,
+    /// Extra ffmpeg filters (mic processing).
+    pub filter: String,
+    /// Repeat to fill the video (background music).
+    pub looped: bool,
+}
+
+/// Audio sources after applying the Audio tab: microphone (with its mode),
+/// system audio, background music and click sounds.
+pub fn audio_tracks(rec: &Recording, edit: &EditConfig, clicks: Option<&Path>) -> Vec<MixTrack> {
+    let a = &edit.audio;
+    let mut out = vec![];
+    for t in &rec.audio {
+        let (muted, gain, filter) = if t.kind == "microphone" {
+            (a.mute_microphone || a.mic_mode == crate::edit::MicMode::Off, a.microphone_volume, a.mic_mode.filter().to_string())
+        } else {
+            (a.mute_system, a.system_volume, String::new())
+        };
+        if !muted {
+            out.push(MixTrack { path: rec.dir.join(&t.file), offset: t.offset, gain, filter, looped: false });
+        }
+    }
+    if let (Some(m), false) = (&a.music, a.mute_music) {
+        out.push(MixTrack { path: m.into(), offset: 0.0, gain: a.music_volume, filter: String::new(), looped: true });
+    }
+    if let Some(c) = clicks {
+        out.push(MixTrack { path: c.to_path_buf(), offset: 0.0, gain: edit.cursor.click_volume, filter: String::new(), looped: false });
+    }
+    out
+}
+
+/// Mixes audio into the exported MP4: each track is shifted by its offset,
+/// trimmed to the edited range, filtered and gain-adjusted.
+fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f64) -> Result<()> {
     let tmp = video.with_extension("audio.mp4");
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video);
     let mut filters = vec![];
     let mut labels = String::new();
-    for (i, track) in rec.audio.iter().enumerate() {
-        cmd.arg("-i").arg(dir.join(&track.file));
-        let gain = if track.kind == "microphone" { edit.audio.microphone_volume } else { edit.audio.system_volume };
+    for (i, track) in tracks.iter().enumerate() {
+        if track.looped {
+            cmd.args(["-stream_loop", "-1"]);
+        }
+        cmd.arg("-i").arg(&track.path);
         // Audio time = video time - offset.
         let (a0, a1) = ((start - track.offset).max(0.0), (end - track.offset).max(0.0));
         let lead_ms = ((track.offset - start).max(0.0) * 1000.0).round() as i64;
-        let denoise = if track.kind == "microphone" && edit.audio.noise_reduction { "afftdn=nr=12:nf=-40," } else { "" };
+        let extra = if track.filter.is_empty() { String::new() } else { format!("{},", track.filter) };
         filters.push(format!(
-            "[{}:a]atrim=start={a0:.4}:end={a1:.4},asetpts=PTS-STARTPTS,{denoise}adelay={lead_ms}:all=1,volume={gain:.3}[a{i}]",
-            i + 1
+            "[{}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=start={a0:.4}:end={a1:.4},asetpts=PTS-STARTPTS,{extra}adelay={lead_ms}:all=1,volume={:.3}[a{i}]",
+            i + 1,
+            track.gain
         ));
         labels.push_str(&format!("[a{i}]"));
     }
-    let n = rec.audio.len();
-    filters.push(format!("{labels}amix=inputs={n}:normalize=0:duration=longest,atrim=end={:.4}[aout]", end - start));
+    let n = tracks.len();
+    filters.push(format!("{labels}amix=inputs={n}:normalize=0:duration=longest,atrim=end={:.4},apad[aout]", end - start));
     cmd.args(["-filter_complex", &filters.join(";")]);
     cmd.args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"]);
     cmd.arg(&tmp);

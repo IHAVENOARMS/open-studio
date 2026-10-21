@@ -1,6 +1,8 @@
 //! The editor window: preview canvas, settings sidebar and timeline.
 
 mod audio;
+mod camera_ui;
+mod captions_ui;
 mod cursors;
 mod curve;
 mod mask_overlay;
@@ -96,6 +98,7 @@ impl Editor {
         let player = Player::new(paths.video(), (rec.width, rec.height), rec.fps, ctx.clone());
         let (start, _) = edit.trim_range(rec.duration);
         player.seek(start);
+        let audio = audio::AudioPreview::new(&rec, &edit);
         Ok(Self {
             name: paths.name(),
             dir,
@@ -105,7 +108,7 @@ impl Editor {
             changed_at: None,
             edit,
             player,
-            audio: audio::AudioPreview::new(&rec),
+            audio,
             waveform: audio::envelope_async(&rec, ctx.clone()),
             comp: Compositor::new(rs.device.clone(), rs.queue.clone()),
             target: None,
@@ -189,7 +192,14 @@ impl Editor {
         }
 
         self.handle_keys(&ctx);
-        self.audio.set_volumes(self.edit.audio.microphone_volume, self.edit.audio.system_volume, self.edit.audio.mute);
+        // Track set changed (music, mutes, click sounds): rebuild the player.
+        if !self.audio.is_current(&self.edit) {
+            self.audio = audio::AudioPreview::new(&self.rec, &self.edit);
+            if self.playing.is_some() {
+                self.audio.play(self.time);
+            }
+        }
+        self.audio.set_muted(self.edit.audio.mute);
 
         egui::Panel::top("topbar")
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(16, 10)))

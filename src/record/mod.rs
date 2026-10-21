@@ -261,6 +261,7 @@ impl Recorder {
             events: Events { moves, clicks: vec![], keys: vec![], shapes: vec![] },
             custom_cursors: vec![],
             audio: vec![],
+            camera: None,
             dir: self.dir.clone(),
         };
         for (kind, res) in audio_results {

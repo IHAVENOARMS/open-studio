@@ -16,32 +16,45 @@ struct Track {
     pipeline: gst::Pipeline,
     volume: gst::Element,
     offset: f64,
-    kind: String,
 }
 
+/// Preview playback of the export mix (without the microphone filters).
 pub struct AudioPreview {
     tracks: Vec<Track>,
+    /// Settings the tracks were built from; rebuilt when these change.
+    key: String,
 }
 
 impl AudioPreview {
-    pub fn new(rec: &Recording) -> Self {
+    pub fn new(rec: &Recording, edit: &crate::edit::EditConfig) -> Self {
         let _ = gst::init();
-        let tracks = rec
-            .audio
+        let clicks = crate::clicks::render_track(rec, edit);
+        let mix = crate::export::audio_tracks(rec, edit, clicks.as_deref());
+        let tracks = mix
             .iter()
             .filter_map(|t| {
-                let path = rec.dir.join(&t.file);
                 let desc = format!(
-                    "filesrc location=\"{}\" ! wavparse ! audioconvert ! audioresample ! volume name=v ! autoaudiosink",
-                    path.display()
+                    "filesrc location=\"{}\" ! decodebin ! audioconvert ! audioresample ! volume name=v volume={} ! autoaudiosink",
+                    t.path.display(),
+                    t.gain
                 );
                 let pipeline = gst::parse::launch(&desc).ok()?.downcast::<gst::Pipeline>().ok()?;
                 let volume = pipeline.by_name("v")?;
                 pipeline.set_state(gst::State::Paused).ok()?;
-                Some(Track { pipeline, volume, offset: t.offset, kind: t.kind.clone() })
+                Some(Track { pipeline, volume, offset: t.offset })
             })
             .collect();
-        Self { tracks }
+        Self { tracks, key: Self::key_for(edit) }
+    }
+
+    /// What, besides volume, changes the set of tracks.
+    pub fn key_for(edit: &crate::edit::EditConfig) -> String {
+        let a = &edit.audio;
+        format!("{:?}{}{}{:?}{}{:?}{}", a.music, a.mute_music, a.mute_microphone, a.mic_mode, a.mute_system, edit.cursor.click_sound, edit.cursor.hidden)
+    }
+
+    pub fn is_current(&self, edit: &crate::edit::EditConfig) -> bool {
+        self.key == Self::key_for(edit)
     }
 
     /// Starts playing from video time `t`.
@@ -62,10 +75,9 @@ impl AudioPreview {
         }
     }
 
-    pub fn set_volumes(&self, mic: f64, system: f64, mute: bool) {
+    pub fn set_muted(&self, mute: bool) {
         for tr in &self.tracks {
-            let v = if mute { 0.0 } else if tr.kind == "microphone" { mic } else { system };
-            tr.volume.set_property("volume", v);
+            let _ = tr.volume.set_property("mute", mute);
         }
     }
 }

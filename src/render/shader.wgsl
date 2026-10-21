@@ -15,6 +15,11 @@ struct Scene {
     bg2: vec4f,
     bg3: vec4f,
     params: vec4f,       // video lod, bg kind (0 colour, 1 gradient, 2 image), bicubic flag, bg lod
+    card: vec4f,         // card rect (screen plus inset frame)
+    inset: vec4f,        // inset colour, opacity (0 = no inset)
+    shadow: vec4f,       // offset x, y, blur radius, inner screen radius
+    click: vec4f,        // click effect x, y, progress, kind (0 none, 1 circle, 2 ripple)
+    click2: vec4f,       // base radius
 };
 
 @group(0) @binding(0) var<uniform> u: Scene;
@@ -154,20 +159,31 @@ fn apply_masks(v_in: vec3f, uv: vec2f) -> vec3f {
 // Scene colour at canvas point q; `px` is the size of one output pixel in canvas units.
 fn scene(q: vec2f, px: f32) -> vec3f {
     var col = background(q);
-    let half = u.content.zw * 0.5;
-    let center = u.content.xy + half;
+    let half = u.card.zw * 0.5;
+    let center = u.card.xy + half;
     let r = min(u.radius, min(half.x, half.y));
 
     let shadow = u.cam.w;
     if (shadow > 0.0) {
-        let blur = 0.035;
-        let ds = sd_round_rect(q - center - vec2f(0.0, 0.012), half, r);
+        let blur = u.shadow.z;
+        let ds = sd_round_rect(q - center - u.shadow.xy, half, r);
         let a = shadow * 0.7 * (1.0 - smoothstep(-blur, blur * 1.6, ds));
         col = mix(col, vec3f(0.0), a);
     }
 
-    let d = sd_round_rect(q - center, half, r);
-    let cover = clamp(0.5 - d / px, 0.0, 1.0);
+    var cover: f32;
+    if (u.inset.w > 0.0) {
+        // Inset frame: the card in the inset colour, the screen inside it.
+        let dc = sd_round_rect(q - center, half, r);
+        let card_cover = clamp(0.5 - dc / px, 0.0, 1.0);
+        col = mix(col, u.inset.rgb, card_cover * u.inset.w);
+        let ih = u.content.zw * 0.5;
+        let di = sd_round_rect(q - (u.content.xy + ih), ih, min(u.shadow.w, min(ih.x, ih.y)));
+        cover = clamp(0.5 - di / px, 0.0, 1.0);
+    } else {
+        let d = sd_round_rect(q - center, half, r);
+        cover = clamp(0.5 - d / px, 0.0, 1.0);
+    }
     if (cover > 0.0) {
         let uv = (q - u.content.xy) / u.content.zw;
         var v: vec3f;
@@ -184,6 +200,27 @@ fn scene(q: vec2f, px: f32) -> vec3f {
     return col;
 }
 
+// Click highlight: a soft filled circle or an expanding ring.
+fn click_fx(col: vec3f, q: vec2f, px: f32) -> vec3f {
+    let kind = u.click.w;
+    if (kind < 0.5) {
+        return col;
+    }
+    let p = u.click.z;
+    let base = u.click2.x;
+    let d = length(q - u.click.xy);
+    let e = 1.0 - pow(1.0 - p, 3.0);
+    if (kind < 1.5) {
+        let r = base * (0.45 + 0.35 * e);
+        let a = clamp(0.5 - (d - r) / px, 0.0, 1.0) * 0.32 * (1.0 - p);
+        return mix(col, vec3f(1.0), a);
+    }
+    let r = base * (0.25 + 1.05 * e);
+    let w = base * 0.07 * (1.0 - 0.5 * p) + px * 0.5;
+    let a = clamp(0.5 - (abs(d - r) - w) / px, 0.0, 1.0) * 0.75 * (1.0 - p);
+    return mix(col, vec3f(1.0), a);
+}
+
 fn to_canvas(p: vec2f, cam: vec3f) -> vec2f {
     let unit = p / u.out_size.y; // output pixels -> canvas-height units
     return cam.xy + (unit - vec2f(u.aspect * 0.5, 0.5)) / cam.z;
@@ -196,7 +233,8 @@ fn fs_scene(in: VsOut) -> @location(0) vec4f {
     let cur = u.cam.xyz;
     if (n <= 1) {
         let px = 1.0 / (u.out_size.y * cur.z);
-        return vec4f(scene(to_canvas(p, cur), px), 1.0);
+        let q = to_canvas(p, cur);
+        return vec4f(click_fx(scene(q, px), q, px), 1.0);
     }
     // Motion blur. Between the shutter-start and shutter-end cameras each
     // pixel moves by a radial part (scale change, about the frame centre) plus
@@ -215,13 +253,14 @@ fn fs_scene(in: VsOut) -> @location(0) vec4f {
         let f = f32(i) / f32(n) + jitter - 0.5;
         acc += scene(q0 + d * f, px);
     }
-    return vec4f(acc / f32(n), 1.0);
+    return vec4f(click_fx(acc / f32(n), q0, px), 1.0);
 }
 
 // ---- Cursor --------------------------------------------------------------
 
 struct Sprite {
-    rect: vec4f,   // x0, y0, x1, y1 in NDC
+    a: vec4f,      // NDC corners: top-left xy, top-right zw
+    b: vec4f,      // bottom-left xy, bottom-right zw
     tint: vec4f,   // opacity in w
 };
 
@@ -233,7 +272,14 @@ struct Sprite {
 fn vs_sprite(@builtin(vertex_index) i: u32) -> VsOut {
     let c = vec2f(f32(i & 1u), f32((i >> 1u) & 1u));
     var o: VsOut;
-    o.pos = vec4f(mix(sprite.rect.xy, sprite.rect.zw, c), 0.0, 1.0);
+    var corner: vec2f;
+    switch i {
+        case 0u: { corner = sprite.a.xy; }
+        case 1u: { corner = sprite.a.zw; }
+        case 2u: { corner = sprite.b.xy; }
+        default: { corner = sprite.b.zw; }
+    }
+    o.pos = vec4f(corner, 0.0, 1.0);
     o.uv = c;
     return o;
 }

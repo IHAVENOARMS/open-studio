@@ -10,7 +10,6 @@ pub enum Icon {
     Aspect,
     Sparkle,
     Image,
-    Cursor,
     Zoom,
     Mouse,
     Back,
@@ -43,6 +42,16 @@ pub enum Icon {
     PauseCircle,
     Keyboard,
     Mic,
+    // Editor rail.
+    RailBackground,
+    RailCursor,
+    RailCameraLayout,
+    RailCameraStyle,
+    RailCaptions,
+    RailTranscript,
+    RailAudio,
+    RailShortcuts,
+    RailAnimation,
 }
 
 struct Pen<'a> {
@@ -104,7 +113,6 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(2.8, 14.0), (7.5, 9.5), (11.0, 12.5), (13.5, 10.5), (17.2, 13.5)]);
             pen.circle(13.0, 7.2, 1.4);
         }
-        Icon::Cursor => pen.closed(&[(5.0, 2.5), (5.0, 15.5), (8.3, 12.4), (10.6, 17.3), (12.6, 16.4), (10.4, 11.6), (14.8, 11.6)]),
         Icon::Zoom => {
             pen.circle(8.5, 8.5, 5.5);
             pen.line(&[(12.5, 12.5), (17.0, 17.0)]);
@@ -256,6 +264,70 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.circle(10.0, 10.0, 7.5);
             pen.line(&[(8.2, 7.0), (8.2, 13.0)]);
             pen.line(&[(11.8, 7.0), (11.8, 13.0)]);
+        }
+        Icon::RailBackground => {
+            // Dashed rounded square with a filled inner square.
+            let segs = [
+                ((4.0, 2.5), (8.0, 2.5)), ((12.0, 2.5), (16.0, 2.5)), ((4.0, 17.5), (8.0, 17.5)), ((12.0, 17.5), (16.0, 17.5)),
+                ((2.5, 4.0), (2.5, 8.0)), ((2.5, 12.0), (2.5, 16.0)), ((17.5, 4.0), (17.5, 8.0)), ((17.5, 12.0), (17.5, 16.0)),
+            ];
+            for (a, b) in segs {
+                pen.line(&[a, b]);
+            }
+            p.rect_filled(Rect::from_min_max(pen.pt(6.0, 6.0), pen.pt(14.0, 14.0)), 1.5 * k, color);
+        }
+        Icon::RailCursor => pen.fill(&[(5.5, 2.5), (5.5, 16.0), (8.8, 12.9), (11.2, 17.6), (13.4, 16.6), (11.0, 12.0), (15.6, 12.0)]),
+        Icon::RailCameraLayout => {
+            pen.rrect(2.5, 3.5, 17.5, 15.0, 2.0);
+            p.circle_filled(pen.pt(13.5, 10.0), 1.6 * k, color);
+            pen.fill(&[(10.8, 15.0), (11.2, 12.9), (13.5, 12.2), (15.8, 12.9), (16.2, 15.0)]);
+        }
+        Icon::RailCameraStyle => {
+            for (a, b, c) in [((2.5, 6.5), (2.5, 2.5), (6.5, 2.5)), ((13.5, 2.5), (17.5, 2.5), (17.5, 6.5)), ((17.5, 13.5), (17.5, 17.5), (13.5, 17.5)), ((6.5, 17.5), (2.5, 17.5), (2.5, 13.5))] {
+                pen.line(&[a, b, c]);
+            }
+            p.circle_filled(pen.pt(10.0, 8.2), 2.4 * k, color);
+            pen.fill(&[(5.8, 15.0), (6.6, 12.4), (10.0, 11.4), (13.4, 12.4), (14.2, 15.0)]);
+        }
+        Icon::RailCaptions => {
+            pen.closed(&[(3.0, 3.5), (17.0, 3.5), (17.0, 13.5), (9.0, 13.5), (5.5, 17.0), (5.5, 13.5), (3.0, 13.5)]);
+            pen.line(&[(6.0, 7.0), (14.0, 7.0)]);
+            pen.line(&[(6.0, 10.0), (11.5, 10.0)]);
+        }
+        Icon::RailTranscript => {
+            for x in [3.5, 7.0] {
+                p.circle_filled(pen.pt(x, 5.0), 1.5 * k, color);
+                pen.line(&[(x + 1.3, 5.2), (x + 0.6, 8.0)]);
+            }
+            pen.line(&[(11.0, 5.0), (17.5, 5.0)]);
+            pen.line(&[(2.5, 11.0), (17.5, 11.0)]);
+            pen.line(&[(2.5, 16.0), (13.0, 16.0)]);
+        }
+        Icon::RailAudio => {
+            pen.closed(&[(3.0, 7.5), (6.5, 7.5), (10.5, 4.0), (10.5, 16.0), (6.5, 12.5), (3.0, 12.5)]);
+            let arc: Vec<(f32, f32)> = (0..=12).map(|i| {
+                let a = -0.9 + i as f32 / 12.0 * 1.8;
+                (11.5 + 5.0 * a.cos(), 10.0 + 5.0 * a.sin())
+            }).collect();
+            pen.line(&arc);
+        }
+        Icon::RailShortcuts => {
+            // Command (⌘) glyph: four loops joined by a square.
+            pen.rrect(7.5, 7.5, 12.5, 12.5, 0.2);
+            for (cx, cy) in [(5.5, 5.5), (14.5, 5.5), (14.5, 14.5), (5.5, 14.5)] {
+                pen.circle(cx, cy, 2.0);
+            }
+        }
+        Icon::RailAnimation => {
+            let pts: Vec<(f32, f32)> = (0..=20).map(|i| {
+                let t = i as f32 / 20.0;
+                let x = 4.0 + 12.0 * t;
+                let y = 15.5 - 11.0 * (t * t * (3.0 - 2.0 * t));
+                (x - 2.0 * (t * std::f32::consts::PI * 2.0).sin(), y)
+            }).collect();
+            pen.line(&pts);
+            p.circle_filled(pen.pt(4.0, 15.5), 1.8 * k, color);
+            p.circle_filled(pen.pt(16.0, 4.5), 1.8 * k, color);
         }
         Icon::Mic => {
             pen.rrect(7.5, 2.5, 12.5, 11.5, 2.5);

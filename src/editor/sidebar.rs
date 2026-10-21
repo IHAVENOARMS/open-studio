@@ -2,7 +2,7 @@
 
 use super::widgets;
 use super::timeline::{Selection, Track};
-use crate::edit::{AnimationSpeed, Background, EditConfig, Mask, MaskKind, ZoomFocus};
+use crate::edit::{AnimationSpeed, Background, ClickSound, ClickVisual, EditConfig, Mask, MaskKind, MicMode, ScreenAnimation, ShadowStyle, ZoomFocus};
 use crate::project::Recording;
 use crate::render::background::PRESETS;
 use crate::dialogs;
@@ -13,20 +13,43 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use crate::icons::{self, Icon};
 use crate::theme;
-use egui::{Color32, CornerRadius, Rect, RichText, Sense, Ui, vec2};
+use egui::{Color32, CornerRadius, Rect, RichText, Sense, Ui, pos2, vec2};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Background,
     Cursor,
+    CameraLayout,
+    CameraStyle,
+    Captions,
+    Transcript,
+    Audio,
+    Shortcuts,
     Animation,
 }
 
-const TABS: [(Tab, Icon, &str); 3] = [
-    (Tab::Background, Icon::Image, "Background"),
-    (Tab::Cursor, Icon::Cursor, "Cursor"),
-    (Tab::Animation, Icon::Zoom, "Zoom & animation"),
+/// The editor's right rail, in Screen Studio's order (Ctrl+1..9).
+pub const TABS: [(Tab, Icon, &str); 9] = [
+    (Tab::Background, Icon::RailBackground, "Background & Screen"),
+    (Tab::Cursor, Icon::RailCursor, "Cursor"),
+    (Tab::CameraLayout, Icon::RailCameraLayout, "Camera Layout"),
+    (Tab::CameraStyle, Icon::RailCameraStyle, "Camera Style"),
+    (Tab::Captions, Icon::RailCaptions, "Captions"),
+    (Tab::Transcript, Icon::RailTranscript, "Transcript"),
+    (Tab::Audio, Icon::RailAudio, "Audio"),
+    (Tab::Shortcuts, Icon::RailShortcuts, "Keyboard shortcuts"),
+    (Tab::Animation, Icon::RailAnimation, "Animations"),
 ];
+
+/// Tabs with nothing to edit for this recording are shown disabled.
+fn tab_enabled(t: Tab, rec: &Recording) -> bool {
+    match t {
+        Tab::CameraLayout | Tab::CameraStyle => rec.camera.is_some(),
+        Tab::Captions | Tab::Transcript => rec.audio.iter().any(|a| a.kind == "microphone"),
+        Tab::Shortcuts => !rec.events.keys.is_empty(),
+        _ => true,
+    }
+}
 
 struct Download {
     total: usize,
@@ -48,6 +71,8 @@ pub struct State {
     converting: Option<Receiver<Option<String>>>,
     /// Cursor theme UI state.
     pub cursors: super::cursors::State,
+    picking_music: Option<Receiver<Vec<std::path::PathBuf>>>,
+    pub captions: super::captions_ui::State,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -69,19 +94,48 @@ pub fn show(
     let mut seek = None;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
-        // Icon strip.
+        // Icon rail: plain icons, the active one lavender with a small dot.
         ui.vertical(|ui| {
-            ui.add_space(8.0);
-            ui.spacing_mut().item_spacing.y = 14.0;
-            for (t, icon, name) in TABS {
-                let active = *tab == t && selected.is_none();
-                let (rect, resp) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
-                if active {
-                    ui.painter().rect_filled(rect, CornerRadius::same(8), theme::SURFACE_HOVER);
+            ui.add_space(6.0);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            // Ctrl+1..9 switch tabs, unless a text field has focus.
+            if ui.memory(|m| m.focused().is_none()) {
+                const KEYS: [egui::Key; 9] = [
+                    egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4, egui::Key::Num5,
+                    egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9,
+                ];
+                for (i, key) in KEYS.iter().enumerate() {
+                    if ui.input_mut(|inp| inp.consume_key(egui::Modifiers::COMMAND, *key)) {
+                        if let Some((t, ..)) = TABS.get(i).filter(|(t, ..)| tab_enabled(*t, rec)) {
+                            *tab = *t;
+                            *selected = None;
+                        }
+                    }
                 }
-                let color = if active { theme::KNOB } else if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
-                icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(20.0, 20.0)), icon, color);
-                if resp.on_hover_text(name).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            }
+            for (i, (t, icon, name)) in TABS.iter().copied().enumerate() {
+                let enabled = tab_enabled(t, rec);
+                let active = *tab == t && selected.is_none();
+                let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::click());
+                let color = if !enabled {
+                    Color32::from_rgb(0x53, 0x53, 0x55)
+                } else if active {
+                    theme::KNOB
+                } else if resp.hovered() {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(0xd6, 0xd6, 0xda)
+                };
+                if resp.hovered() && enabled && !active {
+                    ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), Color32::from_white_alpha(8));
+                }
+                icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(19.0, 19.0)), icon, color);
+                if active {
+                    ui.painter().circle_filled(pos2(rect.right() - 3.0, rect.center().y - 4.0), 2.0, theme::KNOB);
+                }
+                let tip = format!("{name}  (Ctrl+{})", i + 1);
+                let resp = if enabled { resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text(format!("{name}: {}", disabled_reason(t))) };
+                if enabled && resp.clicked() {
                     *tab = t;
                     *selected = None;
                 }
@@ -113,12 +167,60 @@ pub fn show(
                     match tab {
                         Tab::Background => background(ui, state, edit),
                         Tab::Cursor => cursor(ui, state, edit, rec),
+                        Tab::CameraLayout | Tab::CameraStyle => super::camera_ui::show(ui, edit, rec, *tab == Tab::CameraLayout),
+                        Tab::Captions => super::captions_ui::captions(ui, &mut state.captions, edit, rec),
+                        Tab::Transcript => {
+                            if let Some(t) = super::captions_ui::transcript(ui, &mut state.captions, edit, rec) {
+                                seek = Some(t);
+                            }
+                        }
+                        Tab::Audio => audio(ui, state, edit, rec),
+                        Tab::Shortcuts => shortcuts(ui, edit, rec),
                         Tab::Animation => animation(ui, edit, rec, selected),
                     }
                 }));
             });
     });
     seek
+}
+
+fn disabled_reason(t: Tab) -> &'static str {
+    match t {
+        Tab::CameraLayout | Tab::CameraStyle => "record with a camera to use this",
+        Tab::Captions | Tab::Transcript => "record with a microphone to use this",
+        Tab::Shortcuts => "no keyboard shortcuts were recorded",
+        _ => "",
+    }
+}
+
+/// A bordered sub-card for options that belong to the setting above it.
+fn sub_card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(0x1b, 0x1d, 0x22))
+        .corner_radius(CornerRadius::same(12))
+        .inner_margin(egui::Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui);
+        });
+}
+
+/// Label with an optional help line on the left, switch on the right.
+fn toggle_help(ui: &mut Ui, label: &str, help_text: &str, on: &mut bool) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width() - 56.0);
+            ui.label(RichText::new(label).size(13.5));
+            if !help_text.is_empty() {
+                ui.label(RichText::new(help_text).size(12.0).color(theme::TEXT_DIM));
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            changed = widgets::toggle(ui, on).changed();
+        });
+    });
+    changed
 }
 
 fn heading(ui: &mut Ui, text: &str) {
@@ -232,8 +334,39 @@ fn background(ui: &mut Ui, state: &mut State, edit: &mut EditConfig) {
     widgets::slider(ui, &mut edit.padding, 0.0..=0.25, Some(0.08));
     theme::section(ui, "Rounded corners");
     widgets::slider(ui, &mut edit.radius, 0.0..=48.0, Some(12.0));
-    theme::section(ui, "Shadow");
+    widgets::divider(ui);
+    toggle_help(ui, "Inset", "Add inset around the screen.", &mut edit.inset.enabled);
+    if edit.inset.enabled {
+        let inset = &mut edit.inset;
+        sub_card(ui, |ui| {
+            ui.label(RichText::new("Inset size").size(13.5));
+            widgets::slider(ui, &mut inset.size, 0.005..=0.12, Some(0.03));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Inset color").size(13.5));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.color_edit_button_rgb(&mut inset.color);
+                });
+            });
+            ui.label(RichText::new(format!("Inset opacity  ·  {:.0}%", inset.opacity * 100.0)).size(13.5));
+            widgets::slider(ui, &mut inset.opacity, 0.0..=1.0, Some(1.0));
+            ui.label(RichText::new("Inset position").size(13.5));
+            position_pad(ui, &mut inset.offset);
+        });
+    }
+    widgets::divider(ui);
+    theme::section(ui, &format!("Shadow  ·  {:.0}%", edit.shadow * 100.0));
     widgets::slider(ui, &mut edit.shadow, 0.0..=1.0, Some(0.6));
+    widgets::segmented(ui, &mut edit.shadow_style, &[(ShadowStyle::Classic, "Classic"), (ShadowStyle::Directional, "Directional")]);
+    if edit.shadow_style == ShadowStyle::Directional {
+        sub_card(ui, |ui| {
+            ui.label(RichText::new(format!("Angle  ·  {:.0}°", edit.shadow_angle)).size(13.5));
+            widgets::slider(ui, &mut edit.shadow_angle, -180.0..=180.0, Some(0.0));
+            ui.label(RichText::new(format!("Distance  ·  {:.0}%", edit.shadow_distance * 100.0)).size(13.5));
+            widgets::slider(ui, &mut edit.shadow_distance, 0.0..=1.0, Some(0.4));
+            ui.label(RichText::new(format!("Softness  ·  {:.0}%", edit.shadow_softness * 100.0)).size(13.5));
+            widgets::slider(ui, &mut edit.shadow_softness, 0.0..=1.0, Some(0.6));
+        });
+    }
 }
 
 fn cursor(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording) {
@@ -246,44 +379,106 @@ fn cursor(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording
         help(ui, "No cursor movement was captured for this recording.");
         return;
     }
+    let c = &mut edit.cursor;
+    theme::section(ui, "Cursor size");
+    widgets::slider(ui, &mut c.size, 0.5..=4.0, Some(1.5));
     super::cursors::style_picker(ui, &mut state.cursors, edit);
-    theme::section(ui, "Size");
-    widgets::slider(ui, &mut edit.cursor.size, 0.5..=4.0, Some(1.5));
+    let c = &mut edit.cursor;
+    toggle_help(ui, "Always use pointer cursor", "Don't change cursor, even if selecting text, etc.", &mut c.always_default);
     widgets::divider(ui);
-    widgets::toggle_row(ui, "Smooth movement", &mut edit.cursor.smooth);
-    if edit.cursor.smooth {
-        help(ui, "How quickly the smoothed cursor catches up with the real one.");
-        let opts: Vec<_> = AnimationSpeed::ALL.iter().map(|s| (*s, s.label())).collect();
-        widgets::segmented(ui, &mut edit.cursor.speed, &opts);
+    toggle_help(ui, "Hide cursor if not moving", "", &mut c.hide_when_idle);
+    toggle_help(ui, "Loop cursor position", "Near the end of the video, cursor will move back to its initial position", &mut c.loop_position);
+    if c.loop_position {
+        sub_card(ui, |ui| {
+            ui.label(RichText::new("Loop cursor position duration").size(13.5));
+            help(ui, &format!("How long before the end of the recording to reset position of the mouse  ·  {:.1}s", c.loop_duration));
+            widgets::slider(ui, &mut c.loop_duration, 0.3..=4.0, Some(1.0));
+        });
+    }
+    toggle_help(ui, "Hide cursor", "", &mut c.hidden);
+    widgets::divider(ui);
+    theme::section(ui, "Click effect");
+    widgets::segmented(ui, &mut c.click_visual, &[(ClickVisual::None, "None"), (ClickVisual::Circle, "Circle"), (ClickVisual::Ripple, "Ripple")]);
+    theme::section(ui, "Click sound");
+    widgets::segmented(ui, &mut c.click_sound, &[(ClickSound::None, "None"), (ClickSound::MagicMouse, "Magic Mouse"), (ClickSound::MxMaster, "MX Master")]);
+    if c.click_sound != ClickSound::None {
+        sub_card(ui, |ui| {
+            ui.label(RichText::new(format!("Click sound volume  ·  {:.0}%", c.click_volume * 100.0)).size(13.5));
+            widgets::slider(ui, &mut c.click_volume, 0.0..=1.0, Some(0.6));
+            if widgets::wide_button_icon(ui, Some(Icon::Play), "Preview click sound").clicked() {
+                crate::clicks::preview(c.click_sound, c.click_volume);
+            }
+        });
     }
     widgets::divider(ui);
-    widgets::toggle_row(ui, "Hide when not moving", &mut edit.cursor.hide_when_idle);
-    widgets::toggle_row(ui, "Always use default cursor", &mut edit.cursor.always_default);
-    if !edit.cursor.always_default && !rec.events.shapes.is_empty() {
-        help(ui, "Text, link and resize cursors are redrawn from what the apps showed while recording.");
-    }
-    widgets::toggle_row(ui, "Click animation", &mut edit.cursor.click_effect);
+    egui::CollapsingHeader::new(RichText::new("Advanced").size(13.5)).default_open(false).show(ui, |ui| {
+        theme::section(ui, &format!("Rotate cursor while moving  ·  {:.0}%", c.rotate * 100.0));
+        widgets::slider(ui, &mut c.rotate, 0.0..=1.0, Some(0.0));
+        let label = if c.stop_at_end > 0.0 { format!("{:.1}s", c.stop_at_end) } else { "Off".into() };
+        theme::section(ui, &format!("Stop cursor movement at the end  ·  {label}"));
+        widgets::slider(ui, &mut c.stop_at_end, 0.0..=3.0, Some(0.0));
+        toggle_help(ui, "Remove cursor shakes", "Smooths out small, unintended movements.", &mut c.remove_shakes);
+        let mut optimize = !c.always_default;
+        if toggle_help(ui, "Optimize original cursor types", "Redraw text, link and resize cursors from what apps showed.", &mut optimize) {
+            c.always_default = !optimize;
+        }
+        widgets::toggle_row(ui, "Click squish animation", &mut c.click_effect);
+    });
 }
 
 fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut Option<Selection>) {
-    heading(ui, "Zoom");
-    theme::section(ui, "Animation curve");
-    help(ui, "How the camera moves when zooming in and out.");
-    super::curve::show(ui, edit);
-    widgets::divider(ui);
-    widgets::toggle_row(ui, "Motion blur", &mut edit.motion_blur);
-    if edit.motion_blur {
-        theme::section(ui, &format!("Zoom blur  ·  {:.0}%", edit.zoom_blur * 100.0));
-        help(ui, "Radial blur while the camera zooms in or out.");
-        widgets::slider(ui, &mut edit.zoom_blur, 0.0..=1.0, Some(0.5));
-        theme::section(ui, &format!("Movement blur  ·  {:.0}%", edit.pan_blur * 100.0));
-        help(ui, "Directional blur while the zoomed camera follows the cursor.");
-        widgets::slider(ui, &mut edit.pan_blur, 0.0..=1.0, Some(0.25));
+    heading(ui, "Animations");
+    theme::section(ui, "Screen animation");
+    let before = edit.screen_animation;
+    let custom = edit.zoom_curve.is_some_and(|c| c != edit.screen_animation.curve());
+    big_choice(ui, &mut edit.screen_animation, &[
+        (ScreenAnimation::Focused, Icon::Zoom, "Focused"),
+        (ScreenAnimation::Smooth, Icon::RailAnimation, "Smooth"),
+    ], custom);
+    if edit.screen_animation != before || (edit.zoom_curve.is_none() && !custom) {
+        if edit.screen_animation != before {
+            edit.zoom_curve = Some(edit.screen_animation.curve());
+        }
     }
+    help(ui, match edit.screen_animation {
+        ScreenAnimation::Focused => "Animation stabilizes quickly making it easier to follow and read the content.",
+        ScreenAnimation::Smooth => "Longer, softer camera moves that glide into place.",
+    });
+    egui::CollapsingHeader::new(RichText::new(if custom { "Custom curve" } else { "Customize curve" }).size(13.5))
+        .default_open(custom)
+        .show(ui, |ui| super::curve::show(ui, edit));
+    widgets::divider(ui);
+    theme::section(ui, "Cursor animation");
+    let mut style = if !edit.cursor.smooth {
+        3
+    } else {
+        match edit.cursor.speed {
+            AnimationSpeed::Slow | AnimationSpeed::Mellow => 0,
+            AnimationSpeed::Quick => 1,
+            AnimationSpeed::Rapid => 2,
+        }
+    };
+    if widgets::segmented(ui, &mut style, &[(0, "Smooth"), (1, "Medium"), (2, "Rapid"), (3, "None")]) {
+        edit.cursor.smooth = style != 3;
+        edit.cursor.speed = match style {
+            0 => AnimationSpeed::Mellow,
+            1 => AnimationSpeed::Quick,
+            _ => AnimationSpeed::Rapid,
+        };
+    }
+    widgets::divider(ui);
+    let mut blur = if edit.motion_blur { edit.zoom_blur } else { 0.0 };
+    theme::section(ui, &format!("Motion blur  ·  {:.0}%", blur * 100.0));
+    help(ui, "While mouse cursor or screen is moving, cinematic motion blur effect will be applied");
+    if widgets::slider(ui, &mut blur, 0.0..=1.0, Some(0.5)) {
+        edit.motion_blur = blur > 0.0;
+        edit.zoom_blur = blur;
+        edit.pan_blur = blur * 0.5;
+    }
+    toggle_help(ui, "Instant animation", "Zoom in and out instantly, without animation.", &mut edit.instant_animation);
     widgets::divider(ui);
     theme::section(ui, &format!("Default zoom level  ·  {:.0}%", edit.default_zoom * 100.0));
     widgets::slider(ui, &mut edit.default_zoom, 1.0..=4.0, Some(2.0));
-    ui.add_space(6.0);
     let clicks = rec.events.clicks.iter().filter(|c| c.down).count();
     if widgets::wide_button(ui, "Regenerate automatic zooms").clicked() {
         edit.zoom_segments = crate::engine::auto_zoom_segments(rec, edit.default_zoom);
@@ -293,6 +488,135 @@ fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut
     if widgets::wide_button(ui, "Remove all zooms").clicked() {
         edit.zoom_segments.clear();
         *selected = None;
+    }
+}
+
+/// Large icon chips (Screen Studio's animation style picker).
+fn big_choice<T: PartialEq + Copy>(ui: &mut Ui, value: &mut T, opts: &[(T, Icon, &str)], none_selected: bool) {
+    let w = (ui.available_width() - 8.0 * (opts.len() as f32 - 1.0)) / opts.len() as f32;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (v, icon, label) in opts {
+            let (r, resp) = ui.allocate_exact_size(vec2(w, 74.0), Sense::click());
+            let sel = *value == *v && !none_selected;
+            let fill = if sel { theme::SURFACE_HOVER } else if resp.hovered() { Color32::from_rgb(0x21, 0x23, 0x28) } else { theme::SURFACE };
+            ui.painter().rect_filled(r, CornerRadius::same(10), fill);
+            if sel {
+                ui.painter().rect_stroke(r, CornerRadius::same(10), egui::Stroke::new(1.0, Color32::from_rgb(0x4f, 0x4d, 0x6f)), egui::StrokeKind::Inside);
+            }
+            let col = if sel { theme::KNOB } else { theme::TEXT };
+            icons::paint(ui.painter(), Rect::from_center_size(pos2(r.center().x, r.top() + 27.0), vec2(22.0, 22.0)), *icon, col);
+            ui.painter().text(pos2(r.center().x, r.bottom() - 17.0), egui::Align2::CENTER_CENTER, *label, egui::FontId::proportional(13.0), col);
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                *value = *v;
+            }
+        }
+    });
+}
+
+fn audio(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording) {
+    heading(ui, "Audio");
+    let has_mic = rec.audio.iter().any(|a| a.kind == "microphone");
+    let has_sys = rec.audio.iter().any(|a| a.kind == "system");
+    let a = &mut edit.audio;
+    if has_mic {
+        theme::section(ui, "Microphone");
+        let opts: Vec<_> = MicMode::ALL.iter().map(|m| (*m, m.label())).collect();
+        widgets::segmented(ui, &mut a.mic_mode, &opts);
+        help(ui, a.mic_mode.help());
+        toggle_help(ui, "Mute microphone", "", &mut a.mute_microphone);
+        if !a.mute_microphone {
+            theme::section(ui, &format!("Microphone volume  ·  {:.0}%", a.microphone_volume * 100.0));
+            widgets::slider(ui, &mut a.microphone_volume, 0.0..=2.0, Some(1.0));
+        }
+        widgets::divider(ui);
+    }
+    if has_sys {
+        toggle_help(ui, "Mute system audio", "Sound the computer played while recording.", &mut a.mute_system);
+        if !a.mute_system {
+            theme::section(ui, &format!("System audio volume  ·  {:.0}%", a.system_volume * 100.0));
+            widgets::slider(ui, &mut a.system_volume, 0.0..=2.0, Some(1.0));
+        }
+        widgets::divider(ui);
+    }
+    if !has_mic && !has_sys {
+        help(ui, "This recording has no microphone or system audio. Choose a microphone or system audio in the recording bar next time.");
+        widgets::divider(ui);
+    }
+    theme::section(ui, "Background music");
+    if let Some(rx) = &state.picking_music {
+        match rx.try_recv() {
+            Ok(files) => {
+                if let Some(f) = files.into_iter().next() {
+                    a.music = Some(f.to_string_lossy().into_owned());
+                }
+                state.picking_music = None;
+            }
+            Err(TryRecvError::Disconnected) => state.picking_music = None,
+            Err(TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)),
+        }
+    }
+    match a.music.clone() {
+        None => {
+            help(ui, "Your own MP3, WAV, OGG or video file. It loops to fit the video.");
+            if widgets::wide_button_icon(ui, Some(Icon::Plus), "Add background music").clicked() && state.picking_music.is_none() {
+                let filter = ashpd::desktop::file_chooser::FileFilter::new("Audio")
+                    .mimetype("audio/*")
+                    .mimetype("video/mp4")
+                    .mimetype("video/webm");
+                state.picking_music = Some(dialogs::open_files(ui.ctx().clone(), "Add background music", Some(filter), false));
+            }
+        }
+        Some(path) => {
+            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            ui.label(RichText::new(name).size(13.5));
+            toggle_help(ui, "Mute background music", "", &mut a.mute_music);
+            theme::section(ui, &format!("Background music volume  ·  {:.0}%", a.music_volume * 100.0));
+            widgets::slider(ui, &mut a.music_volume, 0.0..=1.0, Some(0.35));
+            if widgets::wide_button_icon(ui, Some(Icon::Trash), "Remove background music").clicked() {
+                a.music = None;
+            }
+        }
+    }
+}
+
+fn shortcuts(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
+    heading(ui, "Keyboard shortcuts");
+    let o = &mut edit.shortcuts;
+    toggle_help(ui, "Show shortcuts", "Show pressed shortcut labels in the video.", &mut o.show);
+    if o.show {
+        theme::section(ui, "Shortcut labels size");
+        widgets::slider(ui, &mut o.size, 0.5..=2.0, Some(1.0));
+        toggle_help(
+            ui,
+            "Show single key shortcuts",
+            "By default, only 2+ keys shortcuts are shown. Enable this option to show single letter shortcuts as well.",
+            &mut o.single_keys,
+        );
+    }
+    widgets::divider(ui);
+    let found = crate::shortcuts::detect(rec, o.single_keys);
+    theme::section(ui, &format!("Recorded shortcuts  ·  {}", found.len()));
+    help(ui, "Click a shortcut to hide or show it in the video.");
+    for (i, sc) in found.iter().enumerate().take(60) {
+        let hidden = o.disabled.contains(&sc.id);
+        ui.horizontal(|ui| {
+            let label = format!("{}   {}", crate::util::format_time(sc.t), sc.label());
+            let col = if hidden { theme::TEXT_DIM } else { theme::TEXT };
+            let mut text = RichText::new(label).size(13.0).color(col);
+            if hidden {
+                text = text.strikethrough();
+            }
+            let r = ui.add(egui::Button::new(text).frame(false));
+            if r.clicked() {
+                if hidden {
+                    o.disabled.retain(|d| *d != sc.id);
+                } else {
+                    o.disabled.push(sc.id);
+                }
+            }
+            let _ = i;
+        });
     }
 }
 
@@ -612,4 +936,27 @@ fn thumb(ui: &mut Ui, tex: &egui::TextureHandle, selected: bool, size: f32) -> e
         ui.painter().rect_stroke(rect, CornerRadius::same(7), egui::Stroke::new(1.0, Color32::from_white_alpha(90)), egui::StrokeKind::Inside);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// 2-D pad with a ring handle (Screen Studio's inset position control).
+fn position_pad(ui: &mut Ui, v: &mut [f64; 2]) {
+    let w = ui.available_width();
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 110.0), Sense::click_and_drag());
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::same(10), Color32::from_rgb(0x12, 0x13, 0x17));
+    p.rect_stroke(r, CornerRadius::same(10), egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Inside);
+    p.line_segment([pos2(r.center().x, r.top() + 8.0), pos2(r.center().x, r.bottom() - 8.0)], egui::Stroke::new(1.0, Color32::from_white_alpha(14)));
+    p.line_segment([pos2(r.left() + 8.0, r.center().y), pos2(r.right() - 8.0, r.center().y)], egui::Stroke::new(1.0, Color32::from_white_alpha(14)));
+    let inner = r.shrink(14.0);
+    if let Some(pp) = resp.interact_pointer_pos() {
+        v[0] = (((pp.x - inner.center().x) / (inner.width() / 2.0)) as f64).clamp(-1.0, 1.0);
+        v[1] = (((pp.y - inner.center().y) / (inner.height() / 2.0)) as f64).clamp(-1.0, 1.0);
+    }
+    if resp.double_clicked() {
+        *v = [0.0, 0.0];
+    }
+    let h = pos2(inner.center().x + v[0] as f32 * inner.width() / 2.0, inner.center().y + v[1] as f32 * inner.height() / 2.0);
+    p.circle_stroke(h, 8.0, egui::Stroke::new(2.0, theme::KNOB));
+    p.circle_filled(h, 3.0, theme::KNOB);
+    resp.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("Double-click to centre");
 }

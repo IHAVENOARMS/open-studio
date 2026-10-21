@@ -178,11 +178,79 @@ pub struct CursorStyle {
     /// XCursor theme directory to draw cursors from; None uses the built-in
     /// vector cursors.
     pub theme: Option<String>,
+    /// Remove the cursor completely.
+    pub hidden: bool,
+    /// Near the end, move the cursor back to where it started.
+    pub loop_position: bool,
+    /// Seconds before the end at which the loop starts.
+    pub loop_duration: f64,
+    pub click_visual: ClickVisual,
+    pub click_sound: ClickSound,
+    pub click_volume: f64,
+    /// Tilt while moving, 0..1.
+    pub rotate: f64,
+    /// Freeze the cursor this many seconds before the end (0 = off).
+    pub stop_at_end: f64,
+    /// Filter out small involuntary movements.
+    pub remove_shakes: bool,
 }
 
 impl Default for CursorStyle {
     fn default() -> Self {
-        Self { size: 1.5, smooth: true, speed: AnimationSpeed::Mellow, hide_when_idle: false, click_effect: true, always_default: false, theme: None }
+        Self { size: 1.5, smooth: true, speed: AnimationSpeed::Mellow, hide_when_idle: false, click_effect: true,
+            always_default: false,
+            theme: None,
+            hidden: false,
+            loop_position: false,
+            loop_duration: 1.0,
+            click_visual: ClickVisual::None,
+            click_sound: ClickSound::None,
+            click_volume: 0.6,
+            rotate: 0.0,
+            stop_at_end: 0.0,
+            remove_shakes: false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MicMode {
+    Standard,
+    NoiseReduction,
+    Podcast,
+    Loud,
+    Off,
+}
+
+impl MicMode {
+    pub const ALL: [MicMode; 5] = [Self::Standard, Self::NoiseReduction, Self::Podcast, Self::Loud, Self::Off];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::NoiseReduction => "Noise reduction",
+            Self::Podcast => "Podcast",
+            Self::Loud => "Loud",
+            Self::Off => "Off",
+        }
+    }
+    pub fn help(self) -> &'static str {
+        match self {
+            Self::Standard => "Your microphone as recorded, with gentle level balancing.",
+            Self::NoiseReduction => "Removes steady background noise like fans and hum.",
+            Self::Podcast => "Noise reduction, compression and EQ for a close, broadcast sound.",
+            Self::Loud => "Boosts quiet microphones and evens out the volume.",
+            Self::Off => "Microphone audio is not included.",
+        }
+    }
+    /// ffmpeg filter chain applied to the microphone track.
+    pub fn filter(self) -> &'static str {
+        match self {
+            Self::Standard => "dynaudnorm=f=250:g=15:m=6",
+            Self::NoiseReduction => "afftdn=nr=18:nf=-38,dynaudnorm=f=250:g=15:m=6",
+            Self::Podcast => "afftdn=nr=16:nf=-40,highpass=f=80,acompressor=threshold=-20dB:ratio=3:attack=8:release=120,equalizer=f=3500:t=q:w=1.2:g=3,alimiter=limit=0.95",
+            Self::Loud => "dynaudnorm=f=150:g=9:m=20,volume=1.6,alimiter=limit=0.95",
+            Self::Off => "volume=0",
+        }
     }
 }
 
@@ -192,14 +260,106 @@ pub struct AudioSettings {
     /// 0..2 gain per track kind.
     pub microphone_volume: f64,
     pub system_volume: f64,
+    /// Mutes everything.
     pub mute: bool,
-    /// Reduce background noise on the microphone (ffmpeg afftdn).
+    pub mic_mode: MicMode,
+    pub mute_microphone: bool,
+    pub mute_system: bool,
+    /// Background music file (absolute path), looped to the video length.
+    pub music: Option<String>,
+    pub music_volume: f64,
+    pub mute_music: bool,
+    /// Kept for older projects; superseded by `mic_mode`.
     pub noise_reduction: bool,
 }
 
 impl Default for AudioSettings {
     fn default() -> Self {
-        Self { microphone_volume: 1.0, system_volume: 1.0, mute: false, noise_reduction: true }
+        Self {
+            microphone_volume: 1.0,
+            system_volume: 1.0,
+            mute: false,
+            mic_mode: MicMode::Standard,
+            mute_microphone: false,
+            mute_system: false,
+            music: None,
+            music_volume: 0.35,
+            mute_music: false,
+            noise_reduction: true,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShadowStyle {
+    Classic,
+    Directional,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Inset {
+    pub enabled: bool,
+    /// Frame width as a fraction of the screen height.
+    pub size: f64,
+    pub color: [f32; 3],
+    pub opacity: f64,
+    /// Where the extra space goes: -1..1 per axis (0 = centred).
+    pub offset: [f64; 2],
+}
+
+impl Default for Inset {
+    fn default() -> Self {
+        Self { enabled: false, size: 0.03, color: [0.0, 0.0, 0.0], opacity: 1.0, offset: [0.0, 0.0] }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickVisual {
+    None,
+    Circle,
+    Ripple,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickSound {
+    None,
+    MagicMouse,
+    MxMaster,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenAnimation {
+    /// Settles quickly, easy to follow and read.
+    Focused,
+    /// Longer, softer camera moves.
+    Smooth,
+}
+
+impl ScreenAnimation {
+    pub fn curve(self) -> ZoomCurve {
+        match self {
+            Self::Focused => ZoomCurve::Bezier { x1: 0.23, y1: 1.0, x2: 0.32, y2: 1.0, duration: 0.55 },
+            Self::Smooth => ZoomCurve::SMOOTH,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ShortcutOverlay {
+    pub show: bool,
+    /// Label size multiplier.
+    pub size: f64,
+    /// Also show single-key presses (not only combinations).
+    pub single_keys: bool,
+    /// Indices into the recording's detected shortcuts that are hidden.
+    pub disabled: Vec<usize>,
+}
+
+impl Default for ShortcutOverlay {
+    fn default() -> Self {
+        Self { show: true, size: 1.0, single_keys: false, disabled: vec![] }
     }
 }
 
@@ -227,6 +387,17 @@ pub struct EditConfig {
     pub trim_end: Option<f64>,
     pub motion_blur: bool,
     pub audio: AudioSettings,
+    pub inset: Inset,
+    pub shadow_style: ShadowStyle,
+    /// Directional shadow: angle in degrees (0 = light from the top), distance
+    /// and softness 0..1.
+    pub shadow_angle: f64,
+    pub shadow_distance: f64,
+    pub shadow_softness: f64,
+    pub screen_animation: ScreenAnimation,
+    /// Zoom changes happen instantly, without animation.
+    pub instant_animation: bool,
+    pub shortcuts: ShortcutOverlay,
     /// 0..1, radial blur while the camera zooms.
     pub zoom_blur: f64,
     /// 0..1, directional blur while the camera pans.
@@ -252,6 +423,14 @@ impl Default for EditConfig {
             trim_end: None,
             motion_blur: true,
             audio: AudioSettings::default(),
+            inset: Inset::default(),
+            shadow_style: ShadowStyle::Classic,
+            shadow_angle: 0.0,
+            shadow_distance: 0.4,
+            shadow_softness: 0.6,
+            screen_animation: ScreenAnimation::Smooth,
+            instant_animation: false,
+            shortcuts: ShortcutOverlay::default(),
             zoom_blur: 0.5,
             pan_blur: 0.25,
         }

@@ -27,12 +27,25 @@ pub struct Recording {
     /// Recorded audio tracks.
     #[serde(default)]
     pub audio: Vec<AudioTrack>,
+    /// Webcam recording, if any.
+    #[serde(default)]
+    pub camera: Option<CameraTrack>,
     /// Cursor images that matched no theme cursor ("custom:N" shapes).
     #[serde(default)]
     pub custom_cursors: Vec<CustomCursor>,
     /// Project directory, set on load.
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CameraTrack {
+    /// Video file relative to the project directory.
+    pub file: String,
+    pub width: u32,
+    pub height: u32,
+    /// Start relative to the first screen frame, in seconds.
+    pub offset: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

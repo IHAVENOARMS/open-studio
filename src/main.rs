@@ -1,8 +1,10 @@
 mod app;
+mod clicks;
 mod control;
 mod cursor_themes;
 mod editor;
 mod settings;
+mod shortcuts;
 mod theme;
 mod decode;
 mod dialogs;
