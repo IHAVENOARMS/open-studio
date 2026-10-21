@@ -1,5 +1,6 @@
 //! The editor window: preview canvas, settings sidebar and timeline.
 
+mod cursors;
 pub mod player;
 mod sidebar;
 mod timeline;
@@ -7,7 +8,9 @@ mod widgets;
 
 use crate::edit::{EditConfig, ZoomFocus};
 use crate::engine::{Tracks, frame_state};
+use crate::dialogs;
 use crate::export::{self, ExportOptions, Progress};
+use crate::settings::{Destination, Format, Quality, Settings};
 use crate::icons::{self, Icon};
 use crate::project::{ProjectPaths, Recording};
 use crate::render::{Compositor, FORMAT};
@@ -17,6 +20,7 @@ use egui::{Color32, CornerRadius, Key, Rect, Sense, Vec2};
 use egui_wgpu::wgpu;
 use player::Player;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -32,14 +36,18 @@ struct PreviewTarget {
 
 struct ExportJob {
     out: PathBuf,
+    destination: Destination,
     progress: Arc<Progress>,
     result: Arc<Mutex<Option<Result<(), String>>>>,
 }
 
 struct ExportDialog {
-    height: u32,
-    fps: u32,
+    settings: Settings,
     job: Option<ExportJob>,
+    /// Folder chooser for the export directory.
+    picking_dir: Option<Receiver<Vec<PathBuf>>>,
+    /// Save dialog for "Export to file".
+    saving: Option<Receiver<Vec<PathBuf>>>,
 }
 
 pub enum Action {
@@ -166,9 +174,7 @@ impl Editor {
                         if icons::button(ui, Icon::Export, "Export", theme::semibold(13.5), Color32::WHITE, Some(theme::ACCENT), egui::vec2(0.0, 32.0)).clicked()
                             && self.export.is_none()
                         {
-                            // Default to the native resolution so zoomed-in frames keep detail.
-                            let native = self.rec.height.clamp(720, 2160);
-                            self.export = Some(ExportDialog { height: native, fps: 60, job: None });
+                            self.export = Some(ExportDialog { settings: Settings::load(), job: None, picking_dir: None, saving: None });
                         }
                         ui.centered_and_justified(|ui| {
                             let mut job = egui::text::LayoutJob::default();
@@ -389,41 +395,179 @@ impl Editor {
 
     fn export_dialog(&mut self, ctx: &egui::Context) {
         let Some(dlg) = &mut self.export else { return };
+        let native = self.rec.height.clamp(720, 2160);
         let mut close = false;
-        let mut start = false;
+        let mut start: Option<PathBuf> = None;
+        let height = dlg.settings.height.unwrap_or(native);
+
+        // Folder chooser and save dialog results.
+        if let Some(rx) = &dlg.picking_dir {
+            match rx.try_recv() {
+                Ok(dirs) => {
+                    if let Some(d) = dirs.into_iter().next() {
+                        dlg.settings.export_dir = d;
+                        dlg.settings.save();
+                    }
+                    dlg.picking_dir = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => dlg.picking_dir = None,
+                Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
+        if let Some(rx) = &dlg.saving {
+            match rx.try_recv() {
+                Ok(files) => {
+                    dlg.saving = None;
+                    if let Some(mut f) = files.into_iter().next() {
+                        let ext = if dlg.settings.format == Format::Gif { "gif" } else { "mp4" };
+                        if f.extension().is_none_or(|e| !e.eq_ignore_ascii_case(ext)) {
+                            f.set_extension(ext);
+                        }
+                        if let Some(parent) = f.parent() {
+                            dlg.settings.export_dir = parent.to_path_buf();
+                        }
+                        start = Some(f);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => dlg.saving = None,
+                Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
+
         #[allow(deprecated)]
         let modal_id = egui::Id::new("export");
-        egui::Modal::new(modal_id).show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.label(egui::RichText::new("Export").font(theme::semibold(16.0)));
-            ui.add_space(4.0);
+        let modal = egui::Modal::new(modal_id).frame(
+            egui::Frame::new()
+                .fill(theme::PANEL)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .corner_radius(CornerRadius::same(16))
+                .inner_margin(egui::Margin::same(36)),
+        );
+        modal.show(ctx, |ui| {
+            ui.set_width(640.0);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.label(egui::RichText::new("Export").font(theme::semibold(20.0)));
+            ui.add_space(14.0);
             match &dlg.job {
                 None => {
-                    theme::section(ui, "Resolution");
-                    let native = self.rec.height.clamp(720, 2160);
-                    let mut opts: Vec<(u32, &str)> = vec![(720, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")];
-                    if !opts.iter().any(|(h, _)| *h == native) {
-                        opts.push((native, "Original"));
-                    }
-                    widgets::segmented(ui, &mut dlg.height, &opts);
-                    ui.label(
-                        egui::RichText::new("Zoomed parts look sharpest at the recording's native size or above.")
-                            .color(theme::TEXT_DIM)
-                            .size(12.0),
-                    );
-                    theme::section(ui, "Frame rate");
-                    widgets::segmented(ui, &mut dlg.fps, &[(30, "30 fps"), (60, "60 fps")]);
-                    let (w, h) = export::output_size(self.tracks.layout.aspect, dlg.height);
-                    ui.label(egui::RichText::new(format!("MP4 (H.264), {w} × {h}")).color(theme::TEXT_DIM));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if theme::primary_button(ui, "  Export video  ").clicked() {
-                            start = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            close = true;
-                        }
+                    let s = &mut dlg.settings;
+                    let col_w = (ui.available_width() - 32.0) / 2.0;
+                    let header = |ui: &mut egui::Ui, icon: Icon, text: &str| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), Sense::hover());
+                            icons::paint(ui.painter(), r, icon, theme::TEXT);
+                            ui.label(egui::RichText::new(text).size(15.0));
+                        });
+                    };
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 32.0;
+                        ui.vertical(|ui| {
+                            ui.set_width(col_w);
+                            header(ui, Icon::Video, "Format");
+                            widgets::segmented(ui, &mut s.format, &[(Format::Mp4, "MP4"), (Format::Gif, "GIF")]);
+                        });
+                        ui.vertical(|ui| {
+                            ui.set_width(col_w);
+                            header(ui, Icon::Aperture, "Frame rate");
+                            let opts: Vec<(u32, &str)> = if s.format == Format::Gif {
+                                vec![(15, "15 FPS"), (24, "24 FPS"), (30, "30 FPS")]
+                            } else {
+                                vec![(24, "24 FPS"), (30, "30 FPS"), (60, "60 FPS")]
+                            };
+                            if !opts.iter().any(|(f, _)| *f == s.fps) {
+                                s.fps = opts.last().unwrap().0;
+                            }
+                            widgets::segmented(ui, &mut s.fps, &opts);
+                        });
                     });
+                    ui.add_space(18.0);
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 32.0;
+                        ui.vertical(|ui| {
+                            ui.set_width(col_w);
+                            header(ui, Icon::Resolution, "Resolution");
+                            let mut h = height;
+                            let mut opts: Vec<(u32, &str)> = vec![(720, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")];
+                            if !opts.iter().any(|(x, _)| *x == native) {
+                                opts.push((native, "Original"));
+                            }
+                            if widgets::segmented(ui, &mut h, &opts) {
+                                s.height = Some(h);
+                            }
+                            let (w, hh) = export::output_size(self.tracks.layout.aspect, h);
+                            ui.label(egui::RichText::new(format!("{w}px × {hh}px")).color(theme::TEXT_DIM));
+                        });
+                        ui.vertical(|ui| {
+                            ui.set_width(col_w);
+                            header(ui, Icon::Film, "Quality");
+                            if s.format == Format::Gif {
+                                ui.label(
+                                    egui::RichText::new("GIFs use an optimised 256-colour palette. Keep them short; they get large quickly.")
+                                        .color(theme::TEXT_DIM),
+                                );
+                            } else {
+                                let opts: Vec<(Quality, &str)> = Quality::ALL.iter().map(|q| (*q, q.label())).collect();
+                                widgets::segmented(ui, &mut s.quality, &opts);
+                                ui.label(egui::RichText::new(s.quality.description()).color(theme::TEXT_DIM));
+                            }
+                        });
+                    });
+                    ui.add_space(26.0);
+                    ui.label(egui::RichText::new("Export to").size(15.0));
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let dest_chip = |ui: &mut egui::Ui, d: Destination, icon: Icon, label: &str, cur: &mut Destination| {
+                            let fill = if *cur == d { theme::SURFACE_HOVER } else { theme::SURFACE };
+                            let r = icons::button(ui, icon, label, egui::FontId::proportional(14.0), theme::TEXT, Some(fill), egui::vec2(0.0, 42.0));
+                            if *cur == d {
+                                ui.painter().rect_stroke(r.rect, CornerRadius::same(8), egui::Stroke::new(1.0, Color32::from_rgb(0x3a, 0x3c, 0x44)), egui::StrokeKind::Inside);
+                            }
+                            if r.clicked() {
+                                *cur = d;
+                            }
+                        };
+                        dest_chip(ui, Destination::File, Icon::File, "File", &mut s.destination);
+                        dest_chip(ui, Destination::Clipboard, Icon::Clipboard, "Clipboard", &mut s.destination);
+                        let folder = icons::button(ui, Icon::Folder, "", egui::FontId::proportional(14.0), theme::TEXT, Some(theme::SURFACE), egui::vec2(42.0, 42.0))
+                            .on_hover_text("Choose export folder");
+                        if folder.clicked() && dlg.picking_dir.is_none() {
+                            dlg.picking_dir = Some(dialogs::open_folder(ctx.clone(), "Choose export folder", Some(s.export_dir.clone())));
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (icon, label) = match s.destination {
+                                Destination::File => (Icon::Export, "Export to file"),
+                                Destination::Clipboard => (Icon::Clipboard, "Export to clipboard"),
+                            };
+                            let go = icons::button(ui, icon, label, theme::semibold(14.0), Color32::WHITE, Some(theme::ACCENT), egui::vec2(0.0, 42.0));
+                            if go.clicked() && dlg.saving.is_none() {
+                                let ext = if s.format == Format::Gif { "gif" } else { "mp4" };
+                                let name = format!("{}.{ext}", self.name);
+                                match s.destination {
+                                    Destination::File => {
+                                        let _ = std::fs::create_dir_all(&s.export_dir);
+                                        dlg.saving = Some(dialogs::save_file(ctx.clone(), "Export video", &s.export_dir, &name));
+                                    }
+                                    Destination::Clipboard => {
+                                        let dir = std::env::temp_dir().join("open-studio-exports");
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        start = Some(dir.join(name));
+                                    }
+                                }
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                    let where_ = match s.destination {
+                        Destination::File => format!("The save dialog opens in {}", crate::util::tilde(&s.export_dir)),
+                        Destination::Clipboard => "The video is copied as a file you can paste into chats, email or your file manager.".to_string(),
+                    };
+                    ui.label(egui::RichText::new(where_).size(12.0).color(theme::TEXT_DIM));
+                    if s.height.is_none() {
+                        s.height = None;
+                    }
                 }
                 Some(job) => {
                     let done = job.result.lock().unwrap().clone();
@@ -436,23 +580,32 @@ impl Editor {
                                 job.progress.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
-                        Some(Ok(())) => {
-                            ui.label("Export finished.");
-                            ui.label(egui::RichText::new(job.out.display().to_string()).color(theme::TEXT_DIM).small());
-                            ui.horizontal(|ui| {
-                                if theme::primary_button(ui, "  Show in folder  ").clicked() {
-                                    if let Some(parent) = job.out.parent() {
-                                        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+                        Some(Ok(())) => match job.destination {
+                            Destination::File => {
+                                ui.label("Export finished.");
+                                ui.label(egui::RichText::new(crate::util::tilde(&job.out)).color(theme::TEXT_DIM).small());
+                                ui.horizontal(|ui| {
+                                    if theme::primary_button(ui, "  Show in folder  ").clicked() {
+                                        if let Some(parent) = job.out.parent() {
+                                            let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+                                        }
                                     }
-                                }
-                                if ui.button("Open video").clicked() {
-                                    let _ = std::process::Command::new("xdg-open").arg(&job.out).spawn();
-                                }
-                                if ui.button("Done").clicked() {
+                                    if ui.button("Open video").clicked() {
+                                        let _ = std::process::Command::new("xdg-open").arg(&job.out).spawn();
+                                    }
+                                    if ui.button("Done").clicked() {
+                                        close = true;
+                                    }
+                                });
+                            }
+                            Destination::Clipboard => {
+                                ui.label("Copied to the clipboard.");
+                                ui.label(egui::RichText::new("Paste it into a chat, an email or a folder.").color(theme::TEXT_DIM));
+                                if theme::primary_button(ui, "  Done  ").clicked() {
                                     close = true;
                                 }
-                            });
-                        }
+                            }
+                        },
                         Some(Err(e)) => {
                             ui.colored_label(theme::RECORD, e);
                             if ui.button("Close").clicked() {
@@ -463,25 +616,45 @@ impl Editor {
                 }
             }
         });
-        if start {
-            let out = crate::util::recordings_dir().join(format!("{}.mp4", self.name));
+        if let Some(out) = start {
+            dlg.settings.save();
             let progress = Arc::new(Progress::default());
             let result = Arc::new(Mutex::new(None));
             let (p, r) = (progress.clone(), result.clone());
             let (dir, rec, edit) = (self.dir.clone(), self.rec.clone(), self.edit.clone());
-            let opts = ExportOptions { out: out.clone(), height: dlg.height, fps: dlg.fps };
+            let s = &dlg.settings;
+            let opts = ExportOptions { out: out.clone(), height, fps: s.fps, format: s.format, quality: s.quality };
+            let destination = s.destination;
             let (device, queue) = (self.comp.device().clone(), self.comp.queue().clone());
             let ctx2 = ctx.clone();
             std::thread::spawn(move || {
                 let mut comp = Compositor::new(device, queue);
-                let res = export::export(&mut comp, &dir, &rec, &edit, &opts, &p).map_err(|e| format!("{e:#}"));
+                let mut res = export::export(&mut comp, &dir, &rec, &edit, &opts, &p).map_err(|e| format!("{e:#}"));
+                if res.is_ok() && destination == Destination::Clipboard {
+                    res = copy_file_to_clipboard(&opts.out);
+                }
                 *r.lock().unwrap() = Some(res);
                 ctx2.request_repaint();
             });
-            dlg.job = Some(ExportJob { out, progress, result });
+            dlg.job = Some(ExportJob { out, destination, progress, result });
         }
         if close {
             self.export = None;
         }
     }
+}
+
+/// Puts a file on the Wayland clipboard as a URI list, which file managers,
+/// browsers and chat apps accept as a pasted file.
+fn copy_file_to_clipboard(path: &std::path::Path) -> Result<(), String> {
+    use std::io::Write;
+    let uri = format!("file://{}\n", path.display());
+    let mut child = std::process::Command::new("wl-copy")
+        .args(["--type", "text/uri-list"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("wl-copy not available: {e}"))?;
+    child.stdin.take().unwrap().write_all(uri.as_bytes()).map_err(|e| e.to_string())?;
+    child.wait().map_err(|e| e.to_string())?;
+    Ok(())
 }

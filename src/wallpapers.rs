@@ -1,15 +1,19 @@
 //! Wallpaper library. The curated list (with licences and credits) ships in
 //! `assets/wallpapers.json`; the images themselves are downloaded on demand
 //! into the user's data directory, resized to at most 4K, with thumbnails.
+//! Wallpapers the user adds live in the same directory, listed in
+//! `custom.json`, under the "Custom" category.
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[derive(Deserialize, Clone, Debug)]
+pub const CUSTOM_CATEGORY: &str = "Custom";
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Wallpaper {
     pub id: String,
     pub category: String,
@@ -21,24 +25,82 @@ pub struct Wallpaper {
     pub license: String,
 }
 
-pub fn manifest() -> &'static [Wallpaper] {
+fn builtin() -> &'static [Wallpaper] {
     static LIST: OnceLock<Vec<Wallpaper>> = OnceLock::new();
     LIST.get_or_init(|| serde_json::from_str(include_str!("../assets/wallpapers.json")).unwrap_or_default())
 }
 
-pub fn get(id: &str) -> Option<&'static Wallpaper> {
-    manifest().iter().find(|w| w.id == id)
+static CUSTOM: RwLock<Option<Vec<Wallpaper>>> = RwLock::new(None);
+
+fn custom_file() -> PathBuf {
+    data_dir().join("custom.json")
 }
 
-/// Categories in manifest order.
-pub fn categories() -> Vec<&'static str> {
-    let mut out: Vec<&str> = Vec::new();
-    for w in manifest() {
-        if !out.contains(&w.category.as_str()) {
-            out.push(&w.category);
+/// Wallpapers the user added, newest first.
+pub fn custom() -> Vec<Wallpaper> {
+    if let Some(list) = CUSTOM.read().unwrap().as_ref() {
+        return list.clone();
+    }
+    let list: Vec<Wallpaper> =
+        std::fs::read_to_string(custom_file()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    *CUSTOM.write().unwrap() = Some(list.clone());
+    list
+}
+
+fn save_custom(list: Vec<Wallpaper>) -> Result<()> {
+    std::fs::create_dir_all(data_dir())?;
+    std::fs::write(custom_file(), serde_json::to_string_pretty(&list)?)?;
+    *CUSTOM.write().unwrap() = Some(list);
+    Ok(())
+}
+
+/// Built-in and custom wallpapers.
+pub fn manifest() -> Vec<Wallpaper> {
+    let mut all = builtin().to_vec();
+    all.extend(custom());
+    all
+}
+
+pub fn get(id: &str) -> Option<Wallpaper> {
+    manifest().into_iter().find(|w| w.id == id)
+}
+
+/// Categories in manifest order, with "Custom" last.
+pub fn categories() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in builtin() {
+        if !out.contains(&w.category) {
+            out.push(w.category.clone());
         }
     }
+    out.push(CUSTOM_CATEGORY.into());
     out
+}
+
+/// Imports a local image as a custom wallpaper.
+pub fn add_custom(path: &Path) -> Result<Wallpaper> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis();
+    let title = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Wallpaper".into());
+    let w = Wallpaper {
+        id: format!("custom-{stamp}"),
+        category: CUSTOM_CATEGORY.into(),
+        title,
+        url: String::new(),
+        author: String::new(),
+        license: String::new(),
+    };
+    convert(path, &w.id)?;
+    let mut list = custom();
+    list.insert(0, w.clone());
+    save_custom(list)?;
+    Ok(w)
+}
+
+pub fn remove_custom(id: &str) -> Result<()> {
+    let list: Vec<Wallpaper> = custom().into_iter().filter(|w| w.id != id).collect();
+    let _ = std::fs::remove_file(image_path(id));
+    let _ = std::fs::remove_file(thumb_path(id));
+    save_custom(list)
 }
 
 pub fn data_dir() -> PathBuf {
@@ -60,8 +122,9 @@ pub fn installed(id: &str) -> bool {
     image_path(id).exists() && thumb_path(id).exists()
 }
 
+/// Built-in wallpapers not downloaded yet.
 pub fn missing() -> Vec<&'static Wallpaper> {
-    manifest().iter().filter(|w| !installed(&w.id)).collect()
+    builtin().iter().filter(|w| !installed(&w.id)).collect()
 }
 
 fn run(cmd: &mut Command) -> Result<()> {
@@ -82,17 +145,23 @@ pub fn fetch(w: &Wallpaper) -> Result<()> {
         .arg(&tmp)
         .arg(&w.url))
     .with_context(|| format!("downloading {}", w.title))?;
-    let convert = |out: &Path, filter: &str, q: &str| {
+    let res = convert(&tmp, &w.id);
+    let _ = std::fs::remove_file(&tmp);
+    res
+}
+
+/// Produces the stored 4K JPEG and the thumbnail for wallpaper `id`.
+fn convert(src: &Path, id: &str) -> Result<()> {
+    std::fs::create_dir_all(data_dir().join("thumbs"))?;
+    let one = |out: &Path, filter: &str, q: &str| {
         run(Command::new("ffmpeg")
             .args(["-v", "error", "-y", "-i"])
-            .arg(&tmp)
+            .arg(src)
             .args(["-frames:v", "1", "-vf", filter, "-q:v", q, "-pix_fmt", "yuvj444p"])
             .arg(out))
     };
-    let res = convert(&image_path(&w.id), "scale='min(3840,iw)':-2:flags=lanczos", "2")
-        .and_then(|_| convert(&thumb_path(&w.id), "scale=320:-2:flags=lanczos", "3"));
-    let _ = std::fs::remove_file(&tmp);
-    res
+    one(&image_path(id), "scale='min(3840,iw)':-2:flags=lanczos", "2")?;
+    one(&thumb_path(id), "scale=320:-2:flags=lanczos", "3")
 }
 
 /// Downloads every missing wallpaper with a few parallel workers. `done` is

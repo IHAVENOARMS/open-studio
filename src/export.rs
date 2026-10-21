@@ -18,6 +18,8 @@ pub struct ExportOptions {
     /// Output height in pixels; width follows the canvas aspect.
     pub height: u32,
     pub fps: u32,
+    pub format: crate::settings::Format,
+    pub quality: crate::settings::Quality,
 }
 
 #[derive(Default)]
@@ -67,14 +69,18 @@ pub fn export(
         mapped_at_creation: false,
     });
 
+    // GIFs are encoded from an intermediate MP4 with a generated palette.
+    let gif = opts.format == crate::settings::Format::Gif;
+    let video_out = if gif { opts.out.with_extension("tmp.mp4") } else { opts.out.clone() };
+    let (crf, preset) = if gif { (12, "veryfast") } else { opts.quality.x264() };
     let mut ffmpeg = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y"])
         .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &opts.fps.to_string(), "-i", "-"])
         .args(["-vf", "scale=out_color_matrix=bt709:out_range=tv"])
-        .args(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"])
+        .args(["-c:v", "libx264", "-preset", preset, "-crf", &crf.to_string(), "-pix_fmt", "yuv420p"])
         .args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
         .args(["-movflags", "+faststart"])
-        .arg(&opts.out)
+        .arg(&video_out)
         .stdin(Stdio::piped())
         .spawn()
         .context("launching ffmpeg")?;
@@ -90,7 +96,7 @@ pub fn export(
         if progress.cancel.load(Ordering::Relaxed) {
             drop(stdin);
             let _ = ffmpeg.kill();
-            let _ = std::fs::remove_file(&opts.out);
+            let _ = std::fs::remove_file(&video_out);
             bail!("export cancelled");
         }
         let t = start + i as f64 / opts.fps as f64;
@@ -145,6 +151,20 @@ pub fn export(
     let status = ffmpeg.wait()?;
     if !status.success() {
         bail!("ffmpeg exited with {status}");
+    }
+    if gif {
+        let filter = "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle";
+        let out = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&video_out)
+            .args(["-filter_complex", filter, "-loop", "0"])
+            .arg(&opts.out)
+            .output()
+            .context("converting to GIF")?;
+        let _ = std::fs::remove_file(&video_out);
+        if !out.status.success() {
+            bail!("GIF conversion failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
     }
     Ok(())
 }

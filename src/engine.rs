@@ -275,15 +275,17 @@ pub struct CursorState {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CursorShape {
-    /// Canonical cursor name.
-    Named(String),
+    /// Canonical cursor name, drawn from `theme` (an XCursor theme
+    /// directory) or the built-in vector set.
+    Named { name: String, theme: Option<String> },
     /// Captured image: path, hotspot in pixels, capture scale.
     Custom { path: std::path::PathBuf, hotspot: (f64, f64), scale: f64 },
 }
 
 fn cursor_shape(rec: &Recording, edit: &EditConfig, t: f64) -> Option<CursorShape> {
+    let named = |name: &str| CursorShape::Named { name: name.to_string(), theme: edit.cursor.theme.clone() };
     if edit.cursor.always_default {
-        return Some(CursorShape::Named("default".into()));
+        return Some(named("default"));
     }
     let s = rec.shape_at(t);
     if s == "hidden" {
@@ -294,7 +296,7 @@ fn cursor_shape(rec: &Recording, edit: &EditConfig, t: f64) -> Option<CursorShap
             return Some(CursorShape::Custom { path: rec.dir.join(&c.file), hotspot: (c.hotspot[0], c.hotspot[1]), scale: c.scale });
         }
     }
-    Some(CursorShape::Named(s.to_string()))
+    Some(named(s))
 }
 
 pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, fps: f64) -> FrameState {

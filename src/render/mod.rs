@@ -258,7 +258,19 @@ impl Compositor {
     /// one, otherwise the theme's largest image, or the captured image.
     fn load_sprite(&self, shape: &CursorShape) -> Option<Sprite> {
         match shape {
-            CursorShape::Named(name) => {
+            CursorShape::Named { name, theme } => {
+                if let Some(dir) = theme {
+                    if let Some(img) = crate::xcursor::load_from_dir(std::path::Path::new(dir), name, 96) {
+                        let k = UNITS_PER_THEME_PX * 24.0 / img.size as f32;
+                        return Some(self.make_sprite(
+                            &img.rgba,
+                            img.width,
+                            img.height,
+                            (img.width as f32 * k, img.height as f32 * k),
+                            (img.hotspot.0 as f32 * k, img.hotspot.1 as f32 * k),
+                        ));
+                    }
+                }
                 if let Some(v) = cursor_image::Vector::for_name(name) {
                     let n = cursor_image::CANVAS;
                     let u = cursor_image::PX_PER_UNIT;
@@ -508,7 +520,11 @@ impl Compositor {
             if !self.sprites.contains_key(&key) {
                 let mut sprite = self.load_sprite(&cs.shape);
                 if sprite.is_none() {
-                    sprite = self.load_sprite(&CursorShape::Named("default".into()));
+                    let theme = match &cs.shape {
+                        CursorShape::Named { theme, .. } => theme.clone(),
+                        _ => None,
+                    };
+                    sprite = self.load_sprite(&CursorShape::Named { name: "default".into(), theme });
                 }
                 self.sprites.insert(key.clone(), sprite);
             }

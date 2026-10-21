@@ -142,3 +142,18 @@ pub fn load_named(canonical: &str, size: u32) -> Option<XImage> {
     }
     None
 }
+
+/// The canonical name's image closest to `size` from one specific theme
+/// directory (no inheritance).
+pub fn load_from_dir(dir: &std::path::Path, canonical: &str, size: u32) -> Option<XImage> {
+    let files = NAMES.iter().find(|(c, _)| *c == canonical).map(|(_, f)| *f).unwrap_or(&[]);
+    for f in files.iter().copied().chain(std::iter::once(canonical)) {
+        let path = dir.join("cursors").join(f);
+        if path.exists() {
+            let imgs = load(&path);
+            let best = imgs.iter().map(|i| i.size).min_by_key(|s| s.abs_diff(size))?;
+            return imgs.into_iter().find(|i| i.size == best);
+        }
+    }
+    None
+}

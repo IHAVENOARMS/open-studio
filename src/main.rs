@@ -1,8 +1,11 @@
 mod app;
 mod control;
+mod cursor_themes;
 mod editor;
+mod settings;
 mod theme;
 mod decode;
+mod dialogs;
 mod edit;
 mod engine;
 mod export;
@@ -110,7 +113,13 @@ fn main() -> Result<()> {
             let mut comp = render::Compositor::new(device, queue);
             let progress = export::Progress::default();
             let started = std::time::Instant::now();
-            export::export(&mut comp, &project, &rec, &edit, &export::ExportOptions { out: out.clone(), height, fps }, &progress)?;
+            export::export(&mut comp, &project, &rec, &edit, &export::ExportOptions {
+                    out: out.clone(),
+                    height,
+                    fps,
+                    format: settings::Format::Mp4,
+                    quality: settings::Quality::Social,
+                }, &progress)?;
             eprintln!("open-studio: exported in {:.1}s", started.elapsed().as_secs_f64());
             println!("{}", out.display());
         }
@@ -200,6 +209,11 @@ fn visit_points(points: &str) -> Result<()> {
         record::hyprland::dispatch(&format!("hl.dsp.cursor.move({{x={x},y={y}}})"), &format!("movecursor {x} {y}"))
     };
     for p in points.split_whitespace() {
+        // A trailing "!" clicks at the point.
+        let (p, click) = match p.strip_suffix('!') {
+            Some(p) => (p, true),
+            None => (p, false),
+        };
         let Some((x, y)) = p.split_once(',') else { continue };
         let (x, y): (f64, f64) = (x.parse()?, y.parse()?);
         warp(x - 2.0, y)?;
@@ -207,6 +221,12 @@ fn visit_points(points: &str) -> Result<()> {
         for _ in 0..2 {
             dev.emit(&[InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 1)])?;
             std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        if click {
+            for v in [1, 0] {
+                dev.emit(&[InputEvent::new(EventType::KEY.0, evdev::KeyCode::BTN_LEFT.0, v)])?;
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(900));
     }

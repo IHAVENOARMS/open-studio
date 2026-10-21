@@ -54,3 +54,11 @@ pub fn format_time(t: f64) -> String {
     let s = t - m as f64 * 60.0;
     format!("{m}:{s:04.1}")
 }
+
+/// Path for display, with the home directory shortened to `~`.
+pub fn tilde(p: &std::path::Path) -> String {
+    match std::env::home_dir().and_then(|h| p.strip_prefix(&h).ok().map(|r| r.to_path_buf())) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => p.display().to_string(),
+    }
+}

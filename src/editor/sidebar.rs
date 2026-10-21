@@ -4,6 +4,7 @@ use super::widgets;
 use crate::edit::{AnimationSpeed, Background, EditConfig, ZoomFocus};
 use crate::project::Recording;
 use crate::render::background::PRESETS;
+use crate::dialogs;
 use crate::wallpapers;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -39,7 +40,13 @@ pub struct State {
     category: Option<String>,
     thumbs: HashMap<String, Option<egui::TextureHandle>>,
     download: Option<Arc<Download>>,
-    picking: Option<Receiver<Option<String>>>,
+    picking: Option<Receiver<Vec<std::path::PathBuf>>>,
+    /// Files chosen for import as custom wallpapers.
+    importing: Option<Receiver<Vec<std::path::PathBuf>>>,
+    /// Custom wallpapers being converted; receives the id of each one added.
+    converting: Option<Receiver<Option<String>>>,
+    /// Cursor theme UI state.
+    pub cursors: super::cursors::State,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -97,7 +104,7 @@ pub fn show(
                     }
                     match tab {
                         Tab::Background => background(ui, state, edit),
-                        Tab::Cursor => cursor(ui, edit, rec),
+                        Tab::Cursor => cursor(ui, state, edit, rec),
                         Tab::Animation => animation(ui, edit, rec, selected),
                     }
                 }));
@@ -134,7 +141,7 @@ fn background(ui: &mut Ui, state: &mut State, edit: &mut EditConfig) {
     );
     if new_kind != kind {
         edit.background = match new_kind {
-            BgKind::Wallpaper => match wallpapers::manifest().iter().find(|w| wallpapers::installed(&w.id)) {
+            BgKind::Wallpaper => match wallpapers::manifest().into_iter().find(|w| wallpapers::installed(&w.id)) {
                 Some(w) => Background::Wallpaper(w.id.clone()),
                 None => Background::Wallpaper(String::new()),
             },
@@ -190,16 +197,18 @@ fn background(ui: &mut Ui, state: &mut State, edit: &mut EditConfig) {
         Background::Image(path) => {
             if let Some(rx) = &state.picking {
                 match rx.try_recv() {
-                    Ok(Some(p)) => {
-                        *path = p;
+                    Ok(files) => {
+                        if let Some(p) = files.first() {
+                            *path = p.to_string_lossy().into_owned();
+                        }
                         state.picking = None;
                     }
-                    Ok(None) | Err(TryRecvError::Disconnected) => state.picking = None,
+                    Err(TryRecvError::Disconnected) => state.picking = None,
                     Err(TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)),
                 }
             }
             if widgets::wide_button_icon(ui, Some(Icon::Image), "Choose image").clicked() && state.picking.is_none() {
-                state.picking = Some(pick_image(ui.ctx().clone()));
+                state.picking = Some(dialogs::open_files(ui.ctx().clone(), "Choose background image", Some(dialogs::images_filter()), false));
             }
             let name = std::path::Path::new(path.as_str()).file_name().map(|n| n.to_string_lossy().to_string());
             help(ui, &name.unwrap_or_else(|| "No image selected. JPEG, PNG or WebP.".into()));
@@ -218,7 +227,7 @@ fn background(ui: &mut Ui, state: &mut State, edit: &mut EditConfig) {
     widgets::slider(ui, &mut edit.shadow, 0.0..=1.0, Some(0.6));
 }
 
-fn cursor(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
+fn cursor(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording) {
     heading(ui, "Cursor");
     if rec.cursor_embedded {
         help(ui, "This recording has the system cursor baked into the video, so cursor styling is unavailable.");
@@ -228,6 +237,7 @@ fn cursor(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
         help(ui, "No cursor movement was captured for this recording.");
         return;
     }
+    super::cursors::style_picker(ui, &mut state.cursors, edit);
     theme::section(ui, "Size");
     widgets::slider(ui, &mut edit.cursor.size, 0.5..=4.0, Some(1.5));
     widgets::divider(ui);
@@ -338,11 +348,9 @@ fn grid_cell(ui: &Ui) -> f32 {
 
 fn wallpaper_grid(ui: &mut Ui, state: &mut State, id: &mut String) {
     let all = wallpapers::manifest();
-    if all.is_empty() {
-        help(ui, "No wallpapers are listed in this build.");
-        return;
-    }
+    poll_imports(ui, state, id);
     let missing = wallpapers::missing().len();
+    let builtin_total = all.iter().filter(|w| w.category != wallpapers::CUSTOM_CATEGORY).count();
     if let Some(d) = &state.download {
         let done = d.done.load(Ordering::Relaxed);
         if d.finished.load(Ordering::Relaxed) {
@@ -364,7 +372,7 @@ fn wallpaper_grid(ui: &mut Ui, state: &mut State, id: &mut String) {
             state.thumbs.retain(|_, t| t.is_some());
         }
     } else if missing > 0 {
-        let label = if missing == all.len() {
+        let label = if missing == builtin_total {
             format!("Download wallpapers ({missing})")
         } else {
             format!("Download {missing} more wallpapers")
@@ -381,29 +389,28 @@ fn wallpaper_grid(ui: &mut Ui, state: &mut State, id: &mut String) {
             });
             state.download = Some(d);
         }
-        if missing == all.len() {
+        if missing == builtin_total {
             help(ui, "Openly licensed wallpapers are downloaded once and stored locally. Credits are in WALLPAPERS.md.");
-            return;
         }
     }
 
     // Category chips, defaulting to the category of the current wallpaper.
     let cats = wallpapers::categories();
-    let current_cat = wallpapers::get(id).map(|w| w.category.clone());
-    let cat = state.category.clone().or(current_cat).unwrap_or_else(|| cats[0].to_owned());
+    let current_cat = wallpapers::get(id).map(|w| w.category);
+    let cat = state.category.clone().or(current_cat).unwrap_or_else(|| cats[0].clone());
     let mut chosen = cat.clone();
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         for c in &cats {
             if widgets::chip(ui, c, *c == chosen).clicked() {
-                chosen = c.to_string();
+                chosen = c.clone();
             }
         }
     });
     if chosen != cat || state.category.is_none() {
         state.category = Some(chosen.clone());
     }
-    ui.add_space(2.0);
+    widgets::divider(ui);
     let installed: Vec<_> = all.iter().filter(|w| wallpapers::installed(&w.id)).collect();
     if widgets::wide_button_icon(ui, Some(Icon::Sparkle), "Pick random wallpaper").clicked() && !installed.is_empty() {
         let w = installed[random() % installed.len()];
@@ -412,18 +419,102 @@ fn wallpaper_grid(ui: &mut Ui, state: &mut State, id: &mut String) {
     }
     ui.add_space(4.0);
     let size = grid_cell(ui);
+    let custom = chosen == wallpapers::CUSTOM_CATEGORY;
+    let mut remove = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        if custom {
+            let busy = state.importing.is_some() || state.converting.is_some();
+            if add_tile(ui, size, busy).on_hover_text("Add your own wallpapers (JPEG, PNG, WebP)").clicked() && !busy {
+                state.importing = Some(dialogs::open_files(ui.ctx().clone(), "Add wallpapers", Some(dialogs::images_filter()), true));
+            }
+        }
         for w in installed.iter().filter(|w| w.category == chosen) {
             let tex = state.thumbs.entry(w.id.clone()).or_insert_with(|| load_thumb(ui.ctx(), &w.id)).clone();
             let Some(tex) = tex else { continue };
             let resp = thumb(ui, &tex, *id == w.id, size);
             let tip = if w.author.is_empty() { w.title.clone() } else { format!("{} by {} ({})", w.title, w.author, w.license) };
-            if resp.on_hover_text(tip).clicked() {
+            let resp = resp.on_hover_text(tip);
+            if resp.clicked() {
                 *id = w.id.clone();
+            }
+            if custom {
+                resp.context_menu(|ui| {
+                    if ui.button("Remove wallpaper").clicked() {
+                        remove = Some(w.id.clone());
+                        ui.close();
+                    }
+                });
             }
         }
     });
+    if let Some(r) = remove {
+        let _ = wallpapers::remove_custom(&r);
+        state.thumbs.remove(&r);
+    }
+    if custom && !all.iter().any(|w| w.category == wallpapers::CUSTOM_CATEGORY) {
+        help(ui, "Add your own images. They are stored with the other wallpapers and available in every project.");
+    }
+}
+
+/// Picks up files chosen in the import dialog and converts them on a worker
+/// thread; selects each wallpaper as it is added.
+fn poll_imports(ui: &Ui, state: &mut State, id: &mut String) {
+    if let Some(rx) = &state.importing {
+        match rx.try_recv() {
+            Ok(files) => {
+                state.importing = None;
+                if !files.is_empty() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        for f in files {
+                            let _ = tx.send(wallpapers::add_custom(&f).ok().map(|w| w.id));
+                            ctx.request_repaint();
+                        }
+                    });
+                    state.converting = Some(rx);
+                }
+            }
+            Err(TryRecvError::Disconnected) => state.importing = None,
+            Err(TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(200)),
+        }
+    }
+    if let Some(rx) = &state.converting {
+        loop {
+            match rx.try_recv() {
+                Ok(Some(new_id)) => *id = new_id,
+                Ok(None) => {}
+                Err(TryRecvError::Empty) => {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+                    break;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    state.converting = None;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Dashed "+" tile for adding custom wallpapers.
+fn add_tile(ui: &mut Ui, size: f32, busy: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let col = if resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
+    ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
+    let stroke = egui::Stroke::new(1.0, col.gamma_multiply(0.6));
+    let r = rect.shrink(0.5);
+    for (a, b) in [(r.left_top(), r.right_top()), (r.right_top(), r.right_bottom()), (r.right_bottom(), r.left_bottom()), (r.left_bottom(), r.left_top())] {
+        ui.painter().extend(egui::Shape::dashed_line(&[a, b], stroke, 3.0, 3.0));
+    }
+    if busy {
+        egui::Spinner::new().size(size * 0.4).paint_at(ui, Rect::from_center_size(rect.center(), vec2(size * 0.4, size * 0.4)));
+    } else {
+        icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(size * 0.42, size * 0.42)), Icon::Plus, col);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn load_thumb(ctx: &egui::Context, id: &str) -> Option<egui::TextureHandle> {
@@ -456,50 +547,4 @@ fn thumb(ui: &mut Ui, tex: &egui::TextureHandle, selected: bool, size: f32) -> e
         ui.painter().rect_stroke(rect, CornerRadius::same(7), egui::Stroke::new(1.0, Color32::from_white_alpha(90)), egui::StrokeKind::Inside);
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// Opens the desktop file chooser on a worker thread.
-fn pick_image(ctx: egui::Context) -> Receiver<Option<String>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = (|| -> Option<String> {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
-            rt.block_on(async {
-                use ashpd::desktop::file_chooser::{FileFilter, SelectedFiles};
-                let files = SelectedFiles::open_file()
-                    .title("Choose background image")
-                    .modal(true)
-                    .filter(FileFilter::new("Images").mimetype("image/jpeg").mimetype("image/png").mimetype("image/webp"))
-                    .send()
-                    .await
-                    .ok()?
-                    .response()
-                    .ok()?;
-                let uri = files.uris().first()?.as_str().to_owned();
-                let path = uri.strip_prefix("file://")?;
-                Some(percent_decode(path))
-            })
-        })();
-        let _ = tx.send(result);
-        ctx.request_repaint();
-    });
-    rx
-}
-
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }

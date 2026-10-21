@@ -1,0 +1,94 @@
+//! App-wide preferences (not per project): export choices and folder.
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Format {
+    Mp4,
+    Gif,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Quality {
+    Studio,
+    Social,
+    Web,
+    WebLow,
+}
+
+impl Quality {
+    pub const ALL: [Quality; 4] = [Self::Studio, Self::Social, Self::Web, Self::WebLow];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Studio => "Studio",
+            Self::Social => "Social Media",
+            Self::Web => "Web",
+            Self::WebLow => "Web (Low)",
+        }
+    }
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Studio => "Highest quality, best for further editing. Compression is almost impossible to notice.",
+            Self::Social => "Great quality at a reasonable size. Good for posting online.",
+            Self::Web => "Smaller file for embedding in websites and docs.",
+            Self::WebLow => "Smallest file. Compression is visible on detailed content.",
+        }
+    }
+    /// x264 CRF and preset.
+    pub fn x264(self) -> (u32, &'static str) {
+        match self {
+            Self::Studio => (14, "slow"),
+            Self::Social => (18, "medium"),
+            Self::Web => (23, "medium"),
+            Self::WebLow => (28, "fast"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Destination {
+    File,
+    Clipboard,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct Settings {
+    pub export_dir: PathBuf,
+    pub format: Format,
+    pub fps: u32,
+    /// None means the recording's native height.
+    pub height: Option<u32>,
+    pub quality: Quality,
+    pub destination: Destination,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            export_dir: crate::util::recordings_dir(),
+            format: Format::Mp4,
+            fps: 60,
+            height: None,
+            quality: Quality::Social,
+            destination: Destination::File,
+        }
+    }
+}
+
+fn path() -> PathBuf {
+    crate::util::config_dir().join("settings.json")
+}
+
+impl Settings {
+    pub fn load() -> Self {
+        std::fs::read_to_string(path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+    pub fn save(&self) {
+        let _ = std::fs::create_dir_all(crate::util::config_dir());
+        if let Ok(t) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(path(), t);
+        }
+    }
+}
