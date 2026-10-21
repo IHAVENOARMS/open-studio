@@ -48,7 +48,7 @@ impl State {
     }
 
     /// Polls the job; returns its progress 0..1 while running.
-    fn poll_cutout(&mut self, ctx: &egui::Context) -> Option<f32> {
+    pub fn poll_cutout(&mut self, ctx: &egui::Context) -> Option<f32> {
         let (p, rx) = self.cutout_job.as_ref()?;
         match rx.try_recv() {
             Ok(Ok(())) => {

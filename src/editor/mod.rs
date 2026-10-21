@@ -776,6 +776,7 @@ impl Editor {
                         let ctx = ui.ctx().clone();
                         self.matte = open_matte(&self.dir, &self.rec, &self.edit, self.time, &ctx);
                         self.camera_follow(self.playing.map(|_| Instant::now()));
+                        self.notify("Background removed");
                     }
                     if let Some(t) = sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec, self.time) {
                         self.seek(t);
@@ -976,6 +977,22 @@ impl Editor {
             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        // Background removal runs for a while: show it on the preview, from
+        // whatever tab is open, until the cutout can be shown.
+        if let Some(p) = self.sidebar.camera.poll_cutout(ui.ctx()) {
+            let text = if p == 0.0 { "Preparing background removal…".to_string() } else { format!("Removing background…  {:.0}%", p * 100.0) };
+            let font = egui::FontId::proportional(13.0);
+            let g = ui.painter().layout_no_wrap(text, font, Color32::WHITE);
+            let size = egui::vec2(g.size().x + 28.0, 34.0);
+            let pill = egui::Rect::from_center_size(egui::pos2(rect.center().x, rect.top() + 14.0 + size.y / 2.0), size);
+            let p_ = ui.painter();
+            p_.rect_filled(pill, 17.0, Color32::from_rgba_unmultiplied(20, 20, 26, 225));
+            p_.rect_stroke(pill, 17.0, egui::Stroke::new(1.0, Color32::from_white_alpha(28)), egui::StrokeKind::Inside);
+            p_.galley(pill.center() - g.size() / 2.0 - egui::vec2(0.0, 2.0), g, Color32::WHITE);
+            let bar = egui::Rect::from_min_size(egui::pos2(pill.left() + 14.0, pill.bottom() - 7.0), egui::vec2(pill.width() - 28.0, 2.0));
+            p_.rect_filled(bar, 1.0, Color32::from_white_alpha(30));
+            p_.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * p.max(0.02), 2.0)), 1.0, theme::KNOB);
+        }
         let zoom_sel = self.selected.filter(|s| s.track == Track::Zoom).map(|s| s.index);
         if let Some(Selection { track: Track::Mask, index }) = self.selected {
             if let Some(m) = self.edit.masks.get_mut(index) {
