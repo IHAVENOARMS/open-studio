@@ -224,14 +224,16 @@ pub fn show(
     if let Some(env) = waveform {
         paint_waveform(&p, clip_r, &geo, env, trim_s, trim_e);
     }
-    // Faint second markers, as in Screen Studio.
-    let mut t = 1.0;
+    // Faint gridlines at every ruler tick (labelled and half steps), drawn
+    // over the waveform as in Screen Studio.
+    let grid_step = step / 2.0;
+    let mut t = grid_step;
     while t < trim_e {
         let x = geo.x(t);
-        if x > clip_r.left() + 6.0 && x < clip_r.right() - 6.0 && px_per_s > 30.0 {
-            p.line_segment([pos2(x, clip_r.top() + 1.0), pos2(x, clip_r.bottom() - 1.0)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xe6, 0xc0, 0x80, 40)));
+        if x > clip_r.left() + 6.0 && x < clip_r.right() - 6.0 && grid_step * px_per_s > 12.0 {
+            p.line_segment([pos2(x, clip_r.top() + 1.0), pos2(x, clip_r.bottom() - 1.0)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xf0, 0xcc, 0x8c, 36)));
         }
-        t += 1.0;
+        t += grid_step;
     }
     if clip_r.width() > 60.0 {
         p.text(clip_r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Clip", egui::FontId::proportional(12.5), Color32::from_rgb(0xe8, 0xc6, 0x86));
@@ -595,9 +597,10 @@ fn paint_mask(p: &egui::Painter, r: Rect, m: &Mask, selected: bool) {
     }
 }
 
-/// Audio waveform on the clip bar: a filled shape in a darker shade of the
-/// clip colour, rising from the bottom of the bar.
-const WAVE: Color32 = Color32::from_rgb(0x9a, 0x6c, 0x22);
+/// Audio waveform on the clip bar: a filled shape slightly lighter than the
+/// clip (a warm white wash, measured as #DCAB50 over #C8890D in Screen
+/// Studio), rising from the bottom of the bar.
+const WAVE: Color32 = Color32::from_rgba_premultiplied(51, 48, 43, 51);
 
 fn paint_waveform(p: &egui::Painter, clip: Rect, geo: &Geo, env: &[f32], t0: f64, t1: f64) {
     let rate = super::audio::ENVELOPE_RATE;
