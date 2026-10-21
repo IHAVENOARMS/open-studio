@@ -89,7 +89,7 @@ pub struct Editor {
     /// Detected shortcuts by single-key setting, for the shortcuts track.
     shortcuts_cache: Option<(bool, Vec<crate::shortcuts::Shortcut>)>,
     /// Short message under the title ("Saved", errors).
-    status: Option<(String, Instant)>,
+    status: Option<Toast>,
     player: Player,
     /// Camera track player and the frame index on the GPU.
     camera: Option<(Player, i64)>,
@@ -316,13 +316,7 @@ impl Editor {
         // still beside it, the row staying centred while you type.
         let font = egui::FontId::proportional(14.0);
         let small = egui::FontId::proportional(12.5);
-        let status = self.status.as_ref().filter(|(_, t)| t.elapsed().as_secs_f32() < 4.0).map(|(m, _)| m.clone());
-        if status.is_some() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
-        }
-        let note = status.map(|m| format!("   {m}")).or_else(|| {
-            self.has_unsaved_changes().then(|| if self.is_new() { "   Not saved".to_string() } else { "   Edited".to_string() })
-        });
+        let note = self.has_unsaved_changes().then(|| if self.is_new() { "   Not saved".to_string() } else { "   Edited".to_string() });
         let name = self.renaming.clone().unwrap_or_else(|| self.name.clone());
         // Every part is laid out at a fixed spot on one shared top line, so
         // switching to editing moves nothing.
@@ -398,8 +392,112 @@ impl Editor {
         self.dir = dir;
     }
 
+    /// Shows a toast at the top of the window. `msg` is "Title" or
+    /// "Title: detail"; errors get a red mark.
     fn notify(&mut self, msg: impl Into<String>) {
-        self.status = Some((msg.into(), Instant::now()));
+        let msg = msg.into();
+        let error = msg.starts_with("Saving failed") || msg.starts_with("Couldn't");
+        let (title, detail) = match msg.split_once(": ") {
+            Some((t, d)) => (t.to_string(), d.to_string()),
+            None => (msg, String::new()),
+        };
+        self.status = Some(Toast { title, detail, error, folder: None, at: Instant::now() });
+    }
+
+    fn notify_saved(&mut self) {
+        self.status = Some(Toast {
+            title: "Project saved".into(),
+            detail: tilde(&self.dir),
+            error: false,
+            folder: Some(self.dir.clone()),
+            at: Instant::now(),
+        });
+    }
+
+    /// The toast: slides down from under the top bar, stays a few seconds,
+    /// fades out. Click to dismiss.
+    fn toast(&mut self, ctx: &egui::Context) {
+        const SHOW: f32 = 3.5;
+        const ANIM: f32 = 0.22;
+        let Some(t) = &self.status else { return };
+        let age = t.at.elapsed().as_secs_f32();
+        let life = if t.error { SHOW + 2.0 } else { SHOW };
+        if age > life {
+            self.status = None;
+            return;
+        }
+        let a = (age / ANIM).min(((life - age) / ANIM).min(1.0)).clamp(0.0, 1.0);
+        let ease = 1.0 - (1.0 - a).powi(3);
+        let mut dismiss = false;
+        let mut open = None;
+        egui::Area::new(egui::Id::NULL.with("toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 58.0 - 12.0 * (1.0 - ease)))
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.set_opacity(ease);
+                let frame = egui::Frame::new()
+                    .fill(Color32::from_rgb(0x1e, 0x20, 0x26))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(22)))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin { left: 14, right: 16, top: 10, bottom: 10 })
+                    .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(140) });
+                let resp = frame
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            // Mark: a check in a lavender disc, or "!" in red.
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
+                            let p = ui.painter();
+                            if t.error {
+                                p.circle_filled(r.center(), 11.0, theme::RECORD);
+                                p.text(r.center(), egui::Align2::CENTER_CENTER, "!", theme::semibold(14.0), Color32::WHITE);
+                            } else {
+                                p.circle_filled(r.center(), 11.0, theme::ACCENT);
+                                let c = r.center();
+                                p.line(
+                                    vec![c + egui::vec2(-4.5, 0.2), c + egui::vec2(-1.2, 3.4), c + egui::vec2(4.8, -3.4)],
+                                    egui::Stroke::new(2.0, Color32::WHITE),
+                                );
+                            }
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.label(egui::RichText::new(&t.title).font(theme::semibold(13.5)).color(theme::TEXT));
+                                if !t.detail.is_empty() {
+                                    // Long paths are shortened from the left so the name stays visible.
+                                    let max = 62;
+                                    let d = if t.detail.chars().count() > max {
+                                        format!("…{}", t.detail.chars().rev().take(max - 1).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+                                    } else {
+                                        t.detail.clone()
+                                    };
+                                    ui.label(egui::RichText::new(d).size(12.0).color(theme::TEXT_DIM));
+                                }
+                            });
+                            if let Some(f) = &t.folder {
+                                ui.add_space(6.0);
+                                let b = egui::Button::new(egui::RichText::new("Show in folder").size(12.5).color(theme::TEXT))
+                                    .fill(Color32::from_white_alpha(14))
+                                    .corner_radius(egui::CornerRadius::same(7));
+                                if ui.add(b).clicked() {
+                                    open = Some(f.clone());
+                                }
+                            }
+                        });
+                    })
+                    .response;
+                if resp.interact(Sense::click()).clicked() {
+                    dismiss = true;
+                }
+            });
+        if let Some(f) = open {
+            let _ = std::process::Command::new("xdg-open").arg(&f).spawn();
+            dismiss = true;
+        }
+        if dismiss {
+            self.status = None;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
     /// Ctrl+S: writes the project; a new recording moves into the projects
@@ -460,7 +558,7 @@ impl Editor {
 
     fn save_with_feedback(&mut self) {
         match self.save() {
-            Ok(()) => self.notify(format!("Saved to {}", self.dir.display())),
+            Ok(()) => self.notify_saved(),
             Err(e) => self.notify(format!("Saving failed: {e:#}")),
         }
     }
@@ -506,7 +604,8 @@ impl Editor {
                         .size(12.0)
                         .color(egui::Color32::from_rgb(0xb4, 0xb4, 0xb9)),
                     );
-                    if let Some((m, _)) = &self.status {
+                    if let Some(Toast { title, detail, .. }) = &self.status {
+                        let m = format!("{title}: {detail}");
                         ui.add_space(4.0);
                         ui.label(egui::RichText::new(m).size(11.5).color(theme::RECORD));
                     }
@@ -720,7 +819,7 @@ impl Editor {
                     self.saving_as = None;
                     if let Some(f) = folders.into_iter().next() {
                         match self.save_as(&f) {
-                            Ok(()) => self.notify(format!("Saved to {}", self.dir.display())),
+                            Ok(()) => self.notify_saved(),
                             Err(e) => self.notify(format!("Saving failed: {e:#}")),
                         }
                     }
@@ -732,6 +831,7 @@ impl Editor {
         if let Action::None = action {
             action = self.leave_prompt(&ctx);
         }
+        self.toast(&ctx);
         action
     }
 
@@ -1152,6 +1252,23 @@ impl Editor {
 
 /// Moves a project to the desktop trash (recoverable), or deletes it when
 /// no trash is available.
+struct Toast {
+    title: String,
+    detail: String,
+    error: bool,
+    /// Offer "Show in folder" for this directory.
+    folder: Option<PathBuf>,
+    at: Instant,
+}
+
+/// Path with the home directory shown as ~.
+fn tilde(p: &std::path::Path) -> String {
+    match std::env::home_dir().and_then(|h| p.strip_prefix(&h).ok().map(|r| r.to_path_buf())) {
+        Some(r) => format!("~/{}", r.display()),
+        None => p.display().to_string(),
+    }
+}
+
 fn leave_action(why: Leaving) -> Action {
     match why {
         Leaving::Home => Action::GoHome,
