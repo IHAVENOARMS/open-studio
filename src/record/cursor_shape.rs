@@ -27,6 +27,8 @@ const REGION: i32 = 64;
 /// Offset of the pointer inside the region (cursors mostly extend down-right).
 const LEAD: i32 = 24;
 const PERIOD_MS: u64 = 50;
+/// How long "no cursor" must persist before it is recorded.
+const HIDDEN_CONFIRM_NS: i64 = 1_500_000_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shape {
@@ -62,12 +64,18 @@ pub fn spawn(stop: Arc<AtomicBool>, sink: Arc<Mutex<Vec<ShapeChange>>>) -> Resul
                 if last.as_ref() == Some(&found) {
                     candidate = None;
                 } else {
+                    // "No cursor" is also what a sample sees when the pointer
+                    // moved out of the captured patch between the position
+                    // query and the capture, so only believe it once it has
+                    // held for a while.
+                    let confirmed = |c: &Shape, t0: i64| *c != Shape::Hidden || t - t0 >= HIDDEN_CONFIRM_NS;
                     match &candidate {
-                        Some((c, t0)) if *c == found => {
+                        Some((c, t0)) if *c == found && confirmed(c, *t0) => {
                             sink.lock().unwrap().push(ShapeChange { t_ns: *t0, shape: found.clone() });
                             last = Some(found);
                             candidate = None;
                         }
+                        Some((c, _)) if *c == found => {}
                         _ => candidate = Some((found, t)),
                     }
                 }

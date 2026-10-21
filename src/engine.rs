@@ -534,9 +534,18 @@ fn cursor_shape(rec: &Recording, edit: &EditConfig, t: f64) -> Option<CursorShap
     if edit.cursor.always_default {
         return Some(named("default"));
     }
-    let s = rec.shape_at(t);
+    let mut s = rec.shape_at(t);
     if s == "hidden" {
-        return None;
+        // Older recordings have brief false "hidden" readings (the pointer
+        // moved out of the sampled patch); only long ones are real.
+        let ev = &rec.events.shapes;
+        let i = ev.partition_point(|e| e.t <= t).saturating_sub(1);
+        let end = ev.get(i + 1).map_or(rec.duration, |e| e.t);
+        let start = ev.get(i).map_or(0.0, |e| e.t);
+        if end - start >= 2.0 {
+            return None;
+        }
+        s = ev[..i].iter().rev().map(|e| e.shape.as_str()).find(|n| *n != "hidden").unwrap_or("default");
     }
     if let Some(i) = s.strip_prefix("custom:").and_then(|i| i.parse::<usize>().ok()) {
         if let Some(c) = rec.custom_cursors.get(i) {
@@ -1083,5 +1092,18 @@ mod tests {
         assert!((zoom_progress(&edit, 2.0, 3.0) - 1.0).abs() < 1e-9);
         // Zooming back out after the segment: measured against that zoom.
         assert!((zoom_progress(&edit, 2.0f64.sqrt(), 5.2) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn brief_hidden_cursor_readings_are_ignored() {
+        use crate::project::ShapeEvent;
+        let mut r = rec();
+        let ev = |t: f64, shape: &str| ShapeEvent { t, shape: shape.into() };
+        r.events.shapes = vec![ev(0.0, "text"), ev(1.0, "hidden"), ev(1.4, "default"), ev(3.0, "hidden")];
+        let edit = EditConfig::default();
+        // 0.4 s of "hidden" keeps the shape from before it.
+        assert!(matches!(cursor_shape(&r, &edit, 1.2), Some(CursorShape::Named { name, .. }) if name == "text"));
+        // 3 s of "hidden" (to the end) really hides it.
+        assert!(cursor_shape(&r, &edit, 4.0).is_none());
     }
 }
