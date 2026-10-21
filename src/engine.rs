@@ -2,7 +2,7 @@
 //! state. Springs are pre-simulated at a fixed step over the whole timeline so
 //! the preview and the export see exactly the same motion for any time `t`.
 
-use crate::edit::{AnimationSpeed, EditConfig, MaskKind, ZoomFocus, ZoomSegment};
+use crate::edit::{AnimationSpeed, EditConfig, MaskKind, ZoomCurve, ZoomFocus, ZoomSegment};
 use crate::project::Recording;
 
 const DT: f64 = 1.0 / 240.0;
@@ -166,7 +166,17 @@ impl Tracks {
             cursor.push((x, y));
         }
 
-        let spring = zoom_spring(edit.zoom_speed);
+        let curve = edit.zoom_curve.unwrap_or(ZoomCurve::from_speed(edit.zoom_speed));
+        let spring = match curve {
+            ZoomCurve::Spring { tension, friction, mass } => Spring { stiffness: tension, damping: friction, mass },
+            // With a bezier curve the spring only smooths cursor following
+            // inside a zoom.
+            ZoomCurve::Bezier { .. } => zoom_spring(AnimationSpeed::Quick),
+        };
+        // Bezier transitions: (from, start time) per channel, restarted when
+        // the zoom level or segment changes. Targets may move during one.
+        let mut bez: Option<((f64, f64, f64), f64)> = None;
+        let mut bez_target_scale = 1.0f64;
         let mut cam = Camera::identity(&layout);
         let (mut vcx, mut vcy, mut vls) = (0.0, 0.0, 0.0);
         let mut ls = 0.0f64; // ln(scale): zoom feels linear in log space
@@ -204,10 +214,35 @@ impl Tracks {
                 }
                 None => ((layout.aspect * 0.5, 0.5), 1.0),
             };
+            let segment_changed = active != seg_idx;
             active = seg_idx;
-            spring.step(&mut cam.cx, &mut vcx, target.0, DT);
-            spring.step(&mut cam.cy, &mut vcy, target.1, DT);
-            spring.step(&mut ls, &mut vls, target_scale.ln(), DT);
+            match curve {
+                ZoomCurve::Spring { .. } => {
+                    spring.step(&mut cam.cx, &mut vcx, target.0, DT);
+                    spring.step(&mut cam.cy, &mut vcy, target.1, DT);
+                    spring.step(&mut ls, &mut vls, target_scale.ln(), DT);
+                }
+                ZoomCurve::Bezier { x1, y1, x2, y2, duration } => {
+                    if segment_changed || (target_scale - bez_target_scale).abs() > 1e-9 || bez.is_none() {
+                        bez = Some(((cam.cx, cam.cy, ls), t));
+                        bez_target_scale = target_scale;
+                    }
+                    let ((fx, fy, fl), t0) = bez.unwrap();
+                    let p = ((t - t0) / duration.max(0.05)).clamp(0.0, 1.0);
+                    if p < 1.0 {
+                        let e = crate::edit::cubic_bezier(x1, y1, x2, y2, p);
+                        cam.cx = fx + (target.0 - fx) * e;
+                        cam.cy = fy + (target.1 - fy) * e;
+                        ls = fl + (target_scale.ln() - fl) * e;
+                        (vcx, vcy, vls) = (0.0, 0.0, 0.0);
+                    } else {
+                        // Settled: follow the cursor with a quick spring.
+                        spring.step(&mut cam.cx, &mut vcx, target.0, DT);
+                        spring.step(&mut cam.cy, &mut vcy, target.1, DT);
+                        ls = target_scale.ln();
+                    }
+                }
+            }
             cam.scale = ls.exp().max(1.0);
             // Never show beyond the canvas edge.
             let (cx, cy) = clamp_in_canvas(cam.cx, cam.cy, cam.scale, &layout);
@@ -382,4 +417,54 @@ fn idle_opacity(rec: &Recording, edit: &EditConfig, t: f64) -> f64 {
     }
     let idle = t - last_move;
     (1.0 - (idle - 2.0) / 0.4).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edit::{EditConfig, ZoomCurve, ZoomFocus, ZoomSegment};
+    use crate::project::{Events, Recording, Source};
+
+    fn rec() -> Recording {
+        Recording {
+            version: 1,
+            video: "screen.mp4".into(),
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            duration: 6.0,
+            cursor_embedded: false,
+            source: Source::default(),
+            events: Events { moves: vec![[0.0, 960.0, 540.0], [6.0, 960.0, 540.0]], ..Default::default() },
+            custom_cursors: vec![],
+            dir: Default::default(),
+        }
+    }
+
+    fn scales(curve: ZoomCurve) -> Vec<f64> {
+        let edit = EditConfig {
+            zoom_segments: vec![ZoomSegment { start: 1.0, end: 5.0, scale: 2.0, focus: ZoomFocus::Auto }],
+            zoom_curve: Some(curve),
+            ..Default::default()
+        };
+        let tracks = Tracks::build(&rec(), &edit);
+        (0..=60).map(|i| tracks.camera(1.0 + i as f64 * 0.025).scale).collect()
+    }
+
+    #[test]
+    fn bezier_zoom_follows_curve_and_duration() {
+        let ease = scales(ZoomCurve::Bezier { x1: 0.16, y1: 1.0, x2: 0.3, y2: 1.0, duration: 1.0 });
+        assert!(ease[20] > 1.5 && ease[20] < 2.0, "halfway {}", ease[20]);
+        assert!((ease[40] - 2.0).abs() < 1e-6, "done at 1.0s: {}", ease[40]);
+        let back = scales(ZoomCurve::Bezier { x1: 0.34, y1: 1.56, x2: 0.64, y2: 1.0, duration: 1.0 });
+        let peak = back.iter().cloned().fold(0.0, f64::max);
+        assert!(peak > 2.05, "back-out should overshoot, peak {peak}");
+        assert!((back[40] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spring_presets_match_previous_behaviour() {
+        let s = scales(ZoomCurve::from_speed(crate::edit::AnimationSpeed::Mellow));
+        assert!(s[0] < 1.05 && s[40] > 1.9);
+    }
 }

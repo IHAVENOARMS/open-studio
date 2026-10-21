@@ -45,8 +45,9 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
 
-// Picker bar palette (dark, slightly purple translucent glass).
-const BAR_BG: Color32 = Color32::from_rgba_premultiplied(30, 25, 42, 242);
+// Picker bar palette: dark, slightly purple glass, ~72% opaque. On Hyprland
+// the area behind it is blurred (see `request_blur`), like macOS vibrancy.
+const BAR_BG: Color32 = Color32::from_rgba_premultiplied(22, 19, 32, 184);
 const BAR_BORDER: Color32 = Color32::from_rgba_premultiplied(26, 26, 26, 26);
 const BAR_TEXT: Color32 = Color32::from_rgb(0xec, 0xe8, 0xf3);
 const BAR_DIM: Color32 = Color32::from_rgb(0x8d, 0x86, 0x9c);
@@ -182,6 +183,7 @@ pub fn run() -> Result<Option<PathBuf>> {
     let layer_shell = LayerShell::bind(&globals, &qh).context("this compositor has no wlr-layer-shell")?;
     let shm = Shm::bind(&globals, &qh).context("wl_shm")?;
 
+    request_blur();
     let monitors = load_monitors()?;
     let cursor = hyprland::cursor_pos().unwrap_or((0.0, 0.0));
     let pinned = std::env::var("OPEN_STUDIO_BAR_MONITOR").ok();
@@ -263,6 +265,15 @@ pub fn run() -> Result<Option<PathBuf>> {
         return Err(anyhow!(e));
     }
     Ok(rt.result.flatten())
+}
+
+/// Asks Hyprland to blur what's behind our bar and widget. `ignore_alpha`
+/// keeps the transparent and lightly tinted parts of the full-screen overlays
+/// unblurred, so only the glass panels get the effect. Runtime only; it is
+/// not written to the user's config.
+fn request_blur() {
+    let lua = "hl.layer_rule({ name = 'open-studio-glass', match = { namespace = '^open-studio$' }, blur = true, ignore_alpha = 0.55 })";
+    let _ = hyprland::request(&format!("eval {lua}"));
 }
 
 fn load_monitors() -> Result<Vec<Monitor>> {
@@ -1153,7 +1164,7 @@ const WIDGET_H: u32 = 72;
 fn widget_ui(ui: &mut egui::Ui, sh: &mut Shared) {
     let r = ui.max_rect().shrink2(vec2(6.0, 6.0));
     let p = ui.painter().clone();
-    p.rect_filled(r, 18.0, Color32::from_rgba_premultiplied(44, 26, 56, 244));
+    p.rect_filled(r, 18.0, Color32::from_rgba_premultiplied(32, 19, 41, 184));
     p.rect_stroke(r, 18.0, Stroke::new(1.0, Color32::from_white_alpha(30)), StrokeKind::Inside);
     let cy = r.center().y;
     if sh.saving {

@@ -49,6 +49,57 @@ impl Mask {
     }
 }
 
+/// How zoom transitions move.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub enum ZoomCurve {
+    /// Physical spring (Screen Studio's model).
+    Spring { tension: f64, friction: f64, mass: f64 },
+    /// Cubic bezier easing over a fixed duration (seconds), like CSS
+    /// `cubic-bezier(x1, y1, x2, y2)`.
+    Bezier { x1: f64, y1: f64, x2: f64, y2: f64, duration: f64 },
+}
+
+impl ZoomCurve {
+    /// The spring behind a speed preset.
+    pub fn from_speed(speed: AnimationSpeed) -> Self {
+        let f: f64 = match speed {
+            AnimationSpeed::Slow => 0.45,
+            AnimationSpeed::Mellow => 1.0,
+            AnimationSpeed::Quick => 2.0,
+            AnimationSpeed::Rapid => 4.0,
+        };
+        Self::Spring { tension: 200.0 * f, friction: 40.0 * f.sqrt(), mass: 2.25 }
+    }
+
+    pub const EASE_OUT: Self = Self::Bezier { x1: 0.16, y1: 1.0, x2: 0.3, y2: 1.0, duration: 0.9 };
+
+    /// Seconds shown on the curve editor's time axis for a spring.
+    pub fn spring_window(tension: f64, friction: f64, mass: f64) -> f64 {
+        // Long enough to show the spring settle.
+        let w = (tension / mass).sqrt();
+        let zeta = friction / (2.0 * (tension * mass).sqrt());
+        (6.0 / (w * zeta.clamp(0.15, 1.0))).clamp(0.3, 4.0)
+    }
+}
+
+/// CSS-style cubic bezier: y for a given x (both 0..1), x1/x2 clamped to 0..1.
+pub fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, x: f64) -> f64 {
+    let (x1, x2) = (x1.clamp(0.0, 1.0), x2.clamp(0.0, 1.0));
+    let bez = |a: f64, b: f64, t: f64| 3.0 * a * t * (1.0 - t).powi(2) + 3.0 * b * t * t * (1.0 - t) + t.powi(3);
+    let x = x.clamp(0.0, 1.0);
+    // Solve bez_x(t) = x by bisection (monotonic since x1, x2 in 0..1).
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if bez(x1, x2, mid) < x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    bez(y1, y2, (lo + hi) / 2.0)
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnimationSpeed {
     Slow,
@@ -139,6 +190,8 @@ pub struct EditConfig {
     pub zoom_segments: Vec<ZoomSegment>,
     pub masks: Vec<Mask>,
     pub zoom_speed: AnimationSpeed,
+    /// Custom curve; None uses the `zoom_speed` preset.
+    pub zoom_curve: Option<ZoomCurve>,
     pub default_zoom: f64,
     pub background: Background,
     /// 0..1, blur applied to wallpaper and image backgrounds.
@@ -166,6 +219,7 @@ impl Default for EditConfig {
             zoom_segments: vec![],
             masks: vec![],
             zoom_speed: AnimationSpeed::Mellow,
+            zoom_curve: None,
             default_zoom: 2.0,
             background: default_background(),
             background_blur: 0.0,

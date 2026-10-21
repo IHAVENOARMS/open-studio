@@ -1,6 +1,7 @@
 //! The editor window: preview canvas, settings sidebar and timeline.
 
 mod cursors;
+mod curve;
 mod mask_overlay;
 pub mod player;
 pub use widgets::toggle;

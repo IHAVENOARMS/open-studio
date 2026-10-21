@@ -267,10 +267,9 @@ fn cursor(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording
 
 fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut Option<Selection>) {
     heading(ui, "Zoom");
-    theme::section(ui, "Animation speed");
-    let opts: Vec<_> = AnimationSpeed::ALL.iter().map(|s| (*s, s.label())).collect();
-    widgets::segmented(ui, &mut edit.zoom_speed, &opts);
-    help(ui, "Zooms and camera moves use spring physics, like a real camera operator.");
+    theme::section(ui, "Animation curve");
+    help(ui, "How the camera moves when zooming in and out.");
+    super::curve::show(ui, edit);
     widgets::divider(ui);
     widgets::toggle_row(ui, "Motion blur", &mut edit.motion_blur);
     if edit.motion_blur {
