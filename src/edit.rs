@@ -188,6 +188,23 @@ impl Default for CursorStyle {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
+pub struct AudioSettings {
+    /// 0..2 gain per track kind.
+    pub microphone_volume: f64,
+    pub system_volume: f64,
+    pub mute: bool,
+    /// Reduce background noise on the microphone (ffmpeg afftdn).
+    pub noise_reduction: bool,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self { microphone_volume: 1.0, system_volume: 1.0, mute: false, noise_reduction: true }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
 pub struct EditConfig {
     pub zoom_segments: Vec<ZoomSegment>,
     pub masks: Vec<Mask>,
@@ -209,6 +226,7 @@ pub struct EditConfig {
     pub trim_start: f64,
     pub trim_end: Option<f64>,
     pub motion_blur: bool,
+    pub audio: AudioSettings,
     /// 0..1, radial blur while the camera zooms.
     pub zoom_blur: f64,
     /// 0..1, directional blur while the camera pans.
@@ -233,6 +251,7 @@ impl Default for EditConfig {
             trim_start: 0.0,
             trim_end: None,
             motion_blur: true,
+            audio: AudioSettings::default(),
             zoom_blur: 0.5,
             pan_blur: 0.25,
         }

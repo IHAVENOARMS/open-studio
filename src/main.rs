@@ -61,6 +61,12 @@ enum Cmd {
         /// Record a window directly by Hyprland address (e.g. 0x55d0...).
         #[arg(long)]
         window: Option<String>,
+        /// Record a microphone ("default" or a Pulse source name).
+        #[arg(long)]
+        mic: Option<String>,
+        /// Record system audio (what the computer plays).
+        #[arg(long)]
+        system_audio: bool,
     },
     /// Stop the recording in progress.
     Stop,
@@ -124,7 +130,7 @@ extern "C" fn on_sigint(_: libc::c_int) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Some(Cmd::Record { out, fps, system_cursor, reuse, duration, test, display, area, window }) => {
+        Some(Cmd::Record { out, fps, system_cursor, reuse, duration, test, display, area, window, mic, system_audio }) => {
             let direct = match (display, window) {
                 (Some(d), _) => {
                     let area = area
@@ -141,6 +147,8 @@ fn main() -> Result<()> {
             };
             let opts = record::RecordOptions {
                 direct,
+                microphone: mic.map(|m| if m == "default" { record::audio::DEFAULT_MIC.to_string() } else { m }),
+                system_audio,
                 out_dir: out,
                 fps,
                 show_system_cursor: system_cursor,

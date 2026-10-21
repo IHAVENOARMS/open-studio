@@ -1,6 +1,7 @@
 //! Recording session: screen capture plus cursor/click/key logging, written
 //! out as a project directory.
 
+pub mod audio;
 pub mod capture;
 pub mod clock;
 pub mod direct;
@@ -34,6 +35,10 @@ pub struct RecordOptions {
     pub test_source: bool,
     /// Capture directly (no portal picker) when set.
     pub direct: Option<DirectRequest>,
+    /// Microphone (Pulse source name) to record, if any.
+    pub microphone: Option<String>,
+    /// Record what the computer plays.
+    pub system_audio: bool,
 }
 
 /// What to record when bypassing the portal (chosen in our own picker).
@@ -49,7 +54,7 @@ pub struct DirectRequest {
 
 impl Default for RecordOptions {
     fn default() -> Self {
-        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None }
+        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false }
     }
 }
 
@@ -64,6 +69,7 @@ pub struct Recorder {
     show_system_cursor: bool,
     started: std::time::Instant,
     clock: Arc<RecClock>,
+    audio: Vec<(String, audio::AudioCapture)>,
     /// Timestamps run on `clock` (direct capture) rather than raw monotonic.
     paused_clock: bool,
     direct_error: Arc<Mutex<Option<String>>>,
@@ -131,6 +137,22 @@ impl Recorder {
                 eprintln!("open-studio: cursor shapes won't be tracked: {e:#}");
             }
         }
+        let mut audio_caps = vec![];
+        if !opts.test_source {
+            let mut sources = vec![];
+            if let Some(m) = &opts.microphone {
+                sources.push(("microphone", m.clone()));
+            }
+            if opts.system_audio {
+                sources.push(("system", audio::SYSTEM_AUDIO.to_string()));
+            }
+            for (kind, dev) in sources {
+                match audio::AudioCapture::start(&dev, &dir.join(format!("{kind}.wav")), clock.clone(), paused_clock) {
+                    Ok(c) => audio_caps.push((kind.to_string(), c)),
+                    Err(e) => eprintln!("open-studio: {kind} audio unavailable: {e:#}"),
+                }
+            }
+        }
         let (tx, input_rx) = channel();
         if !opts.test_source && input::spawn(stop.clone(), tx) == 0 {
             eprintln!("open-studio: no readable input devices; clicks won't be tracked (add yourself to the `input` group)");
@@ -146,6 +168,7 @@ impl Recorder {
             show_system_cursor: opts.show_system_cursor,
             started: std::time::Instant::now(),
             clock,
+            audio: audio_caps,
             paused_clock,
             direct_error,
             _portal: portal,
@@ -189,6 +212,8 @@ impl Recorder {
         self.stop.store(true, Ordering::Relaxed);
         let fps = self.capture.fps;
         let result = self.capture.stop()?;
+        let audio_results: Vec<(String, Option<audio::AudioResult>)> =
+            self.audio.into_iter().map(|(k, c)| (k, c.stop().unwrap_or(None))).collect();
         if let Some((rt, stream)) = self._portal {
             let _ = rt.block_on(stream.session.close());
         }
@@ -235,8 +260,21 @@ impl Recorder {
             source,
             events: Events { moves, clicks: vec![], keys: vec![], shapes: vec![] },
             custom_cursors: vec![],
+            audio: vec![],
             dir: self.dir.clone(),
         };
+        for (kind, res) in audio_results {
+            let file = format!("{kind}.wav");
+            match res {
+                Some(a) if a.frames > 0 => {
+                    let offset = if paused_clock { (a.first_ns - t0) as f64 / 1e9 } else { (a.first_ns - t0) as f64 / 1e9 };
+                    rec.audio.push(crate::project::AudioTrack { file, kind, offset });
+                }
+                _ => {
+                    let _ = std::fs::remove_file(self.dir.join(file));
+                }
+            }
+        }
         for change in self.shapes.lock().unwrap().iter() {
             let Some(t) = secs(change.t_ns) else { continue };
             let shape = match &change.shape {

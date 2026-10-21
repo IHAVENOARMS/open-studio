@@ -42,6 +42,7 @@ pub enum Icon {
     StopCircle,
     PauseCircle,
     Keyboard,
+    Mic,
 }
 
 struct Pen<'a> {
@@ -255,6 +256,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.circle(10.0, 10.0, 7.5);
             pen.line(&[(8.2, 7.0), (8.2, 13.0)]);
             pen.line(&[(11.8, 7.0), (11.8, 13.0)]);
+        }
+        Icon::Mic => {
+            pen.rrect(7.5, 2.5, 12.5, 11.5, 2.5);
+            pen.line(&[(4.5, 9.0), (4.5, 10.0), (6.0, 13.5), (10.0, 15.0), (14.0, 13.5), (15.5, 10.0), (15.5, 9.0)]);
+            pen.line(&[(10.0, 15.0), (10.0, 17.5)]);
         }
         Icon::Keyboard => {
             pen.rrect(2.0, 5.0, 18.0, 15.0, 2.0);

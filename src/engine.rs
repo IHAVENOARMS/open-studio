@@ -437,6 +437,7 @@ mod tests {
             source: Source::default(),
             events: Events { moves: vec![[0.0, 960.0, 540.0], [6.0, 960.0, 540.0]], ..Default::default() },
             custom_cursors: vec![],
+            audio: vec![],
             dir: Default::default(),
         }
     }

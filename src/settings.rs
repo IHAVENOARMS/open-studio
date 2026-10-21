@@ -66,6 +66,10 @@ pub struct Settings {
     pub stop_shortcut: String,
     /// Draw the system cursor into the video instead of re-rendering it.
     pub bake_cursor: bool,
+    /// Microphone to record (Pulse source name), or None.
+    pub microphone: Option<String>,
+    /// Record what the computer plays.
+    pub system_audio: bool,
 }
 
 impl Default for Settings {
@@ -79,6 +83,8 @@ impl Default for Settings {
             destination: Destination::File,
             stop_shortcut: "Ctrl+Alt+Enter".into(),
             bake_cursor: false,
+            microphone: None,
+            system_audio: false,
         }
     }
 }

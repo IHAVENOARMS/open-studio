@@ -152,6 +152,9 @@ pub fn export(
     if !status.success() {
         bail!("ffmpeg exited with {status}");
     }
+    if !gif && !rec.audio.is_empty() && !edit.audio.mute {
+        mux_audio(dir, rec, edit, &video_out, start, end)?;
+    }
     if gif {
         let filter = "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=sierra2_4a:diff_mode=rectangle";
         let out = Command::new("ffmpeg")
@@ -166,5 +169,40 @@ pub fn export(
             bail!("GIF conversion failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
     }
+    Ok(())
+}
+
+/// Mixes the recording's audio tracks into the exported MP4: each track is
+/// shifted by its offset, trimmed to the edited range and gain-adjusted.
+fn mux_audio(dir: &Path, rec: &Recording, edit: &EditConfig, video: &Path, start: f64, end: f64) -> Result<()> {
+    let tmp = video.with_extension("audio.mp4");
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video);
+    let mut filters = vec![];
+    let mut labels = String::new();
+    for (i, track) in rec.audio.iter().enumerate() {
+        cmd.arg("-i").arg(dir.join(&track.file));
+        let gain = if track.kind == "microphone" { edit.audio.microphone_volume } else { edit.audio.system_volume };
+        // Audio time = video time - offset.
+        let (a0, a1) = ((start - track.offset).max(0.0), (end - track.offset).max(0.0));
+        let lead_ms = ((track.offset - start).max(0.0) * 1000.0).round() as i64;
+        let denoise = if track.kind == "microphone" && edit.audio.noise_reduction { "afftdn=nr=12:nf=-40," } else { "" };
+        filters.push(format!(
+            "[{}:a]atrim=start={a0:.4}:end={a1:.4},asetpts=PTS-STARTPTS,{denoise}adelay={lead_ms}:all=1,volume={gain:.3}[a{i}]",
+            i + 1
+        ));
+        labels.push_str(&format!("[a{i}]"));
+    }
+    let n = rec.audio.len();
+    filters.push(format!("{labels}amix=inputs={n}:normalize=0:duration=longest,atrim=end={:.4}[aout]", end - start));
+    cmd.args(["-filter_complex", &filters.join(";")]);
+    cmd.args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"]);
+    cmd.arg(&tmp);
+    let out = cmd.output().context("muxing audio")?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        bail!("audio mux failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    std::fs::rename(&tmp, video)?;
     Ok(())
 }

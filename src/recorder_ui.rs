@@ -109,6 +109,9 @@ struct Shared {
     cancel: bool,
     /// Folder button: leave and show the projects list.
     open_projects: bool,
+    /// Open input dropdown (1 microphone, 2 system audio).
+    menu: Option<usize>,
+    audio_devices: Vec<crate::record::audio::Device>,
     // Recording widget state.
     elapsed: f64,
     paused: bool,
@@ -235,6 +238,8 @@ pub fn run() -> Result<Outcome> {
             start: None,
             cancel: false,
             open_projects: false,
+            menu: None,
+            audio_devices: crate::record::audio::list_devices(),
             elapsed: 0.0,
             paused: false,
             can_pause: false,
@@ -699,6 +704,8 @@ fn start_recorder(req: &DirectRequest, settings: &Settings) -> Result<Recorder> 
     Recorder::start(RecordOptions {
         direct: Some(req.clone()),
         show_system_cursor: settings.bake_cursor,
+        microphone: settings.microphone.clone(),
+        system_audio: settings.system_audio,
         ..Default::default()
     })
 }
@@ -733,7 +740,9 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
     let is_bar = mon.name == sh.bar_monitor;
     let bar = bar_rect(screen);
     let pointer = ui.ctx().pointer_hover_pos();
-    let over_bar = is_bar && pointer.is_some_and(|p| bar.expand(6.0).contains(p) || (sh.gear_open && gear_menu_rect(bar).contains(p)));
+    let menu_area = Rect::from_min_max(pos2(bar.left(), bar.top() - 360.0), bar.max);
+    let over_bar = is_bar
+        && pointer.is_some_and(|p| bar.expand(6.0).contains(p) || ((sh.gear_open || sh.menu.is_some()) && menu_area.contains(p)));
     let p = ui.painter().clone();
 
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -901,11 +910,37 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
     x += 18.0;
 
     // Inputs not supported yet: shown as Screen Studio shows them when off.
-    for (icon, label, w) in [(Icon::CameraOff, "No camera", 140.0), (Icon::MicOff, "No microphone", 168.0), (Icon::SystemAudio, "No system audio", 176.0)] {
-        let r = Rect::from_min_size(pos2(x, cy - 18.0), vec2(w, 36.0));
-        icons::paint(&p, Rect::from_center_size(pos2(r.left() + 12.0, cy), vec2(22.0, 22.0)), icon, BAR_DIM);
-        p.text(pos2(r.left() + 32.0, cy), Align2::LEFT_CENTER, label, FontId::proportional(15.0), BAR_DIM);
-        ui.interact(r, ui.scope_id().with(("input", label)), Sense::hover()).on_hover_text("Camera and audio recording aren't available yet");
+    // Camera (not available yet), microphone and system audio menus.
+    let mic_name = sh.settings.microphone.as_ref().map(|m| {
+        sh.audio_devices.iter().find(|d| &d.name == m).map(|d| d.description.clone()).unwrap_or_else(|| "Microphone".into())
+    });
+    let sys_on = sh.settings.system_audio;
+    let short = |s: &str| if s.chars().count() > 16 { s.chars().take(15).collect::<String>() + "…" } else { s.to_string() };
+    let entries = [
+        (Icon::CameraOff, "No camera".to_string(), 140.0, false, false),
+        (if mic_name.is_some() { Icon::Mic } else { Icon::MicOff }, mic_name.as_deref().map(short).unwrap_or("No microphone".into()), 176.0, true, mic_name.is_some()),
+        (Icon::SystemAudio, if sys_on { "System audio".into() } else { "No system audio".into() }, 176.0, true, sys_on),
+    ];
+    for (i, (icon, label, w, enabled, on)) in entries.into_iter().enumerate() {
+        let r = Rect::from_min_size(pos2(x, cy - 20.0), vec2(w - 6.0, 40.0));
+        let resp = ui.interact(r, ui.scope_id().with(("input", i)), Sense::click());
+        let col = if on { BAR_TEXT } else { BAR_DIM };
+        if enabled && (resp.hovered() || sh.menu == Some(i)) {
+            p.rect_filled(r, 10.0, Color32::from_white_alpha(12));
+        }
+        icons::paint(&p, Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(22.0, 22.0)), icon, col);
+        p.text(pos2(r.left() + 36.0, cy), Align2::LEFT_CENTER, label, FontId::proportional(15.0), col);
+        let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text("Camera recording isn't available yet") };
+        if enabled && resp.clicked() {
+            sh.menu = if sh.menu == Some(i) { None } else { Some(i) };
+            sh.gear_open = false;
+            if i == 1 {
+                sh.audio_devices = crate::record::audio::list_devices();
+            }
+        }
+        if sh.menu == Some(i) {
+            input_menu(ui, sh, i, r);
+        }
         x += w;
     }
     let gx = bar.right() - 64.0;
@@ -929,11 +964,67 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
     icons::paint(&p, Rect::from_center_size(pos2(gear.left() + 17.0, cy), vec2(24.0, 24.0)), Icon::Gear, BAR_TEXT);
     icons::paint(&p, Rect::from_center_size(pos2(gear.left() + 40.0, cy), vec2(14.0, 14.0)), Icon::ChevronDown, BAR_TEXT);
     if gr.clicked() {
+        sh.menu = None;
         sh.gear_open = !sh.gear_open;
         sh.capturing_shortcut = false;
     }
     if sh.gear_open {
         gear_menu(ui, sh, gear_menu_rect(bar));
+    }
+}
+
+/// Dropdown above a bar entry: microphones (1) or system audio (2).
+fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
+    let mut items: Vec<(Option<String>, String)> = vec![];
+    match which {
+        1 => {
+            items.push((None, "No microphone".into()));
+            items.push((Some(crate::record::audio::DEFAULT_MIC.into()), "Default microphone".into()));
+            for d in sh.audio_devices.iter().filter(|d| !d.monitor) {
+                items.push((Some(d.name.clone()), d.description.clone()));
+            }
+        }
+        _ => {
+            items.push((None, "No system audio".into()));
+            items.push((Some("on".into()), "Record system audio".into()));
+        }
+    }
+    let row = 34.0;
+    let w = 300.0f32;
+    let h = items.len() as f32 * row + 16.0;
+    let r = Rect::from_min_size(pos2(anchor.left(), anchor.top() - 14.0 - h), vec2(w, h));
+    let p = ui.painter().clone();
+    p.add(egui::epaint::Shadow { offset: [0, 8], blur: 30, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(r, CornerRadius::same(12)));
+    p.rect_filled(r, 12.0, BAR_BG);
+    p.rect_stroke(r, 12.0, Stroke::new(1.0, BAR_BORDER), StrokeKind::Inside);
+    let current = match which {
+        1 => sh.settings.microphone.clone(),
+        _ => sh.settings.system_audio.then(|| "on".to_string()),
+    };
+    let mut chosen = None;
+    for (k, (value, label)) in items.iter().enumerate() {
+        let ir = Rect::from_min_size(pos2(r.left() + 8.0, r.top() + 8.0 + k as f32 * row), vec2(w - 16.0, row));
+        let resp = ui.interact(ir, ui.scope_id().with(("menu-item", which, k)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.hovered() {
+            p.rect_filled(ir, 8.0, Color32::from_white_alpha(16));
+        }
+        let selected = *value == current;
+        if selected {
+            p.circle_filled(pos2(ir.left() + 14.0, ir.center().y), 4.0, theme::KNOB);
+        }
+        let text = if label.chars().count() > 34 { label.chars().take(33).collect::<String>() + "…" } else { label.clone() };
+        p.text(pos2(ir.left() + 28.0, ir.center().y), Align2::LEFT_CENTER, text, FontId::proportional(14.0), BAR_TEXT);
+        if resp.clicked() {
+            chosen = Some(value.clone());
+        }
+    }
+    if let Some(v) = chosen {
+        match which {
+            1 => sh.settings.microphone = v,
+            _ => sh.settings.system_audio = v.is_some(),
+        }
+        sh.settings.save();
+        sh.menu = None;
     }
 }
 
@@ -1468,6 +1559,8 @@ mod tests {
             start: None,
             cancel: false,
             open_projects: false,
+            menu: None,
+            audio_devices: vec![],
             elapsed: 3.0,
             paused: false,
             can_pause: true,

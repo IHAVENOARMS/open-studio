@@ -24,12 +24,25 @@ pub struct Recording {
     pub cursor_embedded: bool,
     pub source: Source,
     pub events: Events,
+    /// Recorded audio tracks.
+    #[serde(default)]
+    pub audio: Vec<AudioTrack>,
     /// Cursor images that matched no theme cursor ("custom:N" shapes).
     #[serde(default)]
     pub custom_cursors: Vec<CustomCursor>,
     /// Project directory, set on load.
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AudioTrack {
+    /// WAV relative to the project directory (48 kHz stereo s16).
+    pub file: String,
+    /// "microphone" or "system".
+    pub kind: String,
+    /// Start of the audio relative to the first video frame, in seconds.
+    pub offset: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
