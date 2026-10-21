@@ -29,6 +29,8 @@ pub enum Icon {
     Trash,
     Scissors,
     Loupe,
+    ZoomAdd,
+    CamCutout,
     CamPip,
     CamSplit,
     CamFull,
@@ -446,54 +448,146 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             }
             pen.line(&[(6.5, 12.8), (13.5, 12.8)]);
         }
+        // Left tool pill icons, redrawn from Screen Studio's v4 toolbar.
+        Icon::ZoomAdd | Icon::Loupe => {
+            let pen = Pen { s: Stroke::new(1.45 * k, color), ..pen };
+            pen.circle(9.1, 8.8, 4.95);
+            pen.line(&[(12.9, 12.6), (15.9, 15.6)]);
+            if icon == Icon::ZoomAdd {
+                // Diagonal double arrow inside the lens.
+                let thin = Pen { s: Stroke::new(1.25 * k, color), ..pen };
+                let (a, b) = ((7.0, 6.7), (11.2, 10.9));
+                thin.line(&[a, b]);
+                thin.line(&[(a.0 + 1.7, a.1), a, (a.0, a.1 + 1.7)]);
+                thin.line(&[(b.0 - 1.7, b.1), b, (b.0, b.1 - 1.7)]);
+            } else {
+                // Four-point star: two thin diamonds and a small centre.
+                let (cx, cy, r, w) = (9.1, 8.8, 2.7, 0.75);
+                for (dx, dy) in [(w, r), (r, w)] {
+                    p.add(egui::Shape::convex_polygon(
+                        vec![pen.pt(cx, cy - dy), pen.pt(cx + dx, cy), pen.pt(cx, cy + dy), pen.pt(cx - dx, cy)],
+                        color,
+                        Stroke::NONE,
+                    ));
+                }
+                p.circle_filled(pen.pt(cx, cy), 1.0 * k, color);
+            }
+        }
+        Icon::CamPip => {
+            // Screen outline with a camera disc on its lower-left corner; the
+            // outline stops short of the disc.
+            let pen = Pen { s: Stroke::new(1.4 * k, color), ..pen };
+            let (x0, y0, x1, y1, r) = (4.2, 3.6, 19.0, 15.2, 1.8);
+            let mut pts = vec![(7.9, y1)];
+            pts.extend(corner_arc(x1 - r, y1 - r, r, 0.5, 0.0));
+            pts.extend(corner_arc(x1 - r, y0 + r, r, 0.0, -0.5));
+            pts.extend(corner_arc(x0 + r, y0 + r, r, -0.5, -1.0));
+            pts.push((x0, 9.2));
+            pen.line(&pts);
+            let (cx, cy) = (4.4, 13.0);
+            p.circle_filled(pen.pt(cx, cy), 3.25 * k, color);
+            let dark = Color32::from_rgb(0x1b, 0x1d, 0x22);
+            p.circle_filled(pen.pt(cx, cy - 0.9), 1.0 * k, dark);
+            dome(p, &pen, cx - 1.7, cx + 1.7, cy + 0.5, cy + 2.0, dark);
+        }
+        Icon::CamSplit => {
+            let pen = Pen { s: Stroke::new(1.4 * k, color), ..pen };
+            pen.rrect(2.2, 3.7, 17.8, 16.1, 1.8);
+            pen.line(&[(10.0, 3.7), (10.0, 16.1)]);
+        }
+        Icon::CamCutout => {
+            // Person in front of a dotted background (background removed).
+            let (hx, hy, hr) = (9.6, 8.5, 2.5);
+            for row in 0..6 {
+                for col in 0..8 {
+                    let (x, y) = (2.5 + col as f32 * 2.14, 3.9 + row as f32 * 2.4);
+                    let near_head = (x - hx).hypot(y - hy) < hr + 1.4;
+                    let near_body = y > 11.0 && (x - hx).abs() < 5.2 + (y - 11.0) * 0.1;
+                    if !near_head && !near_body {
+                        p.circle_filled(pen.pt(x, y), 0.48 * k, color);
+                    }
+                }
+            }
+            p.circle_filled(pen.pt(hx, hy), hr * k, color);
+            dome(p, &pen, 5.0, 14.2, 12.3, 16.3, color);
+        }
+        Icon::CamFull => {
+            // Screen-sized frame filled by a person (camera fullscreen).
+            let pen = Pen { s: Stroke::new(1.4 * k, color), ..pen };
+            pen.rrect(2.3, 3.8, 17.6, 16.1, 1.8);
+            p.circle_filled(pen.pt(10.0, 8.5), 2.35 * k, color);
+            dome(p, &pen, 5.9, 14.1, 12.4, 16.1, color);
+        }
+        Icon::CamHidden => {
+            // Outlined person crossed out, the outline broken around the slash.
+            let pen = Pen { s: Stroke::new(1.4 * k, color), ..pen };
+            let (a, b) = ((4.6, 3.7), (16.8, 16.4));
+            let head: Vec<(f32, f32)> = (0..=28).map(|i| {
+                let t = std::f32::consts::TAU * i as f32 / 28.0;
+                (11.0 + 2.15 * t.cos(), 6.1 + 2.15 * t.sin())
+            }).collect();
+            // Shoulders: top arc, then the base drawn as many points so the
+            // gap around the slash cuts it cleanly.
+            let mut body: Vec<(f32, f32)> = (0..=24).map(|i| {
+                let t = std::f32::consts::PI * (1.0 + i as f32 / 24.0);
+                (10.0 + 5.8 * t.cos(), 16.4 + 4.8 * t.sin())
+            }).collect();
+            body.extend((0..=20).map(|i| (15.8 - 11.6 * i as f32 / 20.0, 16.4)));
+            for path in [head, body] {
+                for part in split_near_line(&path, a, b, 0.75) {
+                    pen.line(&part);
+                }
+            }
+            pen.line(&[a, b]);
+        }
+        Icon::MaskBlur => {
+            // Sensitive data: frame with a slashed circle.
+            let pen = Pen { s: Stroke::new(1.4 * k, color), ..pen };
+            pen.rrect(2.1, 3.7, 17.9, 16.2, 1.8);
+            pen.circle(10.0, 9.95, 3.2);
+            let d = 3.2 * std::f32::consts::FRAC_1_SQRT_2;
+            pen.line(&[(10.0 - d, 9.95 + d), (10.0 + d, 9.95 - d)]);
+        }
+        Icon::MaskHighlight => {
+            // Highlight: hatched frame with a clear circle in the middle.
+            let pen = Pen { s: Stroke::new(1.4 * k, color), ..pen };
+            let (x0, y0, x1, y1) = (2.1, 3.7, 17.9, 16.2);
+            pen.rrect(x0, y0, x1, y1, 1.8);
+            let (cx, cy, r) = (10.0, 9.95, 3.3);
+            pen.circle(cx, cy, r);
+            // Lines x + y = c, clipped to the frame and kept outside the circle.
+            for c in [9.0f32, 13.6, 18.2, 22.8, 27.4] {
+                let pts: Vec<(f32, f32)> = (0..=60)
+                    .map(|i| {
+                        let x = x0 + (x1 - x0) * i as f32 / 60.0;
+                        (x, c - x)
+                    })
+                    .filter(|&(x, y)| y > y0 + 0.2 && y < y1 - 0.2 && x > x0 + 0.2 && x < x1 - 0.2)
+                    .collect();
+                let mut part = vec![];
+                for (x, y) in pts {
+                    if (x - cx).hypot(y - cy) < r + 0.9 {
+                        if part.len() > 1 {
+                            pen.line(&part);
+                        }
+                        part.clear();
+                    } else {
+                        part.push((x, y));
+                    }
+                }
+                if part.len() > 1 {
+                    pen.line(&part);
+                }
+            }
+        }
         Icon::Mask => {
             pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);
             p.rect_filled(Rect::from_min_max(pen.pt(5.0, 7.0), pen.pt(12.0, 13.0)), k, color);
-        }
-        Icon::Loupe => {
-            // Magnifier with a plus, the lens drawn doubled like glass.
-            pen.circle(8.5, 8.5, 6.0);
-            pen.line(&[(13.0, 13.0), (17.5, 17.5)]);
-            pen.line(&[(6.0, 8.5), (11.0, 8.5)]);
-            pen.line(&[(8.5, 6.0), (8.5, 11.0)]);
-            p.add(egui::Shape::line(
-                (0..=8).map(|i| {
-                    let a = std::f32::consts::PI * (1.05 + 0.4 * i as f32 / 8.0);
-                    pen.pt(8.5 + 4.0 * a.cos(), 8.5 + 4.0 * a.sin())
-                }).collect(),
-                Stroke::new(1.0 * k, color.gamma_multiply(0.7)),
-            ));
-        }
-        Icon::CamPip => {
-            pen.rrect(4.5, 3.5, 17.5, 13.5, 2.0);
-            p.circle_filled(pen.pt(4.5, 14.5), 3.2 * k, color);
-        }
-        Icon::CamSplit => {
-            pen.rrect(2.5, 4.0, 17.5, 16.0, 2.0);
-            pen.line(&[(10.0, 4.0), (10.0, 16.0)]);
-        }
-        Icon::CamFull => {
-            pen.rrect(2.5, 3.5, 17.5, 16.5, 2.0);
-            p.circle_filled(pen.pt(10.0, 8.5), 2.3 * k, color);
-            pen.fill(&[(5.5, 16.5), (6.3, 13.0), (10.0, 11.8), (13.7, 13.0), (14.5, 16.5)]);
-            for x in [5.0, 15.0] {
-                p.circle_filled(pen.pt(x, 6.0), 0.8 * k, color);
-            }
         }
         Icon::CamOnly => {
             pen.rrect(3.5, 3.5, 16.5, 16.5, 2.5);
             p.circle_filled(pen.pt(10.0, 8.5), 2.4 * k, color);
             pen.fill(&[(5.8, 16.5), (6.6, 13.2), (10.0, 12.0), (13.4, 13.2), (14.2, 16.5)]);
-        }
-        Icon::CamHidden => {
-            pen.circle(10.0, 7.0, 3.0);
-            pen.line(&[(4.5, 17.0), (5.5, 13.0), (10.0, 11.5), (14.5, 13.0), (15.5, 17.0)]);
-            pen.line(&[(3.0, 3.0), (17.0, 17.5)]);
-        }
-        Icon::MaskHighlight => {
-            pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);
-            pen.circle(10.0, 10.0, 3.6);
-            pen.line(&[(7.4, 12.6), (12.6, 7.4)]);
         }
         Icon::EyeSlash => {
             // Eye outline with a pupil, struck through.
@@ -510,15 +604,42 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.circle(10.0, 10.0, 2.4);
             pen.line(&[(3.5, 3.0), (16.5, 17.0)]);
         }
-        Icon::MaskBlur => {
-            pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);
-            for i in 0..5 {
-                let x = 3.0 + i as f32 * 3.2;
-                pen.line(&[(x, 15.5), ((x + 6.0).min(17.0), 15.5 - (x + 6.0).min(17.0) + x)]);
+    }
+}
+
+/// Quarter-ish arc around (cx, cy) from a0 to a1 (in turns of 2π).
+fn corner_arc(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Vec<(f32, f32)> {
+    (0..=6)
+        .map(|i| {
+            let a = std::f32::consts::PI * (a0 + (a1 - a0) * i as f32 / 6.0);
+            (cx + r * a.cos(), cy + r * a.sin())
+        })
+        .collect()
+}
+
+/// Splits a polyline where it passes within `gap` of the segment a-b.
+fn split_near_line(path: &[(f32, f32)], a: (f32, f32), b: (f32, f32), gap: f32) -> Vec<Vec<(f32, f32)>> {
+    let dist = |p: (f32, f32)| {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+        (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy)
+    };
+    let mut out = vec![];
+    let mut cur: Vec<(f32, f32)> = vec![];
+    for &p in path {
+        if dist(p) < gap {
+            if cur.len() > 1 {
+                out.push(std::mem::take(&mut cur));
             }
-            p.circle_filled(pen.pt(10.0, 10.0), 2.0 * k, color);
+            cur.clear();
+        } else {
+            cur.push(p);
         }
     }
+    if cur.len() > 1 {
+        out.push(cur);
+    }
+    out
 }
 
 /// Filled half-ellipse (a person's shoulders) from x0..x1, top to bottom.

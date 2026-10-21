@@ -247,15 +247,15 @@ impl Editor {
         use crate::edit::{MaskKind, ZoomKind};
         let has_camera = self.rec.camera.is_some();
         let groups: [&[(Icon, &str, u8)]; 3] = [
-            &[(Icon::Zoom, "Add zoom", 0), (Icon::Loupe, "Add Glass Loupe: magnify a detail under a glass lens", 1)],
+            &[(Icon::ZoomAdd, "Add zoom", 0), (Icon::Loupe, "Add Glass Loupe: magnify a detail under a glass lens", 1)],
             &[
-                (Icon::CamPip, "Camera in a corner", 10),
+                (Icon::CamPip, "Camera overlay", 10),
                 (Icon::CamSplit, "Split screen", 11),
+                (Icon::CamCutout, "Camera cutout (needs background removal, not available yet)", 14),
                 (Icon::CamFull, "Camera fullscreen", 12),
-                (Icon::CamOnly, "Camera only", 12),
                 (Icon::CamHidden, "Hide camera", 13),
             ],
-            &[(Icon::MaskHighlight, "Add highlight mask", 2), (Icon::MaskBlur, "Add sensitive data mask", 3)],
+            &[(Icon::MaskBlur, "Add sensitive data mask", 3), (Icon::MaskHighlight, "Add highlight mask", 2)],
         ];
         // Shrinks to fit short windows.
         let n: usize = groups.iter().map(|g| g.len()).sum();
@@ -274,18 +274,18 @@ impl Editor {
             }
             for (icon, tip, action) in g.iter().copied() {
                 let r = egui::Rect::from_min_size(egui::pos2(pill.left() + 5.0, y + 1.0), egui::vec2(40.0, step - 2.0));
-                let enabled = action < 10 || has_camera;
+                let enabled = action < 10 || (has_camera && action != 14);
                 let resp = ui.interact(r, ui.scope_id().with(("tool", tip)), egui::Sense::click());
                 if enabled && resp.hovered() {
                     ui.painter().rect_filled(r, 10.0, egui::Color32::from_white_alpha(14));
                 }
                 let col = if enabled { egui::Color32::WHITE } else { egui::Color32::from_rgb(0x53, 0x53, 0x55) };
-                let size = (step * 0.45).clamp(14.0, 19.0);
+                let size = (step * 0.52).clamp(14.0, 21.0);
                 icons::paint(ui.painter(), egui::Rect::from_center_size(r.center(), egui::vec2(size, size)), icon, col);
                 let resp = if enabled {
                     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
                 } else {
-                    resp.on_hover_text(format!("{tip}: record with a camera to use this"))
+                    resp.on_hover_text(if action == 14 { tip.to_string() } else { format!("{tip}: record with a camera to use this") })
                 };
                 if enabled && resp.clicked() {
                     clicked = Some(action);
