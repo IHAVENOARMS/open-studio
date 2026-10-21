@@ -7,6 +7,9 @@ struct Scene {
     prev_cam: vec4f,     // shutter start camera: cx, cy, scale, blur sample count
     next_cam: vec4f,     // shutter end camera: cx, cy, scale, unused
     blur: vec4f,         // zoom blur strength, pan blur strength, unused, unused
+    mask_info: vec4f,    // mask count
+    mask_rects: array<vec4f, 8>,   // video uv x0, y0, x1, y1
+    mask_params: array<vec4f, 8>,  // kind (0 blur, 1 highlight), amount
     bg0: vec4f,
     bg1: vec4f,
     bg2: vec4f,
@@ -96,6 +99,58 @@ fn sample_bicubic(uv: vec2f) -> vec3f {
     return max(c, vec3f(0.0));
 }
 
+// Heavy blur for "sensitive data" masks: a ring of taps on a coarse mip.
+fn sample_frosted(uv: vec2f) -> vec3f {
+    let size = vec2f(textureDimensions(video));
+    let step = 28.0 / size;
+    var c = textureSampleLevel(video, samp, uv, 5.0).rgb * 2.0;
+    var w = 2.0;
+    for (var i = 0; i < 8; i++) {
+        let a = f32(i) * 0.7853982;
+        c += textureSampleLevel(video, samp, uv + vec2f(cos(a), sin(a)) * step, 4.5).rgb;
+        w += 1.0;
+    }
+    return c / w;
+}
+
+// 0 outside .. 1 inside a mask rect (in video uv), with a soft rounded edge.
+fn mask_cover(uv: vec2f, r: vec4f) -> f32 {
+    let size = vec2f(textureDimensions(video));
+    let p = uv * size;
+    let lo = r.xy * size;
+    let hi = r.zw * size;
+    let radius = 0.012 * size.y;
+    let d = sd_round_rect(p - (lo + hi) * 0.5, (hi - lo) * 0.5, radius);
+    return clamp(0.5 - d / 1.5, 0.0, 1.0);
+}
+
+fn apply_masks(v_in: vec3f, uv: vec2f) -> vec3f {
+    var v = v_in;
+    let n = i32(u.mask_info.x);
+    var dim = 0.0;
+    var outside_all = 1.0;
+    var any_highlight = false;
+    for (var i = 0; i < n; i++) {
+        let r = u.mask_rects[i];
+        let prm = u.mask_params[i];
+        let cover = mask_cover(uv, r);
+        if (prm.x < 0.5) {
+            if (cover > 0.0) {
+                v = mix(v, sample_frosted(uv), cover * prm.y);
+            }
+        } else {
+            // Several highlights: dim what lies outside all of them.
+            any_highlight = true;
+            outside_all = outside_all * (1.0 - cover);
+            dim = max(dim, prm.y);
+        }
+    }
+    if (any_highlight) {
+        v = v * (1.0 - dim * outside_all);
+    }
+    return v;
+}
+
 // Scene colour at canvas point q; `px` is the size of one output pixel in canvas units.
 fn scene(q: vec2f, px: f32) -> vec3f {
     var col = background(q);
@@ -120,6 +175,9 @@ fn scene(q: vec2f, px: f32) -> vec3f {
             v = sample_bicubic(uv);
         } else {
             v = textureSampleLevel(video, samp, uv, u.params.x).rgb;
+        }
+        if (u.mask_info.x > 0.5) {
+            v = apply_masks(v, uv);
         }
         col = mix(col, v, cover);
     }

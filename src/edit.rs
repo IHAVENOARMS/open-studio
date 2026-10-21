@@ -22,6 +22,34 @@ pub struct ZoomSegment {
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskKind {
+    /// "Sensitive data": the region is blurred.
+    Blur,
+    /// Everything outside the region is dimmed.
+    Highlight,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Mask {
+    pub start: f64,
+    pub end: f64,
+    pub kind: MaskKind,
+    /// Region in normalized video coordinates: x, y, w, h.
+    pub rect: [f64; 4],
+    /// Highlight only: how dark the area outside the region gets (0..1).
+    pub opacity: f64,
+    /// Kept on the timeline but not applied.
+    pub disabled: bool,
+}
+
+impl Mask {
+    pub const DEFAULT_OPACITY: f64 = 0.6;
+    pub fn new(start: f64, end: f64) -> Self {
+        Self { start, end, kind: MaskKind::Blur, rect: [0.35, 0.4, 0.3, 0.2], opacity: Self::DEFAULT_OPACITY, disabled: false }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnimationSpeed {
     Slow,
     Mellow,
@@ -109,6 +137,7 @@ impl Default for CursorStyle {
 #[serde(default)]
 pub struct EditConfig {
     pub zoom_segments: Vec<ZoomSegment>,
+    pub masks: Vec<Mask>,
     pub zoom_speed: AnimationSpeed,
     pub default_zoom: f64,
     pub background: Background,
@@ -135,6 +164,7 @@ impl Default for EditConfig {
     fn default() -> Self {
         Self {
             zoom_segments: vec![],
+            masks: vec![],
             zoom_speed: AnimationSpeed::Mellow,
             default_zoom: 2.0,
             background: default_background(),

@@ -22,6 +22,12 @@ struct SceneUniform {
     prev_cam: [f32; 4],
     next_cam: [f32; 4],
     blur: [f32; 4],
+    /// x = number of masks.
+    mask_info: [f32; 4],
+    /// Per mask: video uv x0, y0, x1, y1.
+    mask_rects: [[f32; 4]; 8],
+    /// Per mask: kind (0 blur, 1 highlight), amount, unused, unused.
+    mask_params: [[f32; 4]; 8],
     bg: [[f32; 4]; 4],
     params: [f32; 4],
 }
@@ -508,6 +514,22 @@ impl Compositor {
             prev_cam: [frame.blur_from.cx as f32, frame.blur_from.cy as f32, frame.blur_from.scale as f32, samples as f32],
             next_cam: [frame.blur_to.cx as f32, frame.blur_to.cy as f32, frame.blur_to.scale as f32, 0.0],
             blur: [edit.zoom_blur as f32, edit.pan_blur as f32, 0.0, 0.0],
+            mask_info: [frame.masks.len() as f32, 0.0, 0.0, 0.0],
+            mask_rects: std::array::from_fn(|i| {
+                frame.masks.get(i).map_or([0.0; 4], |m| {
+                    let r = m.rect;
+                    [r[0] as f32, r[1] as f32, (r[0] + r[2]) as f32, (r[1] + r[3]) as f32]
+                })
+            }),
+            mask_params: std::array::from_fn(|i| {
+                frame.masks.get(i).map_or([0.0; 4], |m| {
+                    let kind = match m.kind {
+                        crate::edit::MaskKind::Blur => 0.0,
+                        crate::edit::MaskKind::Highlight => 1.0,
+                    };
+                    [kind, m.amount as f32, 0.0, 0.0]
+                })
+            }),
             bg: bg.1,
             params: [lod, bg.0, bicubic, bg_lod],
         };

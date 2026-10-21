@@ -64,6 +64,20 @@ open-studio export <project> --height 1080 --fps 60
 open-studio wallpapers [--list]         # download the wallpaper collection
 ```
 
+## Editing features
+
+- Automatic and manual zooms with spring animation and adjustable zoom and
+  movement blur.
+- Masks: "Sensitive data" blurs a region; "Highlight" dims everything
+  outside it. Each has its own timeline span and can be disabled.
+- Backgrounds: wallpapers (built-in and your own), gradients, colours or any
+  image, with blur, padding, rounded corners and shadow.
+- Cursor: smoothing, size, click animation, hide when idle, detected cursor
+  shapes, and cursor themes (built-in vector set, installed XCursor themes,
+  or imported archives/folders).
+- Export: MP4 or GIF, 24–60 fps, 720p to 4K, four quality profiles, to a
+  file (save dialog, remembered folder) or the clipboard.
+
 ## Wallpapers
 
 `assets/wallpapers.json` lists a curated set of openly licensed wallpapers

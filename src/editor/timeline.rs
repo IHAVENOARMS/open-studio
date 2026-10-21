@@ -1,7 +1,8 @@
-//! Timeline: ruler, amber clip track (with trim handles) and the purple zoom
-//! track where zoom segments are added, moved, resized and selected.
+//! Timeline: ruler, amber clip track (with trim handles), the purple zoom
+//! track and the pink mask track. Items on the two lower tracks are added,
+//! moved, resized and selected the same way.
 
-use crate::edit::{EditConfig, ZoomFocus, ZoomSegment};
+use crate::edit::{EditConfig, Mask, MaskKind, ZoomFocus, ZoomSegment};
 use crate::icons::{self, Icon};
 use crate::theme;
 use crate::util::format_time;
@@ -12,14 +13,88 @@ const EDGE: f32 = 7.0;
 const LIFT: f32 = 4.0;
 const MIN_SEG: f64 = 0.3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Track {
+    Zoom,
+    Mask,
+}
+
+/// A selected timeline item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Selection {
+    pub track: Track,
+    pub index: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Drag {
     Scrub,
-    Move { idx: usize, grab: f64 },
-    ResizeStart(usize),
-    ResizeEnd(usize),
+    Move { sel: Selection, grab: f64 },
+    ResizeStart(Selection),
+    ResizeEnd(Selection),
     TrimStart,
     TrimEnd,
+}
+
+impl Drag {
+    fn item(self) -> Option<Selection> {
+        match self {
+            Drag::Move { sel, .. } | Drag::ResizeStart(sel) | Drag::ResizeEnd(sel) => Some(sel),
+            _ => None,
+        }
+    }
+}
+
+fn spans(edit: &EditConfig, track: Track) -> Vec<(f64, f64)> {
+    match track {
+        Track::Zoom => edit.zoom_segments.iter().map(|z| (z.start, z.end)).collect(),
+        Track::Mask => edit.masks.iter().map(|m| (m.start, m.end)).collect(),
+    }
+}
+
+fn set_span(edit: &mut EditConfig, sel: Selection, start: f64, end: f64) {
+    match sel.track {
+        Track::Zoom => {
+            let z = &mut edit.zoom_segments[sel.index];
+            (z.start, z.end) = (start, end);
+        }
+        Track::Mask => {
+            let m = &mut edit.masks[sel.index];
+            (m.start, m.end) = (start, end);
+        }
+    }
+}
+
+/// Adds an item to a track (kept sorted) and returns its selection.
+fn add_item(edit: &mut EditConfig, track: Track, start: f64, end: f64) -> Selection {
+    let index = match track {
+        Track::Zoom => {
+            edit.zoom_segments.push(ZoomSegment { start, end, scale: edit.default_zoom, focus: ZoomFocus::Auto });
+            edit.zoom_segments.sort_by(|a, b| a.start.total_cmp(&b.start));
+            edit.zoom_segments.iter().position(|z| z.start == start).unwrap_or(0)
+        }
+        Track::Mask => add_mask(edit, Mask::new(start, end)),
+    };
+    Selection { track, index }
+}
+
+/// Inserts a mask keeping the list sorted; returns its index.
+pub fn add_mask(edit: &mut EditConfig, mask: Mask) -> usize {
+    edit.masks.push(mask);
+    edit.masks.sort_by(|a, b| a.start.total_cmp(&b.start));
+    edit.masks.iter().position(|m| m.start == mask.start).unwrap_or(0)
+}
+
+/// Free span for a new item of up to `len` seconds at `t` on a track.
+pub fn free_span_on(edit: &EditConfig, track: Track, t: f64, len: f64, duration: f64) -> Option<(f64, f64)> {
+    let items = spans(edit, track);
+    if items.iter().any(|(s, e)| t >= *s && t < *e) {
+        return None;
+    }
+    let next = items.iter().map(|(s, _)| *s).filter(|s| *s > t).fold(duration, f64::min);
+    let start = t;
+    let end = (start + len).min(next);
+    (end - start >= MIN_SEG).then_some((start, end))
 }
 
 #[derive(Default)]
@@ -49,10 +124,10 @@ impl Geo {
 }
 
 enum Hit {
-    Segment(usize, Drag),
+    Item(Selection, Drag),
     TrimStart,
     TrimEnd,
-    EmptyZoom,
+    Empty(Track),
     Other,
 }
 
@@ -105,7 +180,7 @@ pub fn show(
     edit: &mut EditConfig,
     time: f64,
     _playing: bool,
-    selected: &mut Option<usize>,
+    selected: &mut Option<Selection>,
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
@@ -113,7 +188,9 @@ pub fn show(
     let ruler = Rect::from_min_size(full.min, vec2(full.width(), 30.0));
     let clip = Rect::from_min_max(pos2(full.left(), ruler.bottom() + 6.0), pos2(full.right(), ruler.bottom() + 66.0));
     let zoom = Rect::from_min_max(pos2(full.left(), clip.bottom() + 10.0), pos2(full.right(), clip.bottom() + 70.0));
-    let area = Rect::from_min_max(full.min, pos2(full.right(), zoom.bottom()));
+    let mask = Rect::from_min_max(pos2(full.left(), zoom.bottom() + 10.0), pos2(full.right(), zoom.bottom() + 70.0));
+    let track_rect = |t: Track| if t == Track::Zoom { zoom } else { mask };
+    let area = Rect::from_min_max(full.min, pos2(full.right(), mask.bottom()));
     let resp = ui.allocate_rect(area, Sense::click_and_drag());
     let p = ui.painter_at(area.expand(4.0));
     let (trim_s, trim_e) = edit.trim_range(duration);
@@ -157,7 +234,7 @@ pub fn show(
         p.text(clip_r.center() + vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, format!("{:.0}s  ·  1×", trim_e - trim_s), egui::FontId::proportional(13.5), Color32::WHITE);
     }
 
-    // Zoom track.
+    // Zoom and mask tracks.
     let hover = resp.hover_pos();
     let hit = |pos: Pos2, edit: &EditConfig| -> Hit {
         if clip.contains(pos) {
@@ -168,68 +245,84 @@ pub fn show(
                 return Hit::TrimEnd;
             }
         }
-        if zoom.contains(pos) {
-            for (i, s) in edit.zoom_segments.iter().enumerate() {
-                let (x0, x1) = (geo.x(s.start), geo.x(s.end));
+        for track in [Track::Zoom, Track::Mask] {
+            if !track_rect(track).contains(pos) {
+                continue;
+            }
+            for (i, (s, e)) in spans(edit, track).into_iter().enumerate() {
+                let (x0, x1) = (geo.x(s), geo.x(e));
                 if pos.x >= x0 - 2.0 && pos.x <= x1 + 2.0 {
+                    let sel = Selection { track, index: i };
                     let d = if (pos.x - x0).abs() < EDGE {
-                        Drag::ResizeStart(i)
+                        Drag::ResizeStart(sel)
                     } else if (pos.x - x1).abs() < EDGE {
-                        Drag::ResizeEnd(i)
+                        Drag::ResizeEnd(sel)
                     } else {
-                        Drag::Move { idx: i, grab: geo.t(pos.x) - s.start }
+                        Drag::Move { sel, grab: geo.t(pos.x) - s }
                     };
-                    return Hit::Segment(i, d);
+                    return Hit::Item(sel, d);
                 }
             }
-            return Hit::EmptyZoom;
+            return Hit::Empty(track);
         }
         Hit::Other
     };
 
-    // Segments lift while hovered or being dragged, and settle back down
-    // when the pointer leaves.
-    let hovered_seg = match (state.drag, hover.map(|h| hit(h, edit))) {
-        (None, Some(Hit::Segment(i, _))) => Some(i),
+    // Items lift while hovered or being dragged, and settle back down when
+    // the pointer leaves.
+    let hovered_item = match (state.drag, hover.map(|h| hit(h, edit))) {
+        (None, Some(Hit::Item(sel, _))) => Some(sel),
         _ => None,
     };
-    let dragged_seg = match state.drag {
-        Some(Drag::Move { idx, .. } | Drag::ResizeStart(idx) | Drag::ResizeEnd(idx)) => Some(idx),
-        _ => None,
-    };
-    for (i, s) in edit.zoom_segments.iter().enumerate() {
-        let up = hovered_seg == Some(i) || dragged_seg == Some(i);
-        let lift = smooth(ui, ui.scope_id().with(("zoom-lift", i)), if up { 1.0 } else { 0.0 });
-        let r = Rect::from_x_y_ranges(geo.x(s.start)..=geo.x(s.end), zoom.y_range()).translate(vec2(0.0, -LIFT * lift));
-        if lift > 0.01 {
-            let shadow = egui::epaint::Shadow {
-                offset: [0, (3.0 + 3.0 * lift) as i8],
-                blur: (6.0 + 10.0 * lift) as u8,
-                spread: 0,
-                color: Color32::from_black_alpha((150.0 * lift) as u8),
-            };
-            p.add(shadow.as_shape(r, CornerRadius::same(10)));
+    let dragged_item = state.drag.and_then(Drag::item);
+    for track in [Track::Zoom, Track::Mask] {
+        for (i, (s, e)) in spans(edit, track).into_iter().enumerate() {
+            let sel = Selection { track, index: i };
+            let up = hovered_item == Some(sel) || dragged_item == Some(sel);
+            let lift = smooth(ui, ui.scope_id().with(("lift", track as u8, i)), if up { 1.0 } else { 0.0 });
+            let r = Rect::from_x_y_ranges(geo.x(s)..=geo.x(e), track_rect(track).y_range()).translate(vec2(0.0, -LIFT * lift));
+            if lift > 0.01 {
+                let shadow = egui::epaint::Shadow {
+                    offset: [0, (3.0 + 3.0 * lift) as i8],
+                    blur: (6.0 + 10.0 * lift) as u8,
+                    spread: 0,
+                    color: Color32::from_black_alpha((150.0 * lift) as u8),
+                };
+                p.add(shadow.as_shape(r, CornerRadius::same(10)));
+            }
+            let is_sel = *selected == Some(sel);
+            match track {
+                Track::Zoom => paint_zoom(&p, r, &edit.zoom_segments[i], is_sel),
+                Track::Mask => paint_mask(&p, r, &edit.masks[i], is_sel),
+            }
         }
-        paint_zoom(&p, r, s, *selected == Some(i));
     }
-    if edit.zoom_segments.is_empty() && hover.is_none_or(|h| !zoom.contains(h)) {
-        p.text(zoom.center(), egui::Align2::CENTER_CENTER, "Click or drag to add zoom on cursor", egui::FontId::proportional(13.0), Color32::from_rgb(0x4a, 0x4c, 0x52));
+    for (track, hint) in [(Track::Zoom, "Click or drag to add zoom on cursor"), (Track::Mask, "Click to add a blur or highlight mask")] {
+        let r = track_rect(track);
+        if spans(edit, track).is_empty() && hover.is_none_or(|h| !r.contains(h)) {
+            p.text(r.center(), egui::Align2::CENTER_CENTER, hint, egui::FontId::proportional(13.0), Color32::from_rgb(0x4a, 0x4c, 0x52));
+        }
     }
 
     // Hover feedback.
     if state.drag.is_none() {
         if let Some(h) = hover {
             match hit(h, edit) {
-                Hit::EmptyZoom => {
-                    if let Some((s, e)) = free_span(edit, geo.t(h.x), duration) {
-                        let r = Rect::from_x_y_ranges(geo.x(s)..=geo.x(e), zoom.y_range());
-                        gradient_bar(&p, r, 10.0, &ZOOM_STOPS, ZOOM_EDGE, 0.55, ZOOM_BORDER, 0.35);
-                        icons::paint_with_text(&p, r, Some(Icon::Plus), 13.0, "Zoom", egui::FontId::proportional(13.0), Color32::from_white_alpha(180));
+                Hit::Empty(track) => {
+                    let len = if track == Track::Zoom { 2.0 } else { 3.0 };
+                    if let Some((s, e)) = free_span_on(edit, track, geo.t(h.x), len, duration) {
+                        let r = Rect::from_x_y_ranges(geo.x(s)..=geo.x(e), track_rect(track).y_range());
+                        let (stops, edge, border, label): (&[(f32, Color32)], _, _, _) = match track {
+                            Track::Zoom => (&ZOOM_STOPS, ZOOM_EDGE, ZOOM_BORDER, "Zoom"),
+                            Track::Mask => (&MASK_STOPS, MASK_EDGE, MASK_BORDER, "Mask"),
+                        };
+                        gradient_bar(&p, r, 10.0, stops, edge, 0.55, border, 0.35);
+                        icons::paint_with_text(&p, r, Some(Icon::Plus), 13.0, label, egui::FontId::proportional(13.0), Color32::from_white_alpha(180));
                         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                     }
                 }
-                Hit::Segment(_, Drag::Move { .. }) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
-                Hit::Segment(..) | Hit::TrimStart | Hit::TrimEnd => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+                Hit::Item(_, Drag::Move { .. }) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
+                Hit::Item(..) | Hit::TrimStart | Hit::TrimEnd => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
                 Hit::Other => {}
             }
         }
@@ -240,13 +333,13 @@ pub fn show(
     if resp.drag_started() {
         if let Some(pos) = press {
             state.drag = match hit(pos, edit) {
-                Hit::Segment(i, d) => {
-                    *selected = Some(i);
+                Hit::Item(sel, d) => {
+                    *selected = Some(sel);
                     Some(d)
                 }
                 Hit::TrimStart => Some(Drag::TrimStart),
                 Hit::TrimEnd => Some(Drag::TrimEnd),
-                Hit::EmptyZoom => None,
+                Hit::Empty(_) => None,
                 Hit::Other => Some(Drag::Scrub),
             };
         }
@@ -255,25 +348,24 @@ pub fn show(
         let t = geo.t(pos.x);
         match drag {
             Drag::Scrub => out.seek = Some(t),
-            Drag::Move { idx, grab } => {
-                let len = edit.zoom_segments[idx].end - edit.zoom_segments[idx].start;
-                let (lo, hi) = neighbours(edit, idx, duration);
+            Drag::Move { sel, grab } => {
+                let (s0, e0) = spans(edit, sel.track)[sel.index];
+                let len = e0 - s0;
+                let (lo, hi) = neighbours(edit, sel, duration);
                 let start = (t - grab).clamp(lo, (hi - len).max(lo));
-                let s = &mut edit.zoom_segments[idx];
-                s.start = start;
-                s.end = start + len;
+                set_span(edit, sel, start, start + len);
                 ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
             }
-            Drag::ResizeStart(idx) => {
-                let (lo, _) = neighbours(edit, idx, duration);
-                let s = &mut edit.zoom_segments[idx];
-                s.start = t.clamp(lo, s.end - MIN_SEG);
+            Drag::ResizeStart(sel) => {
+                let (lo, _) = neighbours(edit, sel, duration);
+                let (_, e0) = spans(edit, sel.track)[sel.index];
+                set_span(edit, sel, t.clamp(lo, e0 - MIN_SEG), e0);
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
-            Drag::ResizeEnd(idx) => {
-                let (_, hi) = neighbours(edit, idx, duration);
-                let s = &mut edit.zoom_segments[idx];
-                s.end = t.clamp(s.start + MIN_SEG, hi);
+            Drag::ResizeEnd(sel) => {
+                let (_, hi) = neighbours(edit, sel, duration);
+                let (s0, _) = spans(edit, sel.track)[sel.index];
+                set_span(edit, sel, s0, t.clamp(s0 + MIN_SEG, hi));
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
             Drag::TrimStart => {
@@ -293,12 +385,11 @@ pub fn show(
     if resp.clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
             match hit(pos, edit) {
-                Hit::Segment(i, _) => *selected = Some(i),
-                Hit::EmptyZoom => {
-                    if let Some((s, e)) = free_span(edit, geo.t(pos.x), duration) {
-                        edit.zoom_segments.push(ZoomSegment { start: s, end: e, scale: edit.default_zoom, focus: ZoomFocus::Auto });
-                        edit.zoom_segments.sort_by(|a, b| a.start.total_cmp(&b.start));
-                        *selected = edit.zoom_segments.iter().position(|z| z.start == s);
+                Hit::Item(sel, _) => *selected = Some(sel),
+                Hit::Empty(track) => {
+                    let len = if track == Track::Zoom { 2.0 } else { 3.0 };
+                    if let Some((s, e)) = free_span_on(edit, track, geo.t(pos.x), len, duration) {
+                        *selected = Some(add_item(edit, track, s, e));
                     }
                 }
                 _ => {
@@ -311,25 +402,17 @@ pub fn show(
 
     // Playhead.
     let x = geo.x(time);
-    p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, zoom.bottom())], Stroke::new(1.5, theme::PLAYHEAD));
+    p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, mask.bottom())], Stroke::new(1.5, theme::PLAYHEAD));
     p.circle_filled(pos2(x, ruler.top() + 4.0), 6.0, theme::PLAYHEAD);
     out
 }
 
-/// Allowed range for segment `idx` without overlapping its neighbours.
-fn neighbours(edit: &EditConfig, idx: usize, duration: f64) -> (f64, f64) {
-    let lo = if idx > 0 { edit.zoom_segments[idx - 1].end } else { 0.0 };
-    let hi = edit.zoom_segments.get(idx + 1).map(|s| s.start).unwrap_or(duration);
+/// Allowed range for an item without overlapping its neighbours.
+fn neighbours(edit: &EditConfig, sel: Selection, duration: f64) -> (f64, f64) {
+    let items = spans(edit, sel.track);
+    let lo = if sel.index > 0 { items[sel.index - 1].1 } else { 0.0 };
+    let hi = items.get(sel.index + 1).map(|s| s.0).unwrap_or(duration);
     (lo, hi)
-}
-
-/// Where a new 2s zoom starting at `t` fits, shrunk to the gap available.
-fn free_span(edit: &EditConfig, t: f64, duration: f64) -> Option<(f64, f64)> {
-    let next = edit.zoom_segments.iter().map(|s| s.start).filter(|s| *s > t).fold(duration, f64::min);
-    let prev = edit.zoom_segments.iter().map(|s| s.end).filter(|e| *e <= t).fold(0.0, f64::max);
-    let start = t.max(prev);
-    let end = (start + 2.0).min(next);
-    (end - start >= MIN_SEG).then_some((start, end))
 }
 
 fn paint_zoom(p: &egui::Painter, r: Rect, seg: &ZoomSegment, selected: bool) {
@@ -378,6 +461,16 @@ const ZOOM_STOPS: [(f32, Color32); 6] = [
 ];
 const ZOOM_EDGE: Color32 = Color32::from_rgb(0x3a, 0x21, 0xe2);
 const ZOOM_BORDER: Color32 = Color32::from_rgb(0x8b, 0x7e, 0xe7);
+
+/// Pink mask bars (sampled from Screen Studio's mask screenshots).
+const MASK_STOPS: [(f32, Color32); 4] = [
+    (0.0, Color32::from_rgb(0xa1, 0x2c, 0x62)),
+    (0.45, Color32::from_rgb(0xbd, 0x3e, 0x7b)),
+    (0.8, Color32::from_rgb(0xc6, 0x45, 0x83)),
+    (1.0, Color32::from_rgb(0xb5, 0x3a, 0x76)),
+];
+const MASK_EDGE: Color32 = Color32::from_rgb(0x8f, 0x24, 0x56);
+const MASK_BORDER: Color32 = Color32::from_rgb(0xe0, 0x86, 0xb2);
 
 const CLIP_STOPS: [(f32, Color32); 5] = [
     (0.0, Color32::from_rgb(0x8e, 0x65, 0x24)),
@@ -477,4 +570,23 @@ fn smooth(ui: &Ui, id: egui::Id, target: f32) -> f32 {
         ui.ctx().request_repaint();
     }
     v
+}
+
+fn paint_mask(p: &egui::Painter, r: Rect, m: &Mask, selected: bool) {
+    let rad = 10.0f32.min(r.width() / 2.0);
+    let alpha = if m.disabled { 0.45 } else { 1.0 };
+    gradient_bar(p, r, rad, &MASK_STOPS, MASK_EDGE, 0.5, MASK_BORDER, alpha);
+    if selected {
+        p.rect_stroke(r.expand(2.0), CornerRadius::same(rad as u8 + 2), Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
+    }
+    let label = match m.kind {
+        MaskKind::Blur => "Sensitive data".to_string(),
+        MaskKind::Highlight => format!("Highlight {:.0}%", m.opacity * 100.0),
+    };
+    if r.width() > 80.0 {
+        p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Mask", egui::FontId::proportional(12.0), Color32::from_white_alpha(150));
+        icons::paint_with_text(p, Rect::from_center_size(r.center() + vec2(0.0, 9.0), vec2(r.width(), 18.0)), Some(Icon::Mask), 14.0, &label, egui::FontId::proportional(13.5), Color32::WHITE.gamma_multiply(alpha.max(0.7)));
+    } else if r.width() > 30.0 {
+        icons::paint(p, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), Icon::Mask, Color32::WHITE);
+    }
 }

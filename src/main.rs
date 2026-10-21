@@ -81,6 +81,15 @@ enum Cmd {
         height: u32,
         #[arg(long, default_value_t = 60)]
         fps: u32,
+        /// mp4 or gif
+        #[arg(long, default_value = "mp4")]
+        format: String,
+        /// studio, social, web or web-low
+        #[arg(long, default_value = "social")]
+        quality: String,
+        /// Put the exported file on the clipboard.
+        #[arg(long)]
+        clipboard: bool,
     },
 }
 
@@ -105,7 +114,19 @@ fn main() -> Result<()> {
             println!("{}", dir.display());
         }
         Some(Cmd::Stop) => control::send_stop()?,
-        Some(Cmd::Export { project, out, height, fps }) => {
+        Some(Cmd::Export { project, out, height, fps, format, quality, clipboard }) => {
+            let format = match format.as_str() {
+                "gif" => settings::Format::Gif,
+                "mp4" => settings::Format::Mp4,
+                f => anyhow::bail!("unknown format {f}"),
+            };
+            let quality = match quality.as_str() {
+                "studio" => settings::Quality::Studio,
+                "social" => settings::Quality::Social,
+                "web" => settings::Quality::Web,
+                "web-low" => settings::Quality::WebLow,
+                q => anyhow::bail!("unknown quality {q}"),
+            };
             let rec = project::Recording::load(&project)?;
             let edit = edit::EditConfig::load_or_create(&project, &rec);
             let out = out.unwrap_or_else(|| project.join("export.mp4"));
@@ -117,10 +138,13 @@ fn main() -> Result<()> {
                     out: out.clone(),
                     height,
                     fps,
-                    format: settings::Format::Mp4,
-                    quality: settings::Quality::Social,
+                    format,
+                    quality,
                 }, &progress)?;
             eprintln!("open-studio: exported in {:.1}s", started.elapsed().as_secs_f64());
+            if clipboard {
+                editor::copy_file_to_clipboard(&out).map_err(|e| anyhow::anyhow!(e))?;
+            }
             println!("{}", out.display());
         }
         Some(Cmd::Edit { project }) => app::run(Some(project))?,

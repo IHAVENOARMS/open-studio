@@ -1,6 +1,7 @@
 //! The editor window: preview canvas, settings sidebar and timeline.
 
 mod cursors;
+mod mask_overlay;
 pub mod player;
 mod sidebar;
 mod timeline;
@@ -25,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub use sidebar::Tab;
+use timeline::{Selection, Track};
 
 struct PreviewTarget {
     _texture: wgpu::Texture,
@@ -70,7 +72,7 @@ pub struct Editor {
     shown_index: i64,
     time: f64,
     playing: Option<(f64, Instant)>,
-    selected: Option<usize>,
+    selected: Option<Selection>,
     tab: Tab,
     sidebar: sidebar::State,
     timeline: timeline::State,
@@ -136,6 +138,18 @@ impl Editor {
         }
     }
 
+    /// Selects the mask under the playhead, or adds a new one there.
+    fn add_mask_at_playhead(&mut self) {
+        if let Some(i) = self.edit.masks.iter().position(|m| self.time >= m.start && self.time < m.end) {
+            self.selected = Some(Selection { track: Track::Mask, index: i });
+            return;
+        }
+        let start = self.time.min(self.rec.duration - 0.3).max(0.0);
+        let Some((s, e)) = timeline::free_span_on(&self.edit, Track::Mask, start, 3.0, self.rec.duration) else { return };
+        let index = timeline::add_mask(&mut self.edit, crate::edit::Mask::new(s, e));
+        self.selected = Some(Selection { track: Track::Mask, index });
+    }
+
     pub fn save(&mut self) {
         if self.edit != self.saved {
             if let Err(e) = self.edit.save(&self.dir) {
@@ -188,7 +202,7 @@ impl Editor {
 
         egui::Panel::bottom("timeline")
             .resizable(false)
-            .exact_size(196.0)
+            .exact_size(278.0)
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 6, bottom: 14 }))
             .show(ui, |ui| {
                 let out = timeline::show(
@@ -213,7 +227,9 @@ impl Editor {
                 let side_w = 404.0;
                 let side_rect = egui::Rect::from_min_max(egui::pos2(full.max.x - side_w, full.min.y + 4.0), full.max - egui::vec2(0.0, 8.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(side_rect), |ui| {
-                    sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec);
+                    if let Some(t) = sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec) {
+                        self.seek(t);
+                    }
                 });
                 let main_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x - side_w - 16.0, full.max.y));
                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(main_rect).layout(egui::Layout::top_down(egui::Align::Min)));
@@ -228,6 +244,13 @@ impl Editor {
                             }
                         }
                     });
+                    let mask_active = matches!(self.selected, Some(Selection { track: Track::Mask, .. }));
+                    let col = if mask_active { theme::KNOB } else { theme::TEXT };
+                    let mb = icons::button(ui, Icon::Mask, "Mask", egui::FontId::proportional(13.5), col, Some(theme::SURFACE), egui::vec2(0.0, 30.0))
+                        .on_hover_text("Add a blur or highlight mask at the playhead");
+                    if mb.clicked() {
+                        self.add_mask_at_playhead();
+                    }
                 });
                 let bar_h = 48.0;
                 let avail = ui.available_rect_before_wrap();
@@ -279,9 +302,15 @@ impl Editor {
             self.set_playing(self.playing.is_none());
         }
         if del {
-            if let Some(i) = self.selected.take() {
-                if i < self.edit.zoom_segments.len() {
-                    self.edit.zoom_segments.remove(i);
+            if let Some(sel) = self.selected.take() {
+                match sel.track {
+                    Track::Zoom if sel.index < self.edit.zoom_segments.len() => {
+                        self.edit.zoom_segments.remove(sel.index);
+                    }
+                    Track::Mask if sel.index < self.edit.masks.len() => {
+                        self.edit.masks.remove(sel.index);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -332,8 +361,15 @@ impl Editor {
             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        let zoom_sel = self.selected.filter(|s| s.track == Track::Zoom).map(|s| s.index);
+        if let Some(Selection { track: Track::Mask, index }) = self.selected {
+            if let Some(m) = self.edit.masks.get_mut(index) {
+                let id = ui.scope_id().with(("mask-edit", index));
+                mask_overlay::edit(ui, rect, &self.tracks.layout, fs.camera, id, &mut m.rect);
+            }
+        }
         // Clicking the preview sets the focus point of a manual zoom.
-        if let (Some(i), Some(pos)) = (self.selected, resp.interact_pointer_pos()) {
+        if let (Some(i), Some(pos)) = (zoom_sel, resp.interact_pointer_pos()) {
             if resp.clicked() {
                 if let Some(seg) = self.edit.zoom_segments.get_mut(i) {
                     if matches!(seg.focus, ZoomFocus::Manual { .. }) {
@@ -349,7 +385,7 @@ impl Editor {
                 }
             }
         }
-        if let Some(ZoomFocus::Manual { x, y }) = self.selected.and_then(|i| self.edit.zoom_segments.get(i)).map(|s| s.focus)
+        if let Some(ZoomFocus::Manual { x, y }) = zoom_sel.and_then(|i| self.edit.zoom_segments.get(i)).map(|s| s.focus)
         {
             // Show the focus point while the camera is at rest (unzoomed).
             if (fs.camera.scale - 1.0).abs() < 0.02 {
@@ -639,6 +675,7 @@ impl Editor {
             dlg.job = Some(ExportJob { out, destination, progress, result });
         }
         if close {
+            dlg.settings.save();
             self.export = None;
         }
     }
@@ -646,12 +683,16 @@ impl Editor {
 
 /// Puts a file on the Wayland clipboard as a URI list, which file managers,
 /// browsers and chat apps accept as a pasted file.
-fn copy_file_to_clipboard(path: &std::path::Path) -> Result<(), String> {
+pub fn copy_file_to_clipboard(path: &std::path::Path) -> Result<(), String> {
     use std::io::Write;
     let uri = format!("file://{}\n", path.display());
     let mut child = std::process::Command::new("wl-copy")
         .args(["--type", "text/uri-list"])
         .stdin(std::process::Stdio::piped())
+        // wl-copy keeps serving the clipboard from a background process;
+        // don't let it hold our stdout/stderr open.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|e| format!("wl-copy not available: {e}"))?;
     child.stdin.take().unwrap().write_all(uri.as_bytes()).map_err(|e| e.to_string())?;

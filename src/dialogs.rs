@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, channel};
 
 fn run<F>(ctx: egui::Context, job: F) -> Receiver<Vec<PathBuf>>
 where
-    F: AsyncFnOnce() -> Option<SelectedFiles> + Send + 'static,
+    F: AsyncFnOnce() -> ashpd::Result<SelectedFiles> + Send + 'static,
 {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
@@ -15,7 +15,14 @@ where
             .enable_all()
             .build()
             .ok()
-            .and_then(|rt| rt.block_on(job()))
+            .and_then(|rt| match rt.block_on(job()) {
+                Ok(f) => Some(f),
+                Err(ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)) => None,
+                Err(e) => {
+                    eprintln!("open-studio: file dialog failed: {e}");
+                    None
+                }
+            })
             .map(|f| f.uris().iter().filter_map(|u| uri_to_path(u.as_str())).collect())
             .unwrap_or_default();
         let _ = tx.send(files);
@@ -39,7 +46,7 @@ pub fn open_files(ctx: egui::Context, title: &'static str, filter: Option<FileFi
         if let Some(f) = filter {
             req = req.filter(f);
         }
-        req.send().await.ok()?.response().ok()
+        req.send().await?.response()
     })
 }
 
@@ -48,10 +55,10 @@ pub fn open_folder(ctx: egui::Context, title: &'static str, start: Option<PathBu
     run(ctx, async move || {
         let req = SelectedFiles::open_file().title(title).modal(true).directory(true);
         let req = match &start {
-            Some(dir) => req.current_folder(dir).ok()?,
+            Some(dir) => req.current_folder(dir)?,
             None => req,
         };
-        req.send().await.ok()?.response().ok()
+        req.send().await?.response()
     })
 }
 
@@ -63,13 +70,10 @@ pub fn save_file(ctx: egui::Context, title: &'static str, folder: &Path, name: &
             .title(title)
             .modal(true)
             .current_name(name.as_str())
-            .current_folder(&folder)
-            .ok()?
+            .current_folder(&folder)?
             .send()
-            .await
-            .ok()?
+            .await?
             .response()
-            .ok()
     })
 }
 

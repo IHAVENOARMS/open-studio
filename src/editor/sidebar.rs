@@ -1,7 +1,8 @@
 //! Settings panel on the right: a vertical icon tab strip plus a rounded card.
 
 use super::widgets;
-use crate::edit::{AnimationSpeed, Background, EditConfig, ZoomFocus};
+use super::timeline::{Selection, Track};
+use crate::edit::{AnimationSpeed, Background, EditConfig, Mask, MaskKind, ZoomFocus};
 use crate::project::Recording;
 use crate::render::background::PRESETS;
 use crate::dialogs;
@@ -62,9 +63,10 @@ pub fn show(
     state: &mut State,
     edit: &mut EditConfig,
     tab: &mut Tab,
-    selected: &mut Option<usize>,
+    selected: &mut Option<Selection>,
     rec: &Recording,
-) {
+) -> Option<f64> {
+    let mut seek = None;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         // Icon strip.
@@ -95,12 +97,18 @@ pub fn show(
                 ui.set_min_height(ui.available_height());
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 8.0;
-                    if let Some(i) = *selected {
-                        if i < edit.zoom_segments.len() {
-                            zoom_segment(ui, edit, i, selected);
-                            return;
+                    if let Some(sel) = *selected {
+                        match sel.track {
+                            Track::Zoom if sel.index < edit.zoom_segments.len() => {
+                                zoom_segment(ui, edit, sel.index, selected);
+                                return;
+                            }
+                            Track::Mask if sel.index < edit.masks.len() => {
+                                seek = mask_editor(ui, edit, sel.index, selected);
+                                return;
+                            }
+                            _ => *selected = None,
                         }
-                        *selected = None;
                     }
                     match tab {
                         Tab::Background => background(ui, state, edit),
@@ -110,6 +118,7 @@ pub fn show(
                 }));
             });
     });
+    seek
 }
 
 fn heading(ui: &mut Ui, text: &str) {
@@ -256,7 +265,7 @@ fn cursor(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording
     widgets::toggle_row(ui, "Click animation", &mut edit.cursor.click_effect);
 }
 
-fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut Option<usize>) {
+fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut Option<Selection>) {
     heading(ui, "Zoom");
     theme::section(ui, "Animation speed");
     let opts: Vec<_> = AnimationSpeed::ALL.iter().map(|s| (*s, s.label())).collect();
@@ -288,7 +297,64 @@ fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut
     }
 }
 
-fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Option<usize>) {
+fn mask_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Option<Selection>) -> Option<f64> {
+    let mut seek = None;
+    if icons::button(ui, Icon::Back, "Close Mask editor", egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), vec2(0.0, 34.0))
+        .clicked()
+    {
+        *selected = None;
+        return None;
+    }
+    ui.add_space(8.0);
+    let m = &mut edit.masks[i];
+    ui.label(RichText::new("Mask type").size(12.5).color(theme::TEXT_DIM));
+    widgets::segmented(ui, &mut m.kind, &[(MaskKind::Blur, "Sensitive Data"), (MaskKind::Highlight, "Highlight")]);
+    ui.add_space(4.0);
+    if m.kind == MaskKind::Blur {
+        let amber = Color32::from_rgb(0xe8, 0xa8, 0x3d);
+        egui::Frame::new()
+            .fill(Color32::from_rgb(0x2b, 0x22, 0x12))
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(0x6b, 0x4f, 0x1c)))
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(egui::Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                icons::paint(ui.painter(), r, Icon::Mask, amber);
+                ui.label(
+                    RichText::new("Make sure the mask covers the entire part of the timeline where sensitive data is present.")
+                        .color(amber),
+                );
+            });
+    }
+    if widgets::wide_button(ui, "Focus the timeline on the mask start").clicked() {
+        seek = Some(m.start);
+    }
+    widgets::divider(ui);
+    if m.kind == MaskKind::Highlight {
+        theme::section(ui, "Highlight mask opacity");
+        widgets::slider(ui, &mut m.opacity, 0.0..=1.0, Some(Mask::DEFAULT_OPACITY));
+        widgets::divider(ui);
+    }
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.set_width(ui.available_width() - 56.0);
+            ui.label(RichText::new("Disable").size(13.5));
+            help(ui, "When disabled, the mask will not be applied, but it will still be present in the timeline.");
+        });
+        widgets::toggle(ui, &mut m.disabled);
+    });
+    ui.add_space(8.0);
+    if icons::button(ui, Icon::Trash, "Remove mask", egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), vec2(ui.available_width(), 38.0))
+        .clicked()
+    {
+        edit.masks.remove(i);
+        *selected = None;
+    }
+    seek
+}
+
+fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Option<Selection>) {
     let close = icons::button(ui, Icon::Back, "Close   Esc", egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), vec2(0.0, 34.0));
     if close.clicked() {
         *selected = None;

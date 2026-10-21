@@ -2,7 +2,7 @@
 //! state. Springs are pre-simulated at a fixed step over the whole timeline so
 //! the preview and the export see exactly the same motion for any time `t`.
 
-use crate::edit::{AnimationSpeed, EditConfig, ZoomFocus, ZoomSegment};
+use crate::edit::{AnimationSpeed, EditConfig, MaskKind, ZoomFocus, ZoomSegment};
 use crate::project::Recording;
 
 const DT: f64 = 1.0 / 240.0;
@@ -260,6 +260,37 @@ pub struct FrameState {
     pub blur_from: Camera,
     pub blur_to: Camera,
     pub cursor: Option<CursorState>,
+    pub masks: Vec<ActiveMask>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ActiveMask {
+    pub kind: MaskKind,
+    /// Normalized video rect: x, y, w, h.
+    pub rect: [f64; 4],
+    /// Effect strength including fades (highlight dim amount, or 1 for blur).
+    pub amount: f64,
+}
+
+/// Masks in effect at `t`. Highlights fade in and out over 0.3s; blurs are
+/// fully on for their whole span so nothing sensitive leaks at the edges.
+fn active_masks(edit: &EditConfig, t: f64) -> Vec<ActiveMask> {
+    const FADE: f64 = 0.3;
+    edit.masks
+        .iter()
+        .filter(|m| !m.disabled && t >= m.start && t < m.end)
+        .map(|m| {
+            let amount = match m.kind {
+                MaskKind::Blur => 1.0,
+                MaskKind::Highlight => {
+                    let f = ((t - m.start) / FADE).min((m.end - t) / FADE).clamp(0.0, 1.0);
+                    m.opacity * f * f * (3.0 - 2.0 * f)
+                }
+            };
+            ActiveMask { kind: m.kind, rect: m.rect, amount }
+        })
+        .take(8)
+        .collect()
 }
 
 #[derive(Clone, Debug)]
@@ -319,7 +350,7 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
             CursorState { x, y, scale: edit.cursor.size * click_squish(rec, edit, t), opacity: idle_opacity(rec, edit, t), shape }
         })
     };
-    FrameState { camera, blur_from, blur_to, cursor }
+    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t) }
 }
 
 fn click_squish(rec: &Recording, edit: &EditConfig, t: f64) -> f64 {
