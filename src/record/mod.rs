@@ -47,6 +47,8 @@ pub struct RecordOptions {
 
 /// Camera frames being encoded to camera.mp4 during a recording.
 type CameraRec = Arc<Mutex<Option<Result<Capture, String>>>>;
+/// Recording-clock time of the first and last camera frame.
+type CameraSpan = Arc<Mutex<Option<(i64, i64)>>>;
 
 /// Camera frames rate in camera.mp4.
 const CAMERA_FPS: u32 = 30;
@@ -83,7 +85,7 @@ pub struct Recorder {
     /// Timestamps run on `clock` (direct capture) rather than raw monotonic.
     paused_clock: bool,
     direct_error: Arc<Mutex<Option<String>>>,
-    camera: Option<(Arc<camera::CameraFeed>, CameraRec)>,
+    camera: Option<(Arc<camera::CameraFeed>, CameraRec, CameraSpan)>,
     _portal: Option<(tokio::runtime::Runtime, portal::PortalStream)>,
 }
 
@@ -168,9 +170,14 @@ impl Recorder {
         // clock (dropped while paused), encoded as they arrive.
         let camera = opts.camera.clone().map(|feed| {
             let rec: CameraRec = Arc::default();
-            let (r, cl, path) = (rec.clone(), clock.clone(), dir.join(CAMERA_FILE));
+            let span: CameraSpan = Arc::default();
+            let (r, sp, cl, path) = (rec.clone(), span.clone(), clock.clone(), dir.join(CAMERA_FILE));
             feed.set_sink(Some(Box::new(move |f: &camera::CamFrame| {
                 let Some(t) = cl.now() else { return };
+                {
+                    let mut s = sp.lock().unwrap();
+                    *s = Some(s.map_or((t, t), |(a, _)| (a, t)));
+                }
                 let mut slot = r.lock().unwrap();
                 if slot.is_none() {
                     let info = direct::FrameInfo { width: f.width, height: f.height, gst_format: "RGBA" };
@@ -182,7 +189,7 @@ impl Recorder {
                     }
                 }
             })));
-            (feed, rec)
+            (feed, rec, span)
         });
         let (tx, input_rx) = channel();
         if !opts.test_source && input::spawn(stop.clone(), tx) == 0 {
@@ -243,13 +250,25 @@ impl Recorder {
     pub fn stop(self) -> Result<PathBuf> {
         self.stop.store(true, Ordering::Relaxed);
         let fps = self.capture.fps;
-        let camera_result = self.camera.as_ref().map(|(feed, rec)| {
+        let camera_result = self.camera.as_ref().map(|(feed, rec, span)| {
             feed.set_sink(None);
-            match rec.lock().unwrap().take() {
+            let res = match rec.lock().unwrap().take() {
                 Some(Ok(cap)) => cap.stop().map_err(|e| format!("{e:#}")),
                 Some(Err(e)) => Err(e),
                 None => Err("the camera sent no frames".into()),
+            };
+            // If the encoded length doesn't match the time the frames
+            // covered, stretch it so the camera stays in sync with the screen.
+            if let (Ok(c), Some((a, b))) = (&res, *span.lock().unwrap()) {
+                let real = (b - a) as f64 / 1e9 + 1.0 / CAMERA_FPS as f64;
+                let encoded = c.frames as f64 / CAMERA_FPS as f64;
+                if (real - encoded).abs() > (0.5f64).max(real * 0.05) {
+                    if let Err(e) = retime(&self.dir.join(CAMERA_FILE), real / encoded) {
+                        eprintln!("open-studio: camera retime failed: {e:#}");
+                    }
+                }
             }
+            res
         });
         let result = self.capture.stop()?;
         let audio_results: Vec<(String, Option<audio::AudioResult>)> =
@@ -365,6 +384,25 @@ impl Recorder {
 }
 
 const CAMERA_FILE: &str = "camera.mp4";
+
+/// Rewrites a video with its timestamps scaled by `k`, at CAMERA_FPS.
+fn retime(path: &std::path::Path, k: f64) -> Result<()> {
+    let tmp = path.with_extension("retime.mp4");
+    let ok = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(path)
+        .args(["-vf", &format!("setpts=PTS*{k:.6}"), "-r", &CAMERA_FPS.to_string()])
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv444p", "-movflags", "+faststart"])
+        .arg(&tmp)
+        .status()?
+        .success();
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("ffmpeg failed");
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
 
 /// When the portal doesn't report where the stream sits in the layout, pick
 /// the monitor whose pixel size matches the video, preferring the one the

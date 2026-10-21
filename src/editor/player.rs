@@ -104,6 +104,9 @@ impl State {
 fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Arc<Mutex<Option<Arc<Frame>>>>, ctx: egui::Context) {
     let mut st = State { video, size, fps, decoder: None, index: -1, buf: Vec::new() };
     let mut playing: Option<(f64, Instant)> = None;
+    // Consecutive decode failures while playing; a few are retried (the
+    // decoder is reopened) before playback stops.
+    let mut failures = 0;
     let publish = |st: &State| {
         *latest.lock().unwrap() = Some(st.frame());
         ctx.request_repaint();
@@ -125,6 +128,14 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
                 cmd = Some(next);
             }
         }
+        if std::env::var_os("OPEN_STUDIO_DEBUG_PLAYER").is_some() {
+            match &cmd {
+                Some(Cmd::Seek(t)) => eprintln!("{} seek {t:.2}", st.video.display()),
+                Some(Cmd::Play { from, .. }) => eprintln!("{} play {from:.2}", st.video.display()),
+                Some(Cmd::Pause) => eprintln!("{} pause", st.video.display()),
+                None => {}
+            }
+        }
         match cmd {
             Some(Cmd::Seek(t)) => {
                 playing = None;
@@ -143,8 +154,17 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
             if want > st.index || st.decoder.is_none() {
                 if st.advance_to(want) {
                     publish(&st);
+                    failures = 0;
                 } else {
-                    playing = None;
+                    failures += 1;
+                    if std::env::var_os("OPEN_STUDIO_DEBUG_PLAYER").is_some() {
+                        eprintln!("{} decode failed at frame {want} ({failures})", st.video.display());
+                    }
+                    if failures >= 3 {
+                        playing = None;
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
             }
             // Sleep until the next frame is due.

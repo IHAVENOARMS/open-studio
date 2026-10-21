@@ -93,6 +93,8 @@ pub struct Editor {
     player: Player,
     /// Camera track player and the frame index on the GPU.
     camera: Option<(Player, i64)>,
+    /// When the camera picture last changed during playback (watchdog).
+    camera_changed: Instant,
     audio: audio::AudioPreview,
     /// Waveform envelope for the clip track (computed in the background).
     waveform: Arc<Mutex<Option<Vec<f32>>>>,
@@ -137,6 +139,7 @@ impl Editor {
             edit,
             player,
             camera,
+            camera_changed: Instant::now(),
             audio,
             waveform: audio::envelope_async(&rec, ctx.clone()),
             comp: Compositor::new(rs.device.clone(), rs.queue.clone()),
@@ -900,13 +903,29 @@ impl Editor {
         let ppp = ui.ctx().pixels_per_point();
         let px = (((size.x * ppp) as u32).max(2), ((size.y * ppp) as u32).max(2));
 
+        let mut camera_stalled = false;
         if let Some((p, shown)) = &mut self.camera {
             if let Some(f) = p.latest() {
                 if f.index != *shown {
                     self.comp.upload_camera_frame(&f.rgba, f.width, f.height);
                     *shown = f.index;
+                    self.camera_changed = Instant::now();
                 }
             }
+            // Watchdog: while playing, a camera picture that hasn't moved for
+            // a while means its player lost the play command or stopped;
+            // restart it at the playhead (what pausing and playing did).
+            let cam_t = self.rec.camera.as_ref().map(|c| self.time - c.offset - self.edit.camera.delay).unwrap_or(0.0);
+            if self.playing.is_some() && cam_t > 0.0 && self.camera_changed.elapsed().as_secs_f64() > 0.6 {
+                camera_stalled = true;
+                self.camera_changed = Instant::now();
+            }
+        }
+        if camera_stalled {
+            if std::env::var_os("OPEN_STUDIO_DEBUG_PLAYER").is_some() {
+                eprintln!("camera watchdog: restarting at {:.2}", self.time);
+            }
+            self.camera_follow(Some(Instant::now()));
         }
         if let Some(f) = self.player.latest() {
             if f.index != self.shown_index {
@@ -934,7 +953,8 @@ impl Editor {
         if let Some(Selection { track: Track::Mask, index }) = self.selected {
             if let Some(m) = self.edit.masks.get_mut(index) {
                 let id = ui.scope_id().with(("mask-edit", index));
-                mask_overlay::edit(ui, rect, &self.tracks.layout, fs.camera, id, &mut m.rect);
+                let map = mask_overlay::Mapping { screen: rect, layout: &self.tracks.layout, cam: fs.camera, xf: fs.screen_xf };
+                mask_overlay::edit(ui, &map, id, &mut m.rect);
             }
         }
         // Clicking the preview sets the focus point of a manual zoom.
@@ -942,14 +962,9 @@ impl Editor {
             if resp.clicked() {
                 if let Some(seg) = self.edit.zoom_segments.get_mut(i) {
                     if matches!(seg.focus, ZoomFocus::Manual { .. }) {
-                        let l = &self.tracks.layout;
-                        let cam = fs.camera;
-                        let u = ((pos - rect.min) / rect.height()).to_pos2();
-                        let qx = cam.cx + (u.x as f64 - l.aspect * 0.5) / cam.scale;
-                        let qy = cam.cy + (u.y as f64 - 0.5) / cam.scale;
-                        let x = ((qx - l.content.x) / l.content.w).clamp(0.0, 1.0);
-                        let y = ((qy - l.content.y) / l.content.h).clamp(0.0, 1.0);
-                        seg.focus = ZoomFocus::Manual { x, y };
+                        let map = mask_overlay::Mapping { screen: rect, layout: &self.tracks.layout, cam: fs.camera, xf: fs.screen_xf };
+                        let (x, y) = map.to_uv(pos);
+                        seg.focus = ZoomFocus::Manual { x: x.clamp(0.0, 1.0), y: y.clamp(0.0, 1.0) };
                     }
                 }
             }
@@ -958,12 +973,8 @@ impl Editor {
         {
             // Show the focus point while the camera is at rest (unzoomed).
             if (fs.camera.scale - 1.0).abs() < 0.02 {
-                let l = &self.tracks.layout;
-                let p = rect.min
-                    + Vec2::new(
-                        ((l.content.x + x * l.content.w) as f32) * rect.height(),
-                        ((l.content.y + y * l.content.h) as f32) * rect.height(),
-                    );
+                let map = mask_overlay::Mapping { screen: rect, layout: &self.tracks.layout, cam: fs.camera, xf: fs.screen_xf };
+                let p = map.to_screen(x, y);
                 ui.painter().circle(p, 9.0, theme::ZOOM.gamma_multiply(0.5), egui::Stroke::new(2.0, Color32::WHITE));
             }
         }
