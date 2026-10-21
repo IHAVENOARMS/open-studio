@@ -2,6 +2,8 @@
 //! out as a project directory.
 
 pub mod capture;
+pub mod clock;
+pub mod direct;
 pub mod cursor_shape;
 pub mod hyprland;
 pub mod input;
@@ -12,6 +14,7 @@ use cursor_shape::{Shape, ShapeChange};
 use crate::util::{monotonic_ns, recordings_dir};
 use anyhow::{Context, Result};
 use capture::{Capture, CaptureSource};
+use clock::RecClock;
 use input::InputEvent;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
@@ -29,11 +32,24 @@ pub struct RecordOptions {
     pub reuse_selection: bool,
     /// Record a synthetic test pattern instead of the screen.
     pub test_source: bool,
+    /// Capture directly (no portal picker) when set.
+    pub direct: Option<DirectRequest>,
+}
+
+/// What to record when bypassing the portal (chosen in our own picker).
+#[derive(Clone, Debug)]
+pub struct DirectRequest {
+    pub target: direct::Target,
+    /// "monitor", "window" or "area".
+    pub kind: String,
+    pub name: Option<String>,
+    /// Captured area in compositor logical coordinates.
+    pub logical_rect: [f64; 4],
 }
 
 impl Default for RecordOptions {
     fn default() -> Self {
-        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false }
+        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None }
     }
 }
 
@@ -47,6 +63,10 @@ pub struct Recorder {
     source: Source,
     show_system_cursor: bool,
     started: std::time::Instant,
+    clock: Arc<RecClock>,
+    /// Timestamps run on `clock` (direct capture) rather than raw monotonic.
+    paused_clock: bool,
+    direct_error: Arc<Mutex<Option<String>>>,
     _portal: Option<(tokio::runtime::Runtime, portal::PortalStream)>,
 }
 
@@ -59,7 +79,19 @@ impl Recorder {
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
         let mut source = Source::default();
-        let (capture_source, portal) = if opts.test_source {
+        let clock = Arc::new(RecClock::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let direct_error = Arc::new(Mutex::new(None));
+        let mut direct_capture = None;
+        let (capture_source, portal) = if let Some(req) = &opts.direct {
+            let d = direct::Direct::open(&req.target, opts.show_system_cursor)?;
+            source.kind = req.kind.clone();
+            source.name = req.name.clone();
+            source.logical_rect = Some(req.logical_rect);
+            let info = d.info;
+            direct_capture = Some(d);
+            (CaptureSource::Direct(info), None)
+        } else if opts.test_source {
             source.kind = "test".into();
             source.logical_rect = Some([0.0, 0.0, 1280.0, 720.0]);
             (CaptureSource::Test { width: 1280, height: 720 }, None)
@@ -75,7 +107,16 @@ impl Recorder {
         };
 
         let capture = Capture::start(capture_source, &dir.join(VIDEO_FILE), opts.fps)?;
-        let stop = Arc::new(AtomicBool::new(false));
+        let paused_clock = direct_capture.is_some();
+        if let Some(d) = direct_capture {
+            let push = capture.pusher().expect("direct capture has an appsrc");
+            let (st, cl, err) = (stop.clone(), clock.clone(), direct_error.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = d.run(st, cl, Box::new(move |data, t| push(data, t))) {
+                    *err.lock().unwrap() = Some(format!("{e:#}"));
+                }
+            });
+        }
         let moves = Arc::new(Mutex::new(Vec::new()));
         if opts.test_source {
             spawn_fake_cursor(stop.clone(), moves.clone());
@@ -104,16 +145,44 @@ impl Recorder {
             source,
             show_system_cursor: opts.show_system_cursor,
             started: std::time::Instant::now(),
+            clock,
+            paused_clock,
+            direct_error,
             _portal: portal,
         })
     }
 
+    /// Seconds recorded so far (excluding pauses).
     pub fn elapsed(&self) -> f64 {
-        self.started.elapsed().as_secs_f64()
+        if self.paused_clock { self.clock.elapsed_secs() } else { self.started.elapsed().as_secs_f64() }
+    }
+
+    /// Pausing is only available with direct capture.
+    pub fn can_pause(&self) -> bool {
+        self.paused_clock
+    }
+
+    pub fn pause(&self) {
+        self.clock.pause();
+    }
+
+    pub fn resume(&self) {
+        self.clock.resume();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.clock.is_paused()
     }
 
     pub fn error(&self) -> Option<String> {
-        self.capture.error()
+        self.direct_error.lock().unwrap().clone().or_else(|| self.capture.error())
+    }
+
+    /// Stops and throws the recording away.
+    pub fn discard(self) {
+        let dir = self.dir.clone();
+        let _ = self.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     pub fn stop(self) -> Result<PathBuf> {
@@ -124,7 +193,13 @@ impl Recorder {
             let _ = rt.block_on(stream.session.close());
         }
         let t0 = result.first_frame_ns;
-        let secs = |ns: i64| (ns - t0) as f64 / 1e9;
+        // Event time in seconds from the first frame; None inside pauses.
+        let clock = self.clock.clone();
+        let paused_clock = self.paused_clock;
+        let secs = |ns: i64| -> Option<f64> {
+            let t = if paused_clock { clock.map(ns)? } else { ns };
+            Some((t - t0) as f64 / 1e9)
+        };
         let duration = result.frames as f64 / fps as f64;
 
         let mut source = self.source;
@@ -144,9 +219,9 @@ impl Recorder {
         let raw_moves = self.moves.lock().unwrap().clone();
         let moves: Vec<[f64; 3]> = raw_moves
             .iter()
-            .map(|&(t, x, y)| {
+            .filter_map(|&(t, x, y)| {
                 let (vx, vy) = map(x, y);
-                [secs(t), vx, vy]
+                Some([secs(t)?, vx, vy])
             })
             .collect();
         let mut rec = Recording {
@@ -163,6 +238,7 @@ impl Recorder {
             dir: self.dir.clone(),
         };
         for change in self.shapes.lock().unwrap().iter() {
+            let Some(t) = secs(change.t_ns) else { continue };
             let shape = match &change.shape {
                 Shape::Hidden => "hidden".to_string(),
                 Shape::Named(n) => n.to_string(),
@@ -177,16 +253,19 @@ impl Recorder {
                     format!("custom:{idx}")
                 }
             };
-            rec.events.shapes.push(ShapeEvent { t: secs(change.t_ns).max(0.0), shape });
+            rec.events.shapes.push(ShapeEvent { t: t.max(0.0), shape });
         }
         for ev in self.input_rx.try_iter() {
             match ev {
                 InputEvent::Button { t_ns, code, down } => {
-                    let t = secs(t_ns);
+                    let Some(t) = secs(t_ns) else { continue };
                     let (x, y) = rec.cursor_at(t).unwrap_or((0.0, 0.0));
                     rec.events.clicks.push(Click { t, x, y, button: code, down });
                 }
-                InputEvent::Key { t_ns, code, down } => rec.events.keys.push(Key { t: secs(t_ns), code, down }),
+                InputEvent::Key { t_ns, code, down } => {
+                    let Some(t) = secs(t_ns) else { continue };
+                    rec.events.keys.push(Key { t, code, down })
+                }
             }
         }
         rec.save(&self.dir)?;
@@ -247,4 +326,46 @@ fn spawn_fake_cursor(stop: Arc<AtomicBool>, moves: Arc<Mutex<Vec<(i64, f64, f64)
             std::thread::sleep(std::time::Duration::from_millis(8));
         }
     });
+}
+
+/// Direct capture of a monitor, or of an area of it (logical, global coords).
+pub fn direct_monitor(name: &str, area: Option<[f64; 4]>) -> Result<DirectRequest> {
+    let mon = hyprland::monitors()?.into_iter().find(|m| m.name == name).ok_or_else(|| anyhow::anyhow!("no monitor {name}"))?;
+    let r = mon.logical_rect();
+    match area {
+        None => Ok(DirectRequest {
+            target: direct::Target::Output { name: name.into(), crop: None },
+            kind: "monitor".into(),
+            name: Some(name.into()),
+            logical_rect: r,
+        }),
+        Some(a) => {
+            // Clip to the monitor, convert to buffer pixels.
+            let x0 = a[0].max(r[0]);
+            let y0 = a[1].max(r[1]);
+            let x1 = (a[0] + a[2]).min(r[0] + r[2]);
+            let y1 = (a[1] + a[3]).min(r[1] + r[3]);
+            let s = mon.scale;
+            let crop = [((x0 - r[0]) * s) as u32, ((y0 - r[1]) * s) as u32, ((x1 - x0) * s) as u32, ((y1 - y0) * s) as u32];
+            // Keep the logical rect consistent with the (even-sized) crop.
+            let (cw, ch) = ((crop[2] & !1) as f64 / s, (crop[3] & !1) as f64 / s);
+            Ok(DirectRequest {
+                target: direct::Target::Output { name: name.into(), crop: Some(crop) },
+                kind: "area".into(),
+                name: Some(name.into()),
+                logical_rect: [x0, y0, cw, ch],
+            })
+        }
+    }
+}
+
+/// Direct capture of a window by Hyprland client address.
+pub fn direct_window(address: &str) -> Result<DirectRequest> {
+    let c = hyprland::clients()?.into_iter().find(|c| c.address == address).ok_or_else(|| anyhow::anyhow!("no window {address}"))?;
+    Ok(DirectRequest {
+        target: direct::Target::Window { app_id: c.class.clone(), title: c.title.clone() },
+        kind: "window".into(),
+        name: Some(c.title.clone()),
+        logical_rect: [c.at[0], c.at[1], c.size[0], c.size[1]],
+    })
 }

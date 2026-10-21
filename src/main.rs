@@ -13,6 +13,7 @@ mod gpu;
 mod icons;
 mod project;
 mod record;
+mod recorder_ui;
 mod render;
 mod util;
 mod wallpapers;
@@ -51,9 +52,21 @@ enum Cmd {
         /// Record a synthetic test pattern (no portal).
         #[arg(long, hide = true)]
         test: bool,
+        /// Record this monitor directly, without the portal picker (e.g. DP-1).
+        #[arg(long)]
+        display: Option<String>,
+        /// With --display: record only this area, "x,y,w,h" in global logical pixels.
+        #[arg(long)]
+        area: Option<String>,
+        /// Record a window directly by Hyprland address (e.g. 0x55d0...).
+        #[arg(long)]
+        window: Option<String>,
     },
     /// Stop the recording in progress.
     Stop,
+    /// Show the floating recording bar (Display / Window / Area), record,
+    /// and print the project directory when done.
+    RecordUi,
     /// Download the bundled wallpaper collection (or list it with --list).
     Wallpapers {
         #[arg(long)]
@@ -70,6 +83,15 @@ enum Cmd {
         #[arg(long)]
         visit: Option<String>,
     },
+    /// Press a key combination through a virtual uinput keyboard (development aid).
+    #[command(hide = true)]
+    DebugKeys { combo: String },
+    /// Watch for a shortcut for a few seconds and report hits (development aid).
+    #[command(hide = true)]
+    DebugWatch { combo: String },
+    /// Exercise pause/resume, restart and delete on a direct capture (development aid).
+    #[command(hide = true)]
+    DebugActions { display: String, dir: PathBuf },
     /// Open a project in the editor.
     Edit { project: PathBuf },
     /// Render a project to MP4 without opening the editor.
@@ -102,8 +124,23 @@ extern "C" fn on_sigint(_: libc::c_int) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Some(Cmd::Record { out, fps, system_cursor, reuse, duration, test }) => {
+        Some(Cmd::Record { out, fps, system_cursor, reuse, duration, test, display, area, window }) => {
+            let direct = match (display, window) {
+                (Some(d), _) => {
+                    let area = area
+                        .map(|a| -> Result<[f64; 4]> {
+                            let v: Vec<f64> = a.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>()?;
+                            anyhow::ensure!(v.len() == 4, "--area needs x,y,w,h");
+                            Ok([v[0], v[1], v[2], v[3]])
+                        })
+                        .transpose()?;
+                    Some(record::direct_monitor(&d, area)?)
+                }
+                (None, Some(w)) => Some(record::direct_window(&w)?),
+                _ => None,
+            };
             let opts = record::RecordOptions {
+                direct,
                 out_dir: out,
                 fps,
                 show_system_cursor: system_cursor,
@@ -114,6 +151,10 @@ fn main() -> Result<()> {
             println!("{}", dir.display());
         }
         Some(Cmd::Stop) => control::send_stop()?,
+        Some(Cmd::RecordUi) => match recorder_ui::run()? {
+            Some(dir) => println!("{}", dir.display()),
+            None => std::process::exit(2),
+        },
         Some(Cmd::Export { project, out, height, fps, format, quality, clipboard }) => {
             let format = match format.as_str() {
                 "gif" => settings::Format::Gif,
@@ -148,6 +189,80 @@ fn main() -> Result<()> {
             println!("{}", out.display());
         }
         Some(Cmd::Edit { project }) => app::run(Some(project))?,
+        Some(Cmd::DebugActions { display, dir }) => {
+            let sleep = |s: f64| std::thread::sleep(std::time::Duration::from_secs_f64(s));
+            let opts = |name: &str| record::RecordOptions {
+                out_dir: Some(dir.join(name)),
+                direct: Some(record::direct_monitor(&display, None).unwrap()),
+                ..Default::default()
+            };
+            // Pause: 1.5s recorded, 2s paused, 1.5s recorded.
+            let r = record::Recorder::start(opts("pause"))?;
+            sleep(1.5);
+            r.pause();
+            let at_pause = r.elapsed();
+            sleep(2.0);
+            let still = r.elapsed();
+            r.resume();
+            sleep(1.5);
+            let p = r.stop()?;
+            let rec = project::Recording::load(&p)?;
+            println!("pause: elapsed frozen {:.2} -> {:.2}; video duration {:.2}s", at_pause, still, rec.duration);
+            // Restart: first take discarded, second kept.
+            let a = record::Recorder::start(opts("take1"))?;
+            sleep(1.0);
+            a.discard();
+            let b = record::Recorder::start(opts("take2"))?;
+            sleep(1.0);
+            let kept = b.stop()?;
+            println!("restart: take1 exists={} take2 exists={}", dir.join("take1").exists(), kept.join("screen.mp4").exists());
+            // Delete.
+            let d = record::Recorder::start(opts("deleted"))?;
+            sleep(1.0);
+            d.discard();
+            println!("delete: dir exists={}", dir.join("deleted").exists());
+        }
+        Some(Cmd::DebugWatch { combo }) => {
+            let sc = record::input::Shortcut::parse(&combo).ok_or_else(|| anyhow::anyhow!("bad combo"))?;
+            println!("watching for {sc:?}");
+            let hit = std::sync::Arc::new(AtomicBool::new(false));
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            record::input::watch_shortcut(sc, hit.clone(), stop.clone());
+            for _ in 0..80 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if hit.swap(false, Ordering::Relaxed) {
+                    println!("hit");
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+        }
+        Some(Cmd::DebugKeys { combo }) => {
+            use evdev::{AttributeSet, EventType, InputEvent, KeyCode, uinput::VirtualDevice};
+            let sc = record::input::Shortcut::parse(&combo).ok_or_else(|| anyhow::anyhow!("bad combo"))?;
+            let mut keys = AttributeSet::<KeyCode>::new();
+            for k in [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTALT, KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_LEFTMETA, KeyCode::KEY_A, KeyCode::KEY_Z, sc.key] {
+                keys.insert(k);
+            }
+            let mut dev = VirtualDevice::builder()?.name("open-studio test keyboard").with_keys(&keys)?.build()?;
+            // Give device watchers (which rescan every 2s) time to see it.
+            std::thread::sleep(std::time::Duration::from_millis(2500));
+            let mods: Vec<KeyCode> = [(sc.ctrl, KeyCode::KEY_LEFTCTRL), (sc.alt, KeyCode::KEY_LEFTALT), (sc.shift, KeyCode::KEY_LEFTSHIFT), (sc.super_, KeyCode::KEY_LEFTMETA)]
+                .into_iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, k)| k)
+                .collect();
+            let press = |dev: &mut VirtualDevice, k: KeyCode, v: i32| dev.emit(&[InputEvent::new(EventType::KEY.0, k.0, v)]);
+            for k in &mods {
+                press(&mut dev, *k, 1)?;
+            }
+            press(&mut dev, sc.key, 1)?;
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            press(&mut dev, sc.key, 0)?;
+            for k in mods.iter().rev() {
+                press(&mut dev, *k, 0)?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         Some(Cmd::DebugCursor { seconds, dump, visit }) => {
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

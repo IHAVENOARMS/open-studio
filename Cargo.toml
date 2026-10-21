@@ -7,6 +7,8 @@ edition = "2024"
 anyhow = "1.0.104"
 ashpd = { version = "0.13", features = ["file_chooser", "screencast"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
+calloop = "0.14.5"
+calloop-wayland-source = "0.4.1"
 clap = { version = "4.6.7", features = ["derive"] }
 directories = "6.0.0"
 eframe = { version = "0.37.0", features = ["wgpu"] }
@@ -20,9 +22,12 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 ksni = { version = "0.3.7", features = ["blocking"] }
 libc = "0.2.191"
 pollster = "1.0.1"
+raw-window-handle = "0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop", "xkbcommon"] }
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros", "sync"] }
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }

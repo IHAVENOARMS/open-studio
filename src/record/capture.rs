@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex};
 
 pub enum CaptureSource {
     PipeWire { fd: i32, node_id: u32 },
+    /// Frames pushed by the direct capture backend, timestamped in
+    /// recording time (see `RecClock`).
+    Direct(super::direct::FrameInfo),
     /// Synthetic source used for headless testing.
     Test { width: u32, height: u32 },
 }
@@ -34,10 +37,13 @@ struct Writer {
     size: (u32, u32),
     error: Option<String>,
     scratch: Vec<u8>,
+    /// Buffer timestamps are already recording time (direct capture).
+    pts_is_rec_time: bool,
 }
 
 pub struct Capture {
     pipeline: gst::Pipeline,
+    appsrc: Option<gst_app::AppSrc>,
     writer: Arc<Mutex<Writer>>,
     pub fps: u32,
 }
@@ -52,9 +58,15 @@ pub struct CaptureResult {
 impl Capture {
     pub fn start(source: CaptureSource, out: &Path, fps: u32) -> Result<Self> {
         gst::init()?;
+        let direct = matches!(source, CaptureSource::Direct(_));
         let src = match source {
             CaptureSource::PipeWire { fd, node_id } => format!(
                 "pipewiresrc fd={fd} path={node_id} do-timestamp=true keepalive-time=100 always-copy=true"
+            ),
+            CaptureSource::Direct(info) => format!(
+                "appsrc name=src is-live=true format=time do-timestamp=false \
+                 caps=video/x-raw,format={},width={},height={},framerate=0/1 ! queue max-size-buffers=16",
+                info.gst_format, info.width, info.height
             ),
             CaptureSource::Test { width, height } => format!(
                 "videotestsrc is-live=true pattern=ball ! video/x-raw,width={width},height={height},framerate=60/1"
@@ -74,7 +86,8 @@ impl Capture {
         clock.set_property("clock-type", gst::ClockType::Monotonic);
         pipeline.use_clock(Some(&clock));
 
-        let writer = Arc::new(Mutex::new(Writer::default()));
+        let writer = Arc::new(Mutex::new(Writer { pts_is_rec_time: direct, ..Default::default() }));
+        let appsrc = pipeline.by_name("src").and_then(|e| e.downcast::<gst_app::AppSrc>().ok());
         let sink = pipeline
             .by_name("sink")
             .unwrap()
@@ -100,7 +113,7 @@ impl Capture {
                 .build(),
         );
         pipeline.set_state(gst::State::Playing).context("starting capture")?;
-        Ok(Self { pipeline, writer, fps })
+        Ok(Self { pipeline, appsrc, writer, fps })
     }
 
     /// Error raised by the pipeline or the encoder, if any.
@@ -117,7 +130,20 @@ impl Capture {
         None
     }
 
+    /// Pusher for the direct backend's sink.
+    pub fn pusher(&self) -> Option<impl Fn(&[u8], i64) + Send + 'static> {
+        let src = self.appsrc.clone()?;
+        Some(move |data: &[u8], pts_ns: i64| {
+            let mut buf = gst::Buffer::from_mut_slice(data.to_vec());
+            buf.get_mut().unwrap().set_pts(gst::ClockTime::from_nseconds(pts_ns.max(0) as u64));
+            let _ = src.push_buffer(buf);
+        })
+    }
+
     pub fn stop(self) -> Result<CaptureResult> {
+        if let Some(src) = &self.appsrc {
+            let _ = src.end_of_stream();
+        }
         self.pipeline.send_event(gst::event::Eos::new());
         if let Some(bus) = self.pipeline.bus() {
             bus.timed_pop_filtered(
@@ -170,6 +196,7 @@ fn write_sample(w: &mut Writer, sample: &gst::Sample, out: &PathBuf, fps: u32, b
         w.size = (width, height);
         let pts = buffer.pts().map(|t| t.nseconds() as i64);
         w.first_frame_ns = Some(match (base, pts) {
+            (_, Some(p)) if w.pts_is_rec_time => p,
             (Some(b), Some(p)) => b + p,
             _ => monotonic_ns(),
         });

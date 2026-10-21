@@ -96,7 +96,9 @@ impl App {
             c.take_stop();
         }
         std::thread::spawn(move || {
-            let res = supervise(opts, hide, ph, st, control, &ctx2);
+            // On Hyprland the floating recording bar (direct capture) is used;
+            // elsewhere the portal flow.
+            let res = if hyprland::available() { supervise_bar(&ctx2) } else { supervise(opts, hide, ph, st, control, &ctx2) };
             let _ = tx.send(res.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
         });
@@ -128,7 +130,10 @@ impl App {
                         }
                     });
                     ui.label(
-                        RichText::new("Stop from the tray icon, or bind `open-studio stop` to a key.")
+                        RichText::new(format!(
+                            "Stop with {} or the recording controls. `open-studio stop` works too.",
+                            crate::settings::Settings::load().stop_shortcut
+                        ))
                             .color(theme::TEXT_DIM)
                             .size(12.0),
                     );
@@ -170,7 +175,8 @@ impl App {
             match res {
                 Ok(dir) => self.open_editor(dir, &ctx, rs),
                 Err(e) => {
-                    self.error = Some(e);
+                    // An empty error means the user cancelled.
+                    self.error = (!e.is_empty()).then_some(e);
                     self.mode = Mode::Home;
                 }
             }
@@ -206,6 +212,32 @@ impl App {
             });
         });
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Runs the floating recording bar (`open-studio record-ui`) as a child
+/// process with this window moved out of the way, and returns the project it
+/// recorded. A cancelled recording is reported as an empty error.
+fn supervise_bar(ctx: &egui::Context) -> anyhow::Result<PathBuf> {
+    let pid = std::process::id();
+    let _ = hyprland::move_window_to_workspace(pid, "special:open-studio", false);
+    let out = std::process::Command::new(std::env::current_exe()?)
+        .arg("record-ui")
+        .stdin(std::process::Stdio::null())
+        .output();
+    if let Ok(ws) = hyprland::active_workspace() {
+        let _ = hyprland::move_window_to_workspace(pid, &ws.to_string(), true);
+    }
+    ctx.request_repaint();
+    let out = out?;
+    match out.status.code() {
+        Some(0) => {
+            let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            anyhow::ensure!(!dir.is_empty(), "recorder returned no project");
+            Ok(PathBuf::from(dir))
+        }
+        Some(2) => anyhow::bail!(""),
+        _ => anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim()),
     }
 }
 

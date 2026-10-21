@@ -3,6 +3,7 @@
 mod cursors;
 mod mask_overlay;
 pub mod player;
+pub use widgets::toggle;
 mod sidebar;
 mod timeline;
 mod widgets;

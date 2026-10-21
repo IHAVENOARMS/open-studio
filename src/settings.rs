@@ -62,6 +62,10 @@ pub struct Settings {
     pub height: Option<u32>,
     pub quality: Quality,
     pub destination: Destination,
+    /// Global shortcut that stops a recording.
+    pub stop_shortcut: String,
+    /// Draw the system cursor into the video instead of re-rendering it.
+    pub bake_cursor: bool,
 }
 
 impl Default for Settings {
@@ -73,6 +77,8 @@ impl Default for Settings {
             height: None,
             quality: Quality::Social,
             destination: Destination::File,
+            stop_shortcut: "Ctrl+Alt+Enter".into(),
+            bake_cursor: false,
         }
     }
 }

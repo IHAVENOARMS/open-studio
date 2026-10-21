@@ -29,6 +29,19 @@ pub enum Icon {
     File,
     Trash,
     Mask,
+    Display,
+    Window,
+    Phone,
+    CameraOff,
+    MicOff,
+    SystemAudio,
+    Gear,
+    ChevronDown,
+    Close,
+    Restart,
+    StopCircle,
+    PauseCircle,
+    Keyboard,
 }
 
 struct Pen<'a> {
@@ -173,6 +186,82 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&[(5.0, 5.5), (15.0, 5.5), (14.0, 17.0), (6.0, 17.0)]);
             pen.line(&[(8.5, 8.5), (8.5, 14.0)]);
             pen.line(&[(11.5, 8.5), (11.5, 14.0)]);
+        }
+        Icon::Display => {
+            pen.rrect(2.5, 4.0, 17.5, 15.0, 2.0);
+            pen.line(&[(6.0, 12.0), (14.0, 12.0)]);
+        }
+        Icon::Window => {
+            pen.rrect(2.5, 3.5, 17.5, 16.5, 2.0);
+            pen.line(&[(2.5, 7.0), (17.5, 7.0)]);
+            for x in [5.0, 7.0, 9.0] {
+                p.circle_filled(pen.pt(x, 5.25), 0.7 * k, color);
+            }
+        }
+        Icon::Phone => {
+            pen.rrect(6.0, 2.5, 14.0, 17.5, 2.0);
+            for (x, y) in [(8.6, 6.0), (10.0, 6.0), (11.4, 6.0), (8.6, 7.6), (10.0, 7.6), (11.4, 7.6), (8.6, 9.2), (10.0, 9.2), (11.4, 9.2)] {
+                p.circle_filled(pen.pt(x, y), 0.45 * k, color);
+            }
+            pen.line(&[(9.0, 15.2), (11.0, 15.2)]);
+        }
+        Icon::CameraOff => {
+            pen.rrect(2.5, 6.0, 13.0, 15.0, 2.0);
+            pen.closed(&[(13.0, 9.0), (17.5, 6.5), (17.5, 14.5), (13.0, 12.0)]);
+            pen.line(&[(2.5, 3.5), (17.0, 17.5)]);
+        }
+        Icon::MicOff => {
+            pen.rrect(7.5, 2.5, 12.5, 11.5, 2.5);
+            pen.line(&[(4.5, 9.0), (4.5, 10.0), (6.0, 13.5), (10.0, 15.0), (14.0, 13.5), (15.5, 10.0), (15.5, 9.0)]);
+            pen.line(&[(10.0, 15.0), (10.0, 17.5)]);
+            pen.line(&[(3.5, 3.0), (16.5, 17.0)]);
+        }
+        Icon::SystemAudio => {
+            pen.rrect(2.5, 3.5, 17.5, 14.5, 2.0);
+            pen.line(&[(7.0, 17.0), (13.0, 17.0)]);
+            pen.line(&[(10.5, 6.0), (10.5, 11.0)]);
+            pen.line(&[(10.5, 6.0), (13.0, 7.0)]);
+            pen.circle(9.3, 11.0, 1.3);
+        }
+        Icon::Gear => {
+            pen.circle(10.0, 10.0, 2.6);
+            pen.circle(10.0, 10.0, 6.0);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::PI / 4.0;
+                let (s, c) = a.sin_cos();
+                pen.line(&[(10.0 + 6.0 * c, 10.0 + 6.0 * s), (10.0 + 7.8 * c, 10.0 + 7.8 * s)]);
+            }
+        }
+        Icon::ChevronDown => pen.line(&[(5.0, 7.5), (10.0, 12.5), (15.0, 7.5)]),
+        Icon::Close => {
+            pen.line(&[(5.5, 5.5), (14.5, 14.5)]);
+            pen.line(&[(14.5, 5.5), (5.5, 14.5)]);
+        }
+        Icon::Restart => {
+            let pts: Vec<(f32, f32)> = (0..=24)
+                .map(|i| {
+                    let a = -1.9 + i as f32 / 24.0 * 5.2;
+                    (10.0 + 6.5 * a.cos(), 10.5 + 6.5 * a.sin())
+                })
+                .collect();
+            pen.line(&pts);
+            pen.line(&[(5.6, 2.5), (8.0, 4.6), (5.5, 6.8)]);
+        }
+        Icon::StopCircle => {
+            pen.circle(10.0, 10.0, 7.5);
+            p.rect_filled(Rect::from_min_max(pen.pt(7.0, 7.0), pen.pt(13.0, 13.0)), k, color);
+        }
+        Icon::PauseCircle => {
+            pen.circle(10.0, 10.0, 7.5);
+            pen.line(&[(8.2, 7.0), (8.2, 13.0)]);
+            pen.line(&[(11.8, 7.0), (11.8, 13.0)]);
+        }
+        Icon::Keyboard => {
+            pen.rrect(2.0, 5.0, 18.0, 15.0, 2.0);
+            for (x, y) in [(5.0, 8.0), (8.0, 8.0), (11.0, 8.0), (14.0, 8.0), (5.0, 10.5), (8.0, 10.5), (11.0, 10.5), (14.0, 10.5)] {
+                p.circle_filled(pen.pt(x + 0.5, y), 0.6 * k, color);
+            }
+            pen.line(&[(6.5, 12.8), (13.5, 12.8)]);
         }
         Icon::Mask => {
             pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);

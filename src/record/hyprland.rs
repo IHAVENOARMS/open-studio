@@ -100,3 +100,44 @@ pub fn move_window_to_workspace(pid: u32, workspace: &str, follow: bool) -> Resu
     };
     dispatch(&lua, &legacy)
 }
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct Client {
+    pub address: String,
+    pub class: String,
+    pub title: String,
+    pub at: [f64; 2],
+    pub size: [f64; 2],
+    pub workspace: ClientWorkspace,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub mapped: bool,
+    #[serde(rename = "focusHistoryID", default)]
+    pub focus_history: i64,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ClientWorkspace {
+    pub id: i64,
+}
+
+pub fn clients() -> Result<Vec<Client>> {
+    Ok(serde_json::from_str(&request("j/clients")?)?)
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct MonitorInfo {
+    pub name: String,
+    #[serde(rename = "activeWorkspace")]
+    pub active_workspace: ClientWorkspace,
+    #[serde(default)]
+    pub description: String,
+    #[serde(rename = "refreshRate", default)]
+    pub refresh_rate: f64,
+}
+
+/// Monitors with their active workspace (for finding visible windows).
+pub fn monitor_infos() -> Result<Vec<MonitorInfo>> {
+    Ok(serde_json::from_str(&request("j/monitors")?)?)
+}
