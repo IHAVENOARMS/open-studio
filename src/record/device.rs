@@ -60,26 +60,125 @@ pub struct Device {
     pub serial: String,
     /// The device name set on the phone, its marketing name, or the adb model.
     pub model: String,
+    /// Connected over the network (wireless debugging or `adb tcpip`).
+    pub wireless: bool,
+    /// False while the phone still has to allow debugging from this computer.
+    pub ready: bool,
 }
 
-/// Devices adb can talk to (USB, or wireless debugging).
+impl Device {
+    pub fn label(&self) -> String {
+        match (self.ready, self.wireless) {
+            (false, _) => format!("{} (allow debugging on the phone)", self.model),
+            (true, true) => format!("{} (Wi-Fi)", self.model),
+            (true, false) => self.model.clone(),
+        }
+    }
+}
+
+fn is_network_serial(serial: &str) -> bool {
+    serial.contains(':') || serial.contains("._adb-tls-connect.")
+}
+
+/// Devices adb can talk to (USB, wireless debugging, or `adb tcpip`).
 pub fn list() -> Vec<Device> {
     let Some(adb) = adb() else { return vec![] };
     let Ok(out) = Command::new(&adb).args(["devices", "-l"]).stderr(Stdio::null()).output() else { return vec![] };
-    String::from_utf8_lossy(&out.stdout)
+    let mut out: Vec<Device> = String::from_utf8_lossy(&out.stdout)
         .lines()
         .skip(1)
         .filter_map(|l| {
             let mut parts = l.split_whitespace();
             let serial = parts.next()?.to_string();
-            if parts.next()? != "device" {
-                return None; // offline / unauthorized
+            let state = parts.next()?;
+            if state != "device" && state != "unauthorized" {
+                return None; // offline
             }
+            let ready = state == "device";
             let model = parts.find_map(|p| p.strip_prefix("model:")).map(|m| m.replace('_', " ")).unwrap_or_else(|| serial.clone());
-            let model = friendly_name(&adb, &serial).unwrap_or(model);
-            Some(Device { serial, model })
+            let model = if ready { friendly_name(&adb, &serial).unwrap_or(model) } else { model };
+            Some(Device { wireless: is_network_serial(&serial), serial, model, ready })
         })
-        .collect()
+        .collect();
+    // A phone on USB and Wi-Fi at once shows up twice; keep one of each name.
+    out.sort_by_key(|d| d.wireless);
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|d| seen.insert(d.model.clone()));
+    out
+}
+
+/// Finds phones on the network and connects to them, then lists all devices.
+/// Candidates are wireless addresses used before (`known`) and phones
+/// advertising Wireless debugging over mDNS. Blocking (a few seconds at most);
+/// run it off the UI thread.
+pub fn discover(known: &[String]) -> Vec<Device> {
+    let Some(adb) = adb() else { return vec![] };
+    let connected: Vec<String> = list().into_iter().map(|d| d.serial).collect();
+    let mut targets: Vec<String> = known.iter().filter(|k| !connected.contains(k)).cloned().collect();
+    for addr in mdns_wireless_debugging() {
+        if !connected.contains(&addr) && !targets.contains(&addr) {
+            targets.push(addr);
+        }
+    }
+    let handles: Vec<_> = targets
+        .into_iter()
+        .map(|t| {
+            let adb = adb.clone();
+            std::thread::spawn(move || {
+                let Ok(mut child) = Command::new(&adb).args(["connect", &t]).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else { return };
+                // An unreachable address can hang for a long time; give up quickly.
+                for _ in 0..30 {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            })
+        })
+        .collect();
+    for h in handles {
+        let _ = h.join();
+    }
+    list()
+}
+
+/// "ip:port" of phones advertising Wireless debugging (_adb-tls-connect) on
+/// the local network, via avahi (Arch's adb is built without mDNS).
+fn mdns_wireless_debugging() -> Vec<String> {
+    let Ok(mut child) = Command::new("avahi-browse")
+        .args(["-rpt", "_adb-tls-connect._tcp"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return vec![];
+    };
+    for _ in 0..30 {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let _ = child.kill();
+    let mut text = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut out, &mut text);
+    }
+    let _ = child.wait();
+    // "=;iface;proto;name;type;domain;host;address;port;txt"
+    let mut out = vec![];
+    for l in text.lines().filter(|l| l.starts_with('=')) {
+        let f: Vec<&str> = l.split(';').collect();
+        if f.len() > 8 && f[2] == "IPv4" {
+            let addr = format!("{}:{}", f[7], f[8]);
+            if !out.contains(&addr) {
+                out.push(addr);
+            }
+        }
+    }
+    out
 }
 
 /// The name the owner gave the device ("Settings > About phone"), or its

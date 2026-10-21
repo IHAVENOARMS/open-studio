@@ -41,7 +41,7 @@ impl Source {
 pub fn list() -> Vec<Source> {
     let mut out = webcams();
     if super::device::scrcpy_server().is_some() {
-        for d in super::device::list() {
+        for d in super::device::list().into_iter().filter(|d| d.ready) {
             for facing in ["back", "front"] {
                 out.push(Source::Phone { serial: d.serial.clone(), name: d.model.clone(), facing: facing.into() });
             }

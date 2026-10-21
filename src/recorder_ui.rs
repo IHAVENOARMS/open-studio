@@ -129,6 +129,8 @@ struct Shared {
     /// A camera being opened in the background (phones take a second).
     camera_opening: Option<std::sync::mpsc::Receiver<Result<record::camera::CameraFeed, String>>>,
     camera_error: Option<String>,
+    /// Background search for wireless phones: (phones, cameras).
+    scanning: Option<std::sync::mpsc::Receiver<(Vec<record::device::Device>, Vec<record::camera::Source>)>>,
     // Recording widget state.
     elapsed: f64,
     paused: bool,
@@ -266,6 +268,7 @@ pub fn run() -> Result<Outcome> {
             camera: None,
             camera_opening: None,
             camera_error: None,
+            scanning: None,
             audio_devices: crate::record::audio::list_devices(),
             elapsed: 0.0,
             paused: false,
@@ -760,7 +763,40 @@ fn open_camera(sh: &mut Shared, id: Option<String>, ctx: &egui::Context) {
     sh.camera_opening = Some(rx);
 }
 
+/// Looks for wireless phones in the background and refreshes both menus.
+fn start_scan(sh: &mut Shared, ctx: &egui::Context) {
+    if sh.scanning.is_some() {
+        return;
+    }
+    let known = sh.settings.known_devices.clone();
+    let ctx = ctx.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let phones = record::device::discover(&known);
+        let cameras = record::camera::list();
+        let _ = tx.send((phones, cameras));
+        ctx.request_repaint();
+    });
+    sh.scanning = Some(rx);
+}
+
+/// Keeps a phone's network address so it can be reconnected next time.
+fn remember_device(settings: &mut Settings, serial: &str) {
+    // Wireless-debugging mDNS names and ports change; only fixed ip/host:port.
+    if serial.contains(':') && !serial.contains("._adb-tls-connect.") && !settings.known_devices.iter().any(|k| k == serial) {
+        settings.known_devices.push(serial.to_string());
+        settings.save();
+    }
+}
+
 fn poll_camera(sh: &mut Shared) {
+    if let Some(rx) = &sh.scanning {
+        if let Ok((phones, cameras)) = rx.try_recv() {
+            sh.phones = phones;
+            sh.cameras = cameras;
+            sh.scanning = None;
+        }
+    }
     if let Some(rx) = &sh.camera_opening {
         match rx.try_recv() {
             Ok(Ok(feed)) => {
@@ -1090,6 +1126,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         if mode == Some(Mode::Device) {
             if enabled && resp.clicked() {
                 sh.phones = record::device::list();
+                start_scan(sh, ui.ctx());
                 sh.menu = if sh.menu == Some(3) { None } else { Some(3) };
                 sh.gear_open = false;
                 sh.device_options = None;
@@ -1155,6 +1192,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
             sh.device_options = None;
             if i == 0 {
                 sh.cameras = record::camera::list();
+                start_scan(sh, ui.ctx());
             }
             if i == 1 {
                 sh.audio_devices = crate::record::audio::list_devices();
@@ -1314,6 +1352,7 @@ fn device_options_content(ui: &mut egui::Ui, sh: &mut Shared, device: &record::d
         if ui.add_enabled_ui(!connected || stale, |ui| ui.add_sized([go_w, 34.0], go)).inner.clicked() {
             sh.mirror = None;
             sh.mirror_window = None;
+            remember_device(&mut sh.settings, &device.serial);
             match record::device::Mirror::open(&device, &sh.settings.scrcpy) {
                 Ok(m) => sh.mirror = Some(m),
                 Err(e) => eprintln!("open-studio: {e:#}"),
@@ -1338,7 +1377,9 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
             for c in &sh.cameras {
                 items.push((Some(c.id()), c.label()));
             }
-            if sh.cameras.is_empty() {
+            if sh.scanning.is_some() {
+                items.push((Some(String::new()), "Searching for phone cameras…".into()));
+            } else if sh.cameras.is_empty() {
                 items.push((Some(String::new()), "No camera found".into()));
             }
             let preview = if sh.settings.camera_preview { "Hide camera preview" } else { "Show camera preview" };
@@ -1354,10 +1395,14 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
         }
         3 => {
             for d in &sh.phones {
-                items.push((Some(d.serial.clone()), d.model.clone()));
+                // Phones still waiting for "Allow debugging" can't be picked.
+                let value = if d.ready { d.serial.clone() } else { String::new() };
+                items.push((Some(value), d.label()));
             }
-            if items.is_empty() {
-                items.push((None, "No device found. Connect a phone with USB debugging on.".into()));
+            if sh.scanning.is_some() {
+                items.push((Some(String::new()), "Searching for wireless devices…".into()));
+            } else if items.is_empty() {
+                items.push((Some(String::new()), "No device found. Connect a phone over USB, or turn on Wireless debugging.".into()));
             }
             if let Some(m) = &sh.mirror {
                 items.push((Some(format!("options:{}", m.device.serial)), "Mirror options…".into()));
@@ -1407,6 +1452,9 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
                     Some("") => return,
                     Some("preview") => sh.settings.camera_preview = !sh.settings.camera_preview,
                     _ => {
+                        if let Some(serial) = v.as_deref().and_then(|id| id.strip_prefix("phone:")).and_then(|r| r.rsplit_once(':')).map(|(s, _)| s.to_string()) {
+                            remember_device(&mut sh.settings, &serial);
+                        }
                         if v != sh.settings.camera || sh.camera.is_none() {
                             sh.settings.camera = v.clone();
                             open_camera(sh, v, ui.ctx());
@@ -1420,6 +1468,9 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
             3 => {
                 // Choosing a phone (or "Mirror options…") opens its options;
                 // the panel's Connect button starts the mirror.
+                if v.as_deref() == Some("") {
+                    return;
+                }
                 if let Some(v) = v {
                     let serial = v.strip_prefix("options:").unwrap_or(&v).to_string();
                     let device = sh.phones.iter().find(|d| d.serial == serial).cloned().or_else(|| sh.mirror.as_ref().map(|m| m.device.clone()));
@@ -1978,6 +2029,7 @@ mod tests {
             camera: None,
             camera_opening: None,
             camera_error: None,
+            scanning: None,
             audio_devices: vec![],
             elapsed: 3.0,
             paused: false,
@@ -2044,7 +2096,7 @@ mod tests {
         let mut h = Harness::new(false);
         let mut sh = shared();
         sh.scrcpy = true;
-        sh.device_options = Some(record::device::Device { serial: "x".into(), model: "Test Phone".into() });
+        sh.device_options = Some(record::device::Device { serial: "x".into(), model: "Test Phone".into(), wireless: false, ready: true });
         h.frame(&mut sh, vec![]);
         h.frame(&mut sh, vec![]);
         // The panel fits its content and ends above the bar.

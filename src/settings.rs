@@ -78,6 +78,8 @@ pub struct Settings {
     pub camera: Option<String>,
     /// Show the live camera bubble above the recording bar.
     pub camera_preview: bool,
+    /// Network adb addresses of phones used before, reconnected on demand.
+    pub known_devices: Vec<String>,
 }
 
 /// scrcpy settings for the Device button.
@@ -157,6 +159,7 @@ impl Default for Settings {
             scrcpy: ScrcpyOptions::default(),
             camera: None,
             camera_preview: true,
+            known_devices: vec![],
         }
     }
 }

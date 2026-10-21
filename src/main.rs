@@ -201,8 +201,9 @@ fn main() -> Result<()> {
             recorder_ui::Outcome::OpenProjects => std::process::exit(3),
         },
         Some(Cmd::DebugDevice) => {
-            let devices = record::device::list();
-            println!("scrcpy: {:?}\ndevices: {devices:?}", record::device::scrcpy());
+            let t = std::time::Instant::now();
+            let devices = record::device::discover(&settings::Settings::load().known_devices);
+            println!("scrcpy: {:?}\ndevices ({:.1}s): {devices:?}", record::device::scrcpy(), t.elapsed().as_secs_f32());
             let d = devices.first().ok_or_else(|| anyhow::anyhow!("no device"))?;
             let mirror = record::device::Mirror::open(d, &settings::Settings::load().scrcpy)?;
             let mut win = None;
