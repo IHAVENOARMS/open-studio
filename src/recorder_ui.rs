@@ -120,6 +120,8 @@ struct Shared {
     mirror: Option<record::device::Mirror>,
     mirror_window: Option<hyprland::Client>,
     mirror_checked: Option<Instant>,
+    /// Phone whose scrcpy options panel is open.
+    device_options: Option<record::device::Device>,
     // Recording widget state.
     elapsed: f64,
     paused: bool,
@@ -252,6 +254,7 @@ pub fn run() -> Result<Outcome> {
             mirror: None,
             mirror_window: None,
             mirror_checked: None,
+            device_options: None,
             audio_devices: crate::record::audio::list_devices(),
             elapsed: 0.0,
             paused: false,
@@ -755,11 +758,17 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
     let pointer = ui.ctx().pointer_hover_pos();
     let menu_area = Rect::from_min_max(pos2(bar.left(), bar.top() - 360.0), bar.max);
     let over_bar = is_bar
-        && pointer.is_some_and(|p| bar.expand(6.0).contains(p) || ((sh.gear_open || sh.menu.is_some()) && menu_area.contains(p)));
+        && pointer.is_some_and(|p| {
+            bar.expand(6.0).contains(p)
+                || ((sh.gear_open || sh.menu.is_some()) && menu_area.contains(p))
+                || (sh.device_options.is_some() && device_options_rect(bar).contains(p))
+        });
     let p = ui.painter().clone();
 
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        if sh.gear_open {
+        if sh.device_options.is_some() {
+            sh.device_options = None;
+        } else if sh.gear_open {
             sh.gear_open = false;
         } else {
             sh.cancel = true;
@@ -965,6 +974,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
                 sh.phones = record::device::list();
                 sh.menu = if sh.menu == Some(3) { None } else { Some(3) };
                 sh.gear_open = false;
+                sh.device_options = None;
             }
             if sh.menu == Some(3) {
                 input_menu(ui, sh, 3, tile);
@@ -1049,6 +1059,125 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
     if sh.gear_open {
         gear_menu(ui, sh, gear_menu_rect(bar));
     }
+    if sh.device_options.is_some() {
+        device_options_panel(ui, sh, device_options_rect(bar));
+    }
+}
+
+fn device_options_rect(bar: Rect) -> Rect {
+    Rect::from_min_size(pos2(bar.left() + 150.0, bar.top() - 14.0 - 560.0), vec2(440.0, 560.0))
+}
+
+/// Row of small chips in the bar's style; returns the clicked index.
+fn bar_chips(ui: &mut egui::Ui, labels: &[String], selected: usize) -> Option<usize> {
+    let mut clicked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        for (i, l) in labels.iter().enumerate() {
+            let on = i == selected;
+            let b = egui::Button::new(egui::RichText::new(l).size(13.0).color(if on { BAR_TEXT } else { BAR_DIM }))
+                .fill(if on { Color32::from_white_alpha(30) } else { Color32::from_white_alpha(10) })
+                .stroke(if on { Stroke::new(1.0, Color32::from_rgb(0x4f, 0x4d, 0x6f)) } else { Stroke::NONE })
+                .corner_radius(CornerRadius::same(8))
+                .min_size(vec2(0.0, 28.0));
+            if ui.add(b).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                clicked = Some(i);
+            }
+        }
+    });
+    clicked
+}
+
+/// scrcpy options for the chosen phone, with Connect (or Reconnect when
+/// already mirroring it, which applies changed options).
+fn device_options_panel(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
+    let Some(device) = sh.device_options.clone() else { return };
+    let p = ui.painter().clone();
+    p.add(egui::epaint::Shadow { offset: [0, 8], blur: 30, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(r, CornerRadius::same(14)));
+    p.rect_filled(r, 14.0, BAR_BG);
+    p.rect_stroke(r, 14.0, Stroke::new(1.0, BAR_BORDER), StrokeKind::Inside);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(18.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+    let ui = &mut child;
+    ui.spacing_mut().item_spacing.y = 6.0;
+    ui.label(egui::RichText::new(&device.model).font(theme::semibold(15.0)).color(BAR_TEXT));
+    ui.label(egui::RichText::new("Mirrored with scrcpy. The recording is as sharp as the mirror window on screen.").size(12.0).color(BAR_DIM));
+    let o = &mut sh.settings.scrcpy;
+    let before = o.clone();
+    let section = |ui: &mut egui::Ui, t: &str| {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(t).size(13.5).color(BAR_TEXT));
+    };
+
+    section(ui, "Resolution");
+    let sizes = [0u32, 2560, 1920, 1600, 1280, 1024];
+    let labels: Vec<String> = sizes.iter().map(|s| if *s == 0 { "Native".into() } else { s.to_string() }).collect();
+    if let Some(i) = bar_chips(ui, &labels, sizes.iter().position(|s| *s == o.max_size).unwrap_or(0)) {
+        o.max_size = sizes[i];
+    }
+    section(ui, "Bitrate");
+    let rates = [4u32, 8, 16, 24, 40];
+    let labels: Vec<String> = rates.iter().map(|r| format!("{r} Mbps")).collect();
+    if let Some(i) = bar_chips(ui, &labels, rates.iter().position(|r| *r == o.video_bitrate_mbps).unwrap_or(2)) {
+        o.video_bitrate_mbps = rates[i];
+    }
+    section(ui, "Frame rate");
+    let fps = [0u32, 30, 60, 90, 120];
+    let labels: Vec<String> = fps.iter().map(|f| if *f == 0 { "Phone".into() } else { format!("{f} fps") }).collect();
+    if let Some(i) = bar_chips(ui, &labels, fps.iter().position(|f| *f == o.max_fps).unwrap_or(2)) {
+        o.max_fps = fps[i];
+    }
+    section(ui, "Codec");
+    let codecs = ["h264", "h265", "av1"];
+    let labels: Vec<String> = ["H.264", "H.265", "AV1"].iter().map(|s| s.to_string()).collect();
+    if let Some(i) = bar_chips(ui, &labels, codecs.iter().position(|c| *c == o.codec).unwrap_or(0)) {
+        o.codec = codecs[i].into();
+    }
+    ui.add_space(6.0);
+    for (label, value) in [
+        ("Play phone audio on this computer", &mut o.audio),
+        ("Keep the phone awake", &mut o.stay_awake),
+        ("Turn the phone screen off", &mut o.turn_screen_off),
+        ("Show touches on the phone", &mut o.show_touches),
+        ("View only (no mouse or keyboard control)", &mut o.view_only),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(label).size(13.0).color(BAR_TEXT));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                crate::editor::toggle(ui, value);
+            });
+        });
+    }
+    if *o != before {
+        sh.settings.save();
+    }
+    ui.add_space(8.0);
+    let connected = sh.mirror.as_ref().is_some_and(|m| m.device == device);
+    let stale = sh.mirror.as_ref().is_some_and(|m| m.device == device && m.options != sh.settings.scrcpy);
+    let label = if !connected { "Connect" } else if stale { "Reconnect with these options" } else { "Connected" };
+    ui.horizontal(|ui| {
+        let w = ui.available_width();
+        let go = egui::Button::new(egui::RichText::new(label).font(theme::semibold(13.5)).color(Color32::WHITE))
+            .fill(if connected && !stale { Color32::from_white_alpha(16) } else { theme::ACCENT })
+            .corner_radius(CornerRadius::same(9))
+            .min_size(vec2(w - 96.0, 34.0));
+        if ui.add_enabled(!connected || stale, go).clicked() {
+            sh.mirror = None;
+            sh.mirror_window = None;
+            match record::device::Mirror::open(&device, &sh.settings.scrcpy) {
+                Ok(m) => sh.mirror = Some(m),
+                Err(e) => eprintln!("open-studio: {e:#}"),
+            }
+            sh.mode = Mode::Device;
+            sh.device_options = None;
+        }
+        let close = egui::Button::new(egui::RichText::new("Close").size(13.5).color(BAR_TEXT))
+            .fill(Color32::from_white_alpha(12))
+            .corner_radius(CornerRadius::same(9))
+            .min_size(vec2(88.0, 34.0));
+        if ui.add(close).clicked() {
+            sh.device_options = None;
+        }
+    });
 }
 
 /// Dropdown above a bar entry: microphones (1) or system audio (2).
@@ -1068,6 +1197,9 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
             }
             if items.is_empty() {
                 items.push((None, "No device found. Connect a phone with USB debugging on.".into()));
+            }
+            if let Some(m) = &sh.mirror {
+                items.push((Some(format!("options:{}", m.device.serial)), "Mirror options…".into()));
             }
         }
         _ => {
@@ -1109,21 +1241,12 @@ fn input_menu(ui: &mut egui::Ui, sh: &mut Shared, which: usize, anchor: Rect) {
     if let Some(v) = chosen {
         match which {
             3 => {
-                let Some(serial) = v else {
-                    sh.menu = None;
-                    return;
-                };
-                let device = sh.phones.iter().find(|d| d.serial == serial).cloned();
-                if let Some(d) = device {
-                    if sh.mirror.as_ref().map(|m| &m.device) != Some(&d) {
-                        sh.mirror = None;
-                        sh.mirror_window = None;
-                        match record::device::Mirror::open(&d) {
-                            Ok(m) => sh.mirror = Some(m),
-                            Err(e) => eprintln!("open-studio: {e:#}"),
-                        }
-                    }
-                    sh.mode = Mode::Device;
+                // Choosing a phone (or "Mirror options…") opens its options;
+                // the panel's Connect button starts the mirror.
+                if let Some(v) = v {
+                    let serial = v.strip_prefix("options:").unwrap_or(&v).to_string();
+                    let device = sh.phones.iter().find(|d| d.serial == serial).cloned().or_else(|| sh.mirror.as_ref().map(|m| m.device.clone()));
+                    sh.device_options = device;
                 }
                 sh.menu = None;
                 return;
@@ -1673,6 +1796,7 @@ mod tests {
             mirror: None,
             mirror_window: None,
             mirror_checked: None,
+            device_options: None,
             audio_devices: vec![],
             elapsed: 3.0,
             paused: false,
@@ -1731,6 +1855,26 @@ mod tests {
         // Keep tests away from the real settings file.
         let dir = std::env::temp_dir().join("open-studio-test-config");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+    }
+
+    #[test]
+    fn device_options_panel() {
+        isolate_config();
+        let mut h = Harness::new(false);
+        let mut sh = shared();
+        sh.scrcpy = true;
+        sh.device_options = Some(record::device::Device { serial: "x".into(), model: "Test Phone".into() });
+        h.frame(&mut sh, vec![]);
+        // A click on the panel background neither closes it nor starts anything.
+        let r = device_options_rect(bar());
+        h.click(&mut sh, pos2(r.right() - 30.0, r.top() + 12.0));
+        assert!(sh.device_options.is_some() && sh.start.is_none() && !sh.cancel);
+        // Escape closes the panel before it would close the bar.
+        h.frame(&mut sh, vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
+        assert!(sh.device_options.is_none() && !sh.cancel);
+        let o = crate::settings::ScrcpyOptions { max_size: 1920, max_fps: 0, audio: false, ..Default::default() };
+        let a = o.args();
+        assert!(a.contains(&"--max-size=1920".to_string()) && a.contains(&"--no-audio".to_string()) && !a.iter().any(|x| x.starts_with("--max-fps")));
     }
 
     #[test]

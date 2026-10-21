@@ -76,17 +76,20 @@ fn friendly_name(adb: &std::path::Path, serial: &str) -> Option<String> {
 /// A running scrcpy mirror window. Closed on drop.
 pub struct Mirror {
     pub device: Device,
+    /// Options it was started with.
+    pub options: crate::settings::ScrcpyOptions,
     child: Child,
 }
 
 impl Mirror {
-    pub fn open(device: &Device) -> Result<Self> {
+    pub fn open(device: &Device, opts: &crate::settings::ScrcpyOptions) -> Result<Self> {
         let Some(scrcpy) = scrcpy() else { bail!("scrcpy is not installed") };
         // Float the mirror so it keeps the phone's shape instead of tiling.
         let rule = "hl.window_rule({ name = 'open-studio-device', match = { class = '^scrcpy$' }, float = true, center = true })";
         let _ = super::hyprland::request(&format!("eval {rule}"));
         let mut cmd = Command::new(scrcpy);
-        cmd.args(["--serial", &device.serial, "--window-title", &format!("{} (Open Studio)", device.model), "--stay-awake"])
+        cmd.args(["--serial", &device.serial, "--window-title", &format!("{} (Open Studio)", device.model)])
+            .args(opts.args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -94,7 +97,7 @@ impl Mirror {
             cmd.env("ADB", adb);
         }
         let child = cmd.spawn().context("starting scrcpy")?;
-        Ok(Self { device: device.clone(), child })
+        Ok(Self { device: device.clone(), options: opts.clone(), child })
     }
 
     /// False once scrcpy has quit (phone unplugged, window closed).

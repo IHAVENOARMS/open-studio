@@ -187,7 +187,7 @@ fn main() -> Result<()> {
             let devices = record::device::list();
             println!("scrcpy: {:?}\ndevices: {devices:?}", record::device::scrcpy());
             let d = devices.first().ok_or_else(|| anyhow::anyhow!("no device"))?;
-            let mirror = record::device::Mirror::open(d)?;
+            let mirror = record::device::Mirror::open(d, &settings::Settings::load().scrcpy)?;
             let mut win = None;
             for _ in 0..100 {
                 win = mirror.window();

@@ -70,6 +70,68 @@ pub struct Settings {
     pub microphone: Option<String>,
     /// Record what the computer plays.
     pub system_audio: bool,
+    /// Phone mirroring (Device button).
+    pub scrcpy: ScrcpyOptions,
+}
+
+/// scrcpy settings for the Device button.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ScrcpyOptions {
+    /// Longest side in pixels; 0 keeps the phone's resolution.
+    pub max_size: u32,
+    pub video_bitrate_mbps: u32,
+    /// 0 lets the phone decide.
+    pub max_fps: u32,
+    /// "h264", "h265" or "av1".
+    pub codec: String,
+    /// Play the phone's sound on the computer (recordable as system audio).
+    pub audio: bool,
+    pub stay_awake: bool,
+    pub turn_screen_off: bool,
+    pub show_touches: bool,
+    /// Mirror only; mouse and keyboard don't reach the phone.
+    pub view_only: bool,
+}
+
+impl Default for ScrcpyOptions {
+    fn default() -> Self {
+        Self {
+            max_size: 0,
+            video_bitrate_mbps: 16,
+            max_fps: 60,
+            codec: "h264".into(),
+            audio: true,
+            stay_awake: true,
+            turn_screen_off: false,
+            show_touches: false,
+            view_only: false,
+        }
+    }
+}
+
+impl ScrcpyOptions {
+    pub fn args(&self) -> Vec<String> {
+        let mut a = vec![format!("--video-bit-rate={}M", self.video_bitrate_mbps), format!("--video-codec={}", self.codec)];
+        if self.max_size > 0 {
+            a.push(format!("--max-size={}", self.max_size));
+        }
+        if self.max_fps > 0 {
+            a.push(format!("--max-fps={}", self.max_fps));
+        }
+        for (on, flag) in [
+            (!self.audio, "--no-audio"),
+            (self.stay_awake, "--stay-awake"),
+            (self.turn_screen_off, "--turn-screen-off"),
+            (self.show_touches, "--show-touches"),
+            (self.view_only, "--no-control"),
+        ] {
+            if on {
+                a.push(flag.into());
+            }
+        }
+        a
+    }
 }
 
 impl Default for Settings {
@@ -85,6 +147,7 @@ impl Default for Settings {
             bake_cursor: false,
             microphone: None,
             system_audio: false,
+            scrcpy: ScrcpyOptions::default(),
         }
     }
 }
