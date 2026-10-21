@@ -236,7 +236,7 @@ fn supervise_bar(ctx: &egui::Context) -> anyhow::Result<PathBuf> {
             anyhow::ensure!(!dir.is_empty(), "recorder returned no project");
             Ok(PathBuf::from(dir))
         }
-        Some(2) => anyhow::bail!(""),
+        Some(2) | Some(3) => anyhow::bail!(""),
         _ => anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim()),
     }
 }
@@ -295,13 +295,20 @@ impl eframe::App for App {
         match &mut self.mode {
             Mode::Home => self.home(ui, &rs),
             Mode::Recording(_) => self.recording(ui, &rs),
-            Mode::Editor(ed) => {
-                if let Action::GoHome = ed.ui(ui, &rs) {
+            Mode::Editor(ed) => match ed.ui(ui, &rs) {
+                Action::GoHome => {
                     ed.save();
                     self.projects = scan_projects();
                     self.mode = Mode::Home;
                 }
-            }
+                Action::Deleted => {
+                    // Close the app and go back to the recording bar.
+                    RELAUNCH_RECORDER.store(true, Ordering::Relaxed);
+                    self.mode = Mode::Home;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Action::None => {}
+            },
         }
     }
 
@@ -311,6 +318,9 @@ impl eframe::App for App {
         }
     }
 }
+
+/// Set when the app closes to return to the recording bar.
+pub static RELAUNCH_RECORDER: AtomicBool = AtomicBool::new(false);
 
 pub fn run(open: Option<PathBuf>) -> anyhow::Result<()> {
     let options = eframe::NativeOptions {

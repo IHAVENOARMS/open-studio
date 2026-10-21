@@ -57,6 +57,8 @@ struct ExportDialog {
 pub enum Action {
     None,
     GoHome,
+    /// The project was deleted; leave the editor.
+    Deleted,
 }
 
 pub struct Editor {
@@ -183,8 +185,22 @@ impl Editor {
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(16, 10)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if icons::button(ui, Icon::Folder, "Projects", egui::FontId::proportional(13.5), theme::TEXT, None, Vec2::ZERO).clicked() {
+                    if icons::button(ui, Icon::Folder, "", egui::FontId::proportional(15.0), theme::TEXT, None, Vec2::ZERO)
+                        .on_hover_text("Projects")
+                        .clicked()
+                    {
                         action = Action::GoHome;
+                    }
+                    ui.add_space(4.0);
+                    if icons::button(ui, Icon::Trash, "", egui::FontId::proportional(15.0), theme::TEXT, None, Vec2::ZERO)
+                        .on_hover_text("Delete project (moves it to the trash)")
+                        .clicked()
+                    {
+                        self.save();
+                        match trash(&self.dir) {
+                            Ok(()) => action = Action::Deleted,
+                            Err(e) => eprintln!("open-studio: deleting project failed: {e:#}"),
+                        }
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::button(ui, Icon::Export, "Export", theme::semibold(13.5), Color32::WHITE, Some(theme::ACCENT), egui::vec2(0.0, 32.0)).clicked()
@@ -681,6 +697,16 @@ impl Editor {
             self.export = None;
         }
     }
+}
+
+/// Moves a project to the desktop trash (recoverable), or deletes it when
+/// no trash is available.
+fn trash(dir: &std::path::Path) -> anyhow::Result<()> {
+    let ok = std::process::Command::new("gio").arg("trash").arg(dir).status().map(|s| s.success()).unwrap_or(false);
+    if !ok {
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(())
 }
 
 /// Puts a file on the Wayland clipboard as a URI list, which file managers,

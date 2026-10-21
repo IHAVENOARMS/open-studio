@@ -107,6 +107,8 @@ struct Shared {
     capturing_shortcut: bool,
     start: Option<DirectRequest>,
     cancel: bool,
+    /// Folder button: leave and show the projects list.
+    open_projects: bool,
     // Recording widget state.
     elapsed: f64,
     paused: bool,
@@ -173,9 +175,16 @@ struct Rt {
     error: Option<String>,
 }
 
-/// Runs the picker and recording UI. Returns the project directory, or None
-/// if the user cancelled or deleted the recording.
-pub fn run() -> Result<Option<PathBuf>> {
+/// How the recording UI ended.
+pub enum Outcome {
+    Recorded(PathBuf),
+    Cancelled,
+    /// The folder button: show the projects list.
+    OpenProjects,
+}
+
+/// Runs the picker and recording UI.
+pub fn run() -> Result<Outcome> {
     let conn = Connection::connect_to_env().context("connecting to Wayland")?;
     let (globals, queue) = registry_queue_init::<Rt>(&conn)?;
     let qh = queue.handle();
@@ -225,6 +234,7 @@ pub fn run() -> Result<Option<PathBuf>> {
             capturing_shortcut: false,
             start: None,
             cancel: false,
+            open_projects: false,
             elapsed: 0.0,
             paused: false,
             can_pause: false,
@@ -264,7 +274,13 @@ pub fn run() -> Result<Option<PathBuf>> {
     if let Some(e) = rt.error {
         return Err(anyhow!(e));
     }
-    Ok(rt.result.flatten())
+    if rt.shared.open_projects {
+        return Ok(Outcome::OpenProjects);
+    }
+    Ok(match rt.result.flatten() {
+        Some(dir) => Outcome::Recorded(dir),
+        None => Outcome::Cancelled,
+    })
 }
 
 /// Asks Hyprland to blur what's behind our bar and widget. `ignore_alpha`
@@ -793,7 +809,7 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
 }
 
 fn bar_rect(screen: Rect) -> Rect {
-    let w = 972.0f32.min(screen.width() - 40.0);
+    let w = 1032.0f32.min(screen.width() - 40.0);
     Rect::from_center_size(pos2(screen.center().x, screen.bottom() - 70.0 - BAR_H / 2.0), vec2(w, BAR_H))
 }
 
@@ -894,6 +910,17 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
     }
     let gx = bar.right() - 64.0;
     divider(&p, gx - 8.0);
+    // Projects folder (left of the settings button).
+    let folder = Rect::from_min_size(pos2(gx - 60.0, cy - 20.0), vec2(44.0, 40.0));
+    let fr = ui.interact(folder, ui.scope_id().with("projects"), Sense::click()).on_hover_text("Open projects");
+    if fr.hovered() {
+        p.rect_filled(folder, 10.0, Color32::from_white_alpha(14));
+    }
+    icons::paint(&p, Rect::from_center_size(folder.center(), vec2(22.0, 22.0)), Icon::Folder, BAR_TEXT);
+    if fr.clicked() {
+        sh.open_projects = true;
+        sh.cancel = true;
+    }
     let gear = Rect::from_min_size(pos2(gx, cy - 20.0), vec2(52.0, 40.0));
     let gr = ui.interact(gear, ui.scope_id().with("gear"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     if gr.hovered() || sh.gear_open {
@@ -1440,6 +1467,7 @@ mod tests {
             capturing_shortcut: false,
             start: None,
             cancel: false,
+            open_projects: false,
             elapsed: 3.0,
             paused: false,
             can_pause: true,

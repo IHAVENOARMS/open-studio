@@ -152,8 +152,9 @@ fn main() -> Result<()> {
         }
         Some(Cmd::Stop) => control::send_stop()?,
         Some(Cmd::RecordUi) => match recorder_ui::run()? {
-            Some(dir) => println!("{}", dir.display()),
-            None => std::process::exit(2),
+            recorder_ui::Outcome::Recorded(dir) => println!("{}", dir.display()),
+            recorder_ui::Outcome::Cancelled => std::process::exit(2),
+            recorder_ui::Outcome::OpenProjects => std::process::exit(3),
         },
         Some(Cmd::Export { project, out, height, fps, format, quality, clipboard }) => {
             let format = match format.as_str() {
@@ -303,7 +304,7 @@ fn main() -> Result<()> {
                 eprintln!("open-studio: {} downloaded, {} failed", total - errors.len(), errors.len());
             }
         }
-        None => app::run(None)?,
+        None => start()?,
     }
     Ok(())
 }
@@ -371,5 +372,31 @@ fn visit_points(points: &str) -> Result<()> {
     }
     warp(orig.0, orig.1)?;
     std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(())
+}
+
+/// Default entry point: the recording bar first (like Screen Studio), then
+/// the editor for what was recorded. Without layer-shell support the
+/// projects window opens instead.
+fn start() -> Result<()> {
+    if record::hyprland::available() {
+        match recorder_ui::run() {
+            Ok(recorder_ui::Outcome::Recorded(dir)) => app::run(Some(dir))?,
+            Ok(recorder_ui::Outcome::OpenProjects) => app::run(None)?,
+            Ok(recorder_ui::Outcome::Cancelled) => return Ok(()),
+            Err(e) => {
+                eprintln!("open-studio: recording bar unavailable ({e:#}); opening projects");
+                app::run(None)?;
+            }
+        }
+    } else {
+        app::run(None)?;
+    }
+    if app::RELAUNCH_RECORDER.load(Ordering::Relaxed) {
+        // A fresh process: the windowing event loop can't be restarted in-process.
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(std::env::current_exe()?).exec();
+        anyhow::bail!("relaunching failed: {err}");
+    }
     Ok(())
 }
