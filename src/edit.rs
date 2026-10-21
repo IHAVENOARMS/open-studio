@@ -71,7 +71,9 @@ impl ZoomCurve {
         Self::Spring { tension: 200.0 * f, friction: 40.0 * f.sqrt(), mass: 2.25 }
     }
 
-    pub const EASE_OUT: Self = Self::Bezier { x1: 0.16, y1: 1.0, x2: 0.3, y2: 1.0, duration: 0.9 };
+    /// Default: the iOS sheet curve (as used in Emil Kowalski's Vaul),
+    /// a quick start that glides into place.
+    pub const SMOOTH: Self = Self::Bezier { x1: 0.32, y1: 0.72, x2: 0.0, y2: 1.0, duration: 0.75 };
 
     /// Seconds shown on the curve editor's time axis for a spring.
     pub fn spring_window(tension: f64, friction: f64, mass: f64) -> f64 {
@@ -219,7 +221,7 @@ impl Default for EditConfig {
             zoom_segments: vec![],
             masks: vec![],
             zoom_speed: AnimationSpeed::Mellow,
-            zoom_curve: None,
+            zoom_curve: Some(ZoomCurve::SMOOTH),
             default_zoom: 2.0,
             background: default_background(),
             background_blur: 0.0,

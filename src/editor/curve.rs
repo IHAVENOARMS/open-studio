@@ -15,7 +15,9 @@ enum Kind {
     Bezier,
 }
 
-const BEZIER_PRESETS: [(&str, [f64; 4]); 5] = [
+const BEZIER_PRESETS: [(&str, [f64; 4]); 7] = [
+    ("Smooth", [0.32, 0.72, 0.0, 1.0]),
+    ("Snappy", [0.23, 1.0, 0.32, 1.0]),
     ("Ease out", [0.16, 1.0, 0.3, 1.0]),
     ("Ease in-out", [0.65, 0.0, 0.35, 1.0]),
     ("Expo out", [0.19, 1.0, 0.22, 1.0]),
@@ -66,7 +68,7 @@ pub fn show(ui: &mut Ui, edit: &mut EditConfig) {
     if widgets::tabs(ui, &mut kind, &[(Kind::Spring, "Spring"), (Kind::Bezier, "Curve")]) {
         curve = match kind {
             Kind::Spring => ZoomCurve::from_speed(edit.zoom_speed),
-            Kind::Bezier => ZoomCurve::EASE_OUT,
+            Kind::Bezier => ZoomCurve::SMOOTH,
         };
         changed = true;
     }
@@ -100,7 +102,7 @@ pub fn show(ui: &mut Ui, edit: &mut EditConfig) {
                     if widgets::chip(ui, name, current).clicked() {
                         let duration = match curve {
                             ZoomCurve::Bezier { duration, .. } => duration,
-                            _ => 0.9,
+                            _ => 0.75,
                         };
                         curve = ZoomCurve::Bezier { x1: p[0], y1: p[1], x2: p[2], y2: p[3], duration };
                         changed = true;
@@ -131,7 +133,7 @@ pub fn show(ui: &mut Ui, edit: &mut EditConfig) {
         }
         ZoomCurve::Bezier { duration, .. } => {
             theme::section(ui, &format!("Duration  ·  {:.2}s", duration));
-            if widgets::slider(ui, duration, 0.15..=2.5, Some(0.9)) {
+            if widgets::slider(ui, duration, 0.15..=2.5, Some(0.75)) {
                 changed = true;
             }
         }
@@ -293,7 +295,7 @@ mod tests {
     #[test]
     fn dragging_a_bezier_handle_edits_the_curve() {
         let ctx = egui::Context::default();
-        let mut edit = EditConfig { zoom_curve: Some(ZoomCurve::EASE_OUT), ..Default::default() };
+        let mut edit = EditConfig { zoom_curve: Some(ZoomCurve::SMOOTH), ..Default::default() };
         let _ = run(&ctx, &mut edit, 0.0, vec![]);
         // Find the first handle by scanning for a grab cursor.
         let mut handle = None;
@@ -313,7 +315,7 @@ mod tests {
             let _ = run(&ctx, &mut edit, 0.2 + i as f64 * 0.02, vec![egui::Event::PointerMoved(h + vec2(10.0 * i as f32, 15.0 * i as f32))]);
         }
         let _ = run(&ctx, &mut edit, 0.4, vec![egui::Event::PointerButton { pos: h + vec2(60.0, 90.0), button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
-        assert_ne!(edit.zoom_curve, Some(ZoomCurve::EASE_OUT), "curve unchanged after drag");
+        assert_ne!(edit.zoom_curve, Some(ZoomCurve::SMOOTH), "curve unchanged after drag");
         assert!(matches!(edit.zoom_curve, Some(ZoomCurve::Bezier { .. })));
     }
 }
