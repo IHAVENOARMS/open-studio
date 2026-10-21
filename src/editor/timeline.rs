@@ -219,25 +219,53 @@ pub fn show(
     // Clip track (trimmed region bright, the rest dimmed).
     let full_clip = Rect::from_x_y_ranges(geo.x(0.0)..=geo.x(duration), clip.y_range());
     gradient_bar(&p, full_clip, 10.0, &CLIP_STOPS, CLIP_EDGE, 0.5, CLIP_BORDER, 0.3);
-    let clip_r = Rect::from_x_y_ranges(geo.x(trim_s)..=geo.x(trim_e), clip.y_range());
-    gradient_bar(&p, clip_r, 10.0, &CLIP_STOPS, CLIP_EDGE, 0.5, CLIP_BORDER, 1.0);
-    if let Some(env) = waveform {
-        paint_waveform(&p, clip_r, &geo, env, trim_s, trim_e);
-    }
-    // Faint gridlines at every ruler tick (labelled and half steps), drawn
-    // over the waveform as in Screen Studio.
-    let grid_step = step / 2.0;
-    let mut t = grid_step;
-    while t < trim_e {
-        let x = geo.x(t);
-        if x > clip_r.left() + 6.0 && x < clip_r.right() - 6.0 && grid_step * px_per_s > 12.0 {
-            p.line_segment([pos2(x, clip_r.top() + 1.0), pos2(x, clip_r.bottom() - 1.0)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xf0, 0xcc, 0x8c, 36)));
+    // Kept parts of the clip: the trim range split at the cuts.
+    let kept = edit.kept_ranges(duration);
+    for &(a, b) in &kept {
+        let r = Rect::from_x_y_ranges(geo.x(a)..=geo.x(b), clip.y_range());
+        // Neighbouring parts sit 2px apart so a cut reads as a split.
+        let r = if kept.len() > 1 { r.shrink2(vec2(1.0, 0.0)) } else { r };
+        gradient_bar(&p, r, 10.0, &CLIP_STOPS, CLIP_EDGE, 0.5, CLIP_BORDER, 1.0);
+        if let Some(env) = waveform {
+            paint_waveform(&p, r, &geo, env, a, b);
         }
-        t += grid_step;
+        // Faint gridlines at every ruler tick (labelled and half steps),
+        // drawn over the waveform as in Screen Studio.
+        let grid_step = step / 2.0;
+        let mut t = (a / grid_step).ceil() * grid_step;
+        while t < b {
+            let x = geo.x(t);
+            if x > r.left() + 6.0 && x < r.right() - 6.0 && grid_step * px_per_s > 12.0 {
+                p.line_segment([pos2(x, r.top() + 1.0), pos2(x, r.bottom() - 1.0)], Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xf0, 0xcc, 0x8c, 36)));
+            }
+            t += grid_step;
+        }
+        if r.width() > 60.0 {
+            p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Clip", egui::FontId::proportional(12.5), Color32::from_rgb(0xe8, 0xc6, 0x86));
+            p.text(r.center() + vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, format!("{:.0}s  ·  1×", b - a), egui::FontId::proportional(13.5), Color32::WHITE);
+        }
     }
-    if clip_r.width() > 60.0 {
-        p.text(clip_r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Clip", egui::FontId::proportional(12.5), Color32::from_rgb(0xe8, 0xc6, 0x86));
-        p.text(clip_r.center() + vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, format!("{:.0}s  ·  1×", trim_e - trim_s), egui::FontId::proportional(13.5), Color32::WHITE);
+    // Cut markers: a yellow pin with scissors; click to restore the cut.
+    for c in edit.cuts.clone() {
+        if c.end <= trim_s || c.start >= trim_e {
+            continue;
+        }
+        let x = geo.x((c.start + c.end) * 0.5);
+        let pin = Rect::from_center_size(pos2(x, clip.top() - 3.0), vec2(18.0, 18.0));
+        let id = ui.scope_id().with(("cut", (c.start * 1000.0) as i64));
+        let r = ui.interact(pin.expand(2.0), id, Sense::click());
+        let fill = if r.hovered() { Color32::from_rgb(0xff, 0xd5, 0x5c) } else { Color32::from_rgb(0xf2, 0xb8, 0x2c) };
+        p.circle_filled(pin.center(), 9.0, fill);
+        p.add(egui::Shape::convex_polygon(
+            vec![pin.center() + vec2(-5.0, 6.0), pin.center() + vec2(5.0, 6.0), pin.center() + vec2(0.0, 12.0)],
+            fill,
+            Stroke::NONE,
+        ));
+        crate::icons::paint(&p, pin.shrink(4.0), crate::icons::Icon::Scissors, Color32::from_rgb(0x3a, 0x26, 0x05));
+        let r = r.on_hover_text(format!("{:.1}s cut. Click to restore.", c.end - c.start)).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if r.clicked() {
+            edit.restore(c.start, c.end);
+        }
     }
 
     // Zoom and mask tracks.

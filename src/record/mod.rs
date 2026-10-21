@@ -263,6 +263,7 @@ impl Recorder {
             audio: vec![],
             camera: None,
             dir: self.dir.clone(),
+            transcript: None,
         };
         for (kind, res) in audio_results {
             let file = format!("{kind}.wav");

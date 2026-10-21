@@ -47,7 +47,22 @@ pub fn export(
     let tracks = Tracks::build(rec, edit);
     let (w, h) = output_size(tracks.layout.aspect, opts.height);
     let (start, end) = edit.trim_range(rec.duration);
-    let total = ((end - start) * opts.fps as f64).floor().max(1.0) as u64;
+    // Recording time of every output frame, skipping cuts.
+    let mut times = vec![];
+    let mut acc = 0.0;
+    for (a, b) in edit.kept_ranges(rec.duration) {
+        let n0 = (acc * opts.fps as f64).ceil() as u64;
+        acc += b - a;
+        let n1 = (acc * opts.fps as f64).ceil() as u64;
+        for n in n0..n1 {
+            let out_t = n as f64 / opts.fps as f64;
+            times.push(a + (out_t - (acc - (b - a))));
+        }
+    }
+    if times.is_empty() {
+        bail!("nothing to export: everything is trimmed or cut");
+    }
+    let total = times.len() as u64;
 
     let device = comp.device().clone();
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -92,14 +107,14 @@ pub fn export(
     let mut frame = Vec::new();
     let mut row = vec![0u8; (w * 4 * h) as usize];
 
-    for i in 0..total {
+    for (i, &t) in times.iter().enumerate() {
+        let i = i as u64;
         if progress.cancel.load(Ordering::Relaxed) {
             drop(stdin);
             let _ = ffmpeg.kill();
             let _ = std::fs::remove_file(&video_out);
             bail!("export cancelled");
         }
-        let t = start + i as f64 / opts.fps as f64;
         let want = ((t * rec.fps as f64) + 1e-6).floor() as i64;
         let mut fresh = false;
         while src_index < want {
@@ -156,7 +171,14 @@ pub fn export(
         let clicks = crate::clicks::render_track(rec, edit);
         let tracks = audio_tracks(rec, edit, clicks.as_deref());
         if !tracks.is_empty() {
-            mux_audio(dir, &tracks, &video_out, start, end)?;
+            // Cuts relative to the trimmed start.
+            let gaps: Vec<(f64, f64)> = edit
+                .cuts
+                .iter()
+                .filter(|c| c.end > start && c.start < end)
+                .map(|c| (c.start.max(start) - start, c.end.min(end) - start))
+                .collect();
+            mux_audio(dir, &tracks, &video_out, start, end, &gaps)?;
         }
     }
     if gif {
@@ -214,7 +236,7 @@ pub fn audio_tracks(rec: &Recording, edit: &EditConfig, clicks: Option<&Path>) -
 
 /// Mixes audio into the exported MP4: each track is shifted by its offset,
 /// trimmed to the edited range, filtered and gain-adjusted.
-fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f64) -> Result<()> {
+fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f64, gaps: &[(f64, f64)]) -> Result<()> {
     let tmp = video.with_extension("audio.mp4");
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video);
@@ -237,7 +259,14 @@ fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f6
         labels.push_str(&format!("[a{i}]"));
     }
     let n = tracks.len();
-    filters.push(format!("{labels}amix=inputs={n}:normalize=0:duration=longest,atrim=end={:.4},apad[aout]", end - start));
+    // Drop the cut stretches and close the gaps.
+    let select = if gaps.is_empty() {
+        String::new()
+    } else {
+        let expr: Vec<String> = gaps.iter().map(|(a, b)| format!("between(t,{a:.4},{b:.4})")).collect();
+        format!(",aselect='not({})',asetpts=N/SR/TB", expr.join("+"))
+    };
+    filters.push(format!("{labels}amix=inputs={n}:normalize=0:duration=longest,atrim=end={:.4}{select},apad[aout]", end - start));
     cmd.args(["-filter_complex", &filters.join(";")]);
     cmd.args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"]);
     cmd.arg(&tmp);

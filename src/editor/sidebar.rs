@@ -90,6 +90,7 @@ pub fn show(
     tab: &mut Tab,
     selected: &mut Option<Selection>,
     rec: &Recording,
+    time: f64,
 ) -> Option<f64> {
     let mut seek = None;
     ui.horizontal_top(|ui| {
@@ -168,9 +169,13 @@ pub fn show(
                         Tab::Background => background(ui, state, edit),
                         Tab::Cursor => cursor(ui, state, edit, rec),
                         Tab::CameraLayout | Tab::CameraStyle => super::camera_ui::show(ui, edit, rec, *tab == Tab::CameraLayout),
-                        Tab::Captions => super::captions_ui::captions(ui, &mut state.captions, edit, rec),
+                        Tab::Captions => {
+                            if let super::captions_ui::CaptionsAction::OpenTranscript = super::captions_ui::captions(ui, &mut state.captions, edit, rec) {
+                                *tab = Tab::Transcript;
+                            }
+                        }
                         Tab::Transcript => {
-                            if let Some(t) = super::captions_ui::transcript(ui, &mut state.captions, edit, rec) {
+                            if let Some(t) = super::captions_ui::transcript(ui, &mut state.captions, edit, rec, time) {
                                 seek = Some(t);
                             }
                         }
@@ -194,7 +199,7 @@ fn disabled_reason(t: Tab) -> &'static str {
 }
 
 /// A bordered sub-card for options that belong to the setting above it.
-fn sub_card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+pub(super) fn sub_card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new()
         .fill(Color32::from_rgb(0x1b, 0x1d, 0x22))
         .corner_radius(CornerRadius::same(12))
@@ -206,7 +211,7 @@ fn sub_card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 /// Label with an optional help line on the left, switch on the right.
-fn toggle_help(ui: &mut Ui, label: &str, help_text: &str, on: &mut bool) -> bool {
+pub(super) fn toggle_help(ui: &mut Ui, label: &str, help_text: &str, on: &mut bool) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
@@ -223,12 +228,12 @@ fn toggle_help(ui: &mut Ui, label: &str, help_text: &str, on: &mut bool) -> bool
     changed
 }
 
-fn heading(ui: &mut Ui, text: &str) {
+pub(super) fn heading(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).font(theme::semibold(15.0)));
     ui.add_space(4.0);
 }
 
-fn help(ui: &mut Ui, text: &str) {
+pub(super) fn help(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(12.0).color(theme::TEXT_DIM));
 }
 

@@ -6,6 +6,7 @@ mod editor;
 mod settings;
 mod shortcuts;
 mod theme;
+mod transcript;
 mod decode;
 mod dialogs;
 mod edit;
@@ -102,6 +103,19 @@ enum Cmd {
     DebugActions { display: String, dir: PathBuf },
     /// Open a project in the editor.
     Edit { project: PathBuf },
+    /// Transcribe a project's microphone track with Whisper (for captions).
+    Transcribe {
+        project: PathBuf,
+        /// base, small or medium
+        #[arg(long, default_value = "base")]
+        model: String,
+        /// Language code such as "en"; detected when omitted.
+        #[arg(long, default_value = "")]
+        language: String,
+        /// Write captions as SubRip to this file.
+        #[arg(long)]
+        srt: Option<PathBuf>,
+    },
     /// Render a project to MP4 without opening the editor.
     Export {
         project: PathBuf,
@@ -166,6 +180,16 @@ fn main() -> Result<()> {
             recorder_ui::Outcome::Cancelled => std::process::exit(2),
             recorder_ui::Outcome::OpenProjects => std::process::exit(3),
         },
+        Some(Cmd::Transcribe { project, model, language, srt }) => {
+            let rec = project::Recording::load(&project)?;
+            let t = transcript::generate(&rec, &model, &language, "", &Default::default())?;
+            t.save(&project)?;
+            println!("open-studio: {} words ({})", t.words.len(), t.language);
+            if let Some(path) = srt {
+                let edit = edit::EditConfig::load_or_create(&project, &rec);
+                std::fs::write(&path, transcript::srt(&t, &edit, rec.duration))?;
+            }
+        }
         Some(Cmd::Export { project, out, height, fps, format, quality, clipboard }) => {
             let format = match format.as_str() {
                 "gif" => settings::Format::Gif,

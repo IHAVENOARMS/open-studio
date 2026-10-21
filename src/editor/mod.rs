@@ -187,6 +187,9 @@ impl Editor {
             if self.time >= end {
                 self.time = end;
                 self.set_playing(false);
+            } else if let Some(c) = self.edit.cut_at(self.time) {
+                // Jump over cut stretches.
+                self.seek(c.end.min(end));
             }
             ctx.request_repaint();
         }
@@ -266,8 +269,16 @@ impl Editor {
                 let side_w = 404.0;
                 let side_rect = egui::Rect::from_min_max(egui::pos2(full.max.x - side_w, full.min.y + 4.0), full.max - egui::vec2(0.0, 8.0));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(side_rect), |ui| {
-                    if let Some(t) = sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec) {
+                    if let Some(t) = sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec, self.time) {
                         self.seek(t);
+                    }
+                    if std::mem::take(&mut self.sidebar.captions.play_request) && self.playing.is_none() {
+                        self.set_playing(true);
+                    }
+                    // A transcript just finished generating.
+                    if let Some(t) = self.sidebar.captions.finished.take() {
+                        self.rec.transcript = Some(t);
+                        self.tracks = Tracks::build(&self.rec, &self.edit);
                     }
                 });
                 let main_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x - side_w - 16.0, full.max.y));

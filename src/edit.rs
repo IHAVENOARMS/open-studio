@@ -363,6 +363,111 @@ impl Default for ShortcutOverlay {
     }
 }
 
+/// A removed stretch of the recording, in recording time.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct Cut {
+    pub start: f64,
+    pub end: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptionFont {
+    Sans,
+    Rounded,
+    Serif,
+    Mono,
+}
+
+impl CaptionFont {
+    pub const ALL: [CaptionFont; 4] = [Self::Sans, Self::Rounded, Self::Serif, Self::Mono];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sans => "Default",
+            Self::Rounded => "Rounded",
+            Self::Serif => "Serif",
+            Self::Mono => "Mono",
+        }
+    }
+    /// fontconfig pattern.
+    pub fn pattern(self) -> &'static str {
+        match self {
+            Self::Sans => "SF Pro Display:semibold,Inter:semibold,sans-serif:semibold",
+            Self::Rounded => "SF Pro Rounded:semibold,Nunito:semibold,sans-serif:semibold",
+            Self::Serif => "New York:semibold,Noto Serif:semibold,serif:semibold",
+            Self::Mono => "SF Mono:semibold,JetBrains Mono:semibold,monospace:semibold",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptionPosition {
+    Bottom,
+    Top,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptionDisplay {
+    LineByLine,
+    WordByWord,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptionAnimation {
+    Appear,
+    Fade,
+    Slide,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct CaptionSettings {
+    pub show: bool,
+    /// Size multiplier.
+    pub size: f64,
+    pub font: CaptionFont,
+    /// Colour of the words already spoken (sRGB 0..1); upcoming words are dimmer.
+    pub color: [f32; 3],
+    pub position: CaptionPosition,
+    pub display: CaptionDisplay,
+    pub animation: CaptionAnimation,
+    /// Words removed from the captions only (the video keeps them).
+    pub hidden_words: Vec<usize>,
+    /// Corrected spellings by word index.
+    pub word_edits: std::collections::BTreeMap<usize, String>,
+    /// Transcription settings.
+    pub model: String,
+    pub language: String,
+    pub prompt: String,
+    /// Transcript editor: keep cut words visible, struck through.
+    pub show_deleted: bool,
+}
+
+impl Default for CaptionSettings {
+    fn default() -> Self {
+        Self {
+            show: true,
+            size: 1.0,
+            font: CaptionFont::Sans,
+            color: [1.0, 1.0, 1.0],
+            position: CaptionPosition::Bottom,
+            display: CaptionDisplay::LineByLine,
+            animation: CaptionAnimation::Fade,
+            hidden_words: vec![],
+            word_edits: Default::default(),
+            model: "base".into(),
+            language: String::new(),
+            prompt: String::new(),
+            show_deleted: true,
+        }
+    }
+}
+
+impl CaptionSettings {
+    pub fn word_text<'a>(&'a self, i: usize, original: &'a str) -> &'a str {
+        self.word_edits.get(&i).map(|s| s.as_str()).unwrap_or(original)
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct EditConfig {
@@ -398,6 +503,9 @@ pub struct EditConfig {
     /// Zoom changes happen instantly, without animation.
     pub instant_animation: bool,
     pub shortcuts: ShortcutOverlay,
+    /// Removed stretches, sorted and non-overlapping.
+    pub cuts: Vec<Cut>,
+    pub captions: CaptionSettings,
     /// 0..1, radial blur while the camera zooms.
     pub zoom_blur: f64,
     /// 0..1, directional blur while the camera pans.
@@ -431,6 +539,8 @@ impl Default for EditConfig {
             screen_animation: ScreenAnimation::Smooth,
             instant_animation: false,
             shortcuts: ShortcutOverlay::default(),
+            cuts: vec![],
+            captions: CaptionSettings::default(),
             zoom_blur: 0.5,
             pan_blur: 0.25,
         }
@@ -467,5 +577,87 @@ impl EditConfig {
     pub fn trim_range(&self, duration: f64) -> (f64, f64) {
         let end = self.trim_end.unwrap_or(duration).min(duration);
         (self.trim_start.clamp(0.0, end), end)
+    }
+
+    /// Parts of the recording that make it into the video: the trim range
+    /// minus the cuts.
+    pub fn kept_ranges(&self, duration: f64) -> Vec<(f64, f64)> {
+        let (s, e) = self.trim_range(duration);
+        let mut out = vec![];
+        let mut t = s;
+        for c in &self.cuts {
+            if c.end <= t || c.start >= e {
+                continue;
+            }
+            if c.start > t {
+                out.push((t, c.start));
+            }
+            t = t.max(c.end);
+        }
+        if t < e {
+            out.push((t, e));
+        }
+        out.retain(|(a, b)| b - a > 1e-4);
+        out
+    }
+
+    /// Edited-video time of recording time `t`, or None when it is cut or trimmed.
+    pub fn output_time(&self, t: f64, duration: f64) -> Option<f64> {
+        let mut acc = 0.0;
+        for (a, b) in self.kept_ranges(duration) {
+            if t < a - 1e-6 {
+                return None;
+            }
+            if t <= b + 1e-6 {
+                return Some(acc + (t - a).max(0.0));
+            }
+            acc += b - a;
+        }
+        None
+    }
+
+    /// The cut containing `t`, if any.
+    pub fn cut_at(&self, t: f64) -> Option<Cut> {
+        self.cuts.iter().copied().find(|c| t >= c.start && t < c.end)
+    }
+
+    /// True when most of `start..end` is cut out.
+    pub fn is_cut(&self, start: f64, end: f64) -> bool {
+        self.cut_at((start + end) * 0.5).is_some()
+    }
+
+    /// Adds a cut, merging overlaps.
+    pub fn add_cut(&mut self, start: f64, end: f64) {
+        if end - start < 1e-3 {
+            return;
+        }
+        self.cuts.push(Cut { start, end });
+        self.cuts.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let mut merged: Vec<Cut> = vec![];
+        for c in self.cuts.drain(..) {
+            match merged.last_mut() {
+                Some(m) if c.start <= m.end + 1e-3 => m.end = m.end.max(c.end),
+                _ => merged.push(c),
+            }
+        }
+        self.cuts = merged;
+    }
+
+    /// Removes cuts overlapping `start..end` (restores that part).
+    pub fn restore(&mut self, start: f64, end: f64) {
+        let mut out = vec![];
+        for c in self.cuts.drain(..) {
+            if c.end <= start || c.start >= end {
+                out.push(c);
+                continue;
+            }
+            if c.start < start {
+                out.push(Cut { start: c.start, end: start });
+            }
+            if c.end > end {
+                out.push(Cut { start: end, end: c.end });
+            }
+        }
+        self.cuts = out;
     }
 }

@@ -27,6 +27,7 @@ pub enum Icon {
     Clipboard,
     File,
     Trash,
+    Scissors,
     Mask,
     Display,
     Window,
@@ -195,6 +196,12 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&[(5.0, 5.5), (15.0, 5.5), (14.0, 17.0), (6.0, 17.0)]);
             pen.line(&[(8.5, 8.5), (8.5, 14.0)]);
             pen.line(&[(11.5, 8.5), (11.5, 14.0)]);
+        }
+        Icon::Scissors => {
+            pen.circle(5.5, 14.5, 2.6);
+            pen.circle(14.5, 14.5, 2.6);
+            pen.line(&[(7.4, 12.6), (14.5, 3.0)]);
+            pen.line(&[(12.6, 12.6), (5.5, 3.0)]);
         }
         Icon::Display => {
             pen.rrect(2.5, 4.0, 17.5, 15.0, 2.0);

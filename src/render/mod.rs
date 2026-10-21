@@ -3,7 +3,9 @@
 
 pub mod background;
 pub mod cursor_image;
+pub mod captions;
 pub mod keycaps;
+pub mod raster;
 
 use crate::edit::{Background, EditConfig};
 use crate::engine::{CursorShape, FrameState, Layout};
@@ -87,6 +89,8 @@ pub struct Compositor {
     sprites: std::collections::HashMap<String, Option<Sprite>>,
     /// Keycap overlay image for the shortcut on screen.
     keycaps: Option<(String, Sprite)>,
+    /// Caption image for the line on screen.
+    caption: Option<(String, Sprite)>,
     video: Option<VideoTexture>,
     /// Background image (1x1 placeholder when unused) and what it was loaded from.
     bg_view: wgpu::TextureView,
@@ -231,6 +235,7 @@ impl Compositor {
             scene_buf,
             sprites: Default::default(),
             keycaps: None,
+            caption: None,
             video: None,
             bg_view: placeholder.create_view(&Default::default()),
             bg_key: None,
@@ -624,7 +629,38 @@ impl Compositor {
             self.queue.write_buffer(&sp.buf, 0, bytemuck::bytes_of(&s));
         }
 
-        // Keycap overlay: bottom centre of the frame, outside the camera.
+        // Captions: centred near the bottom (or top) of the frame.
+        let caption = frame.caption.as_ref().filter(|c| c.opacity > 0.0 && !c.words.is_empty());
+        let mut caption_top = oh as f64 * 0.94;
+        if let Some(cf) = caption {
+            let st = &edit.captions;
+            let font_px = (oh as f64 * 0.042 * st.size).round().max(10.0) as u32;
+            let id = format!("{:?}|{}|{font_px}|{:?}|{:?}|{:?}", cf.words, cf.spoken, st.font, st.color, st.display);
+            if self.caption.as_ref().map(|(k, _)| k) != Some(&id) {
+                let img = captions::render(&cf.words, cf.spoken, st, font_px);
+                let sp = self.make_sprite(&img.rgba, img.width, img.height, (img.width as f32, img.height as f32), (0.0, 0.0));
+                self.caption = Some((id, sp));
+            }
+            let (_, sp) = self.caption.as_ref().unwrap();
+            let (w, h) = (sp.size.0 as f64, sp.size.1 as f64);
+            let margin = oh as f64 * 0.06;
+            let y0 = match st.position {
+                crate::edit::CaptionPosition::Bottom => oh as f64 - margin - h,
+                crate::edit::CaptionPosition::Top => margin,
+            } + cf.slide * h;
+            if st.position == crate::edit::CaptionPosition::Bottom {
+                caption_top = y0 - cf.slide * h;
+            }
+            let x0 = (ow as f64 - w) * 0.5;
+            let s = quad(
+                [ndc(ow, oh, x0, y0), ndc(ow, oh, x0 + w, y0), ndc(ow, oh, x0, y0 + h), ndc(ow, oh, x0 + w, y0 + h)],
+                cf.opacity,
+            );
+            self.queue.write_buffer(&sp.buf, 0, bytemuck::bytes_of(&s));
+        }
+
+        // Keycap overlay: bottom centre of the frame (above a bottom
+        // caption), outside the camera.
         let keys = frame.keys.as_ref().filter(|k| k.opacity > 0.0 && !k.keys.is_empty());
         if let Some(ko) = keys {
             let key_h = (oh as f64 * 0.075 * ko.size).round().max(12.0) as u32;
@@ -636,7 +672,8 @@ impl Compositor {
             }
             let (_, sp) = self.keycaps.as_ref().unwrap();
             let (w, h) = (sp.size.0 as f64 * ko.scale, sp.size.1 as f64 * ko.scale);
-            let (cx, cy) = (ow as f64 * 0.5, oh as f64 - oh as f64 * 0.06 - sp.size.1 as f64 * 0.5);
+            let bottom = if caption.is_some() { caption_top - oh as f64 * 0.015 } else { oh as f64 * 0.94 };
+            let (cx, cy) = (ow as f64 * 0.5, bottom - sp.size.1 as f64 * 0.5);
             let (x0, y0) = (cx - w * 0.5, cy - h * 0.5);
             let s = quad(
                 [ndc(ow, oh, x0, y0), ndc(ow, oh, x0 + w, y0), ndc(ow, oh, x0, y0 + h), ndc(ow, oh, x0 + w, y0 + h)],
@@ -653,6 +690,11 @@ impl Compositor {
                 pass.set_bind_group(0, bind, &[]);
                 pass.draw(0..3, 0..1);
                 if let (Some(_), Some(sp)) = (cursor, sprite) {
+                    pass.set_pipeline(&self.sprite_pipeline);
+                    pass.set_bind_group(0, &sp.bind, &[]);
+                    pass.draw(0..4, 0..1);
+                }
+                if let (Some(_), Some((_, sp))) = (caption, &self.caption) {
                     pass.set_pipeline(&self.sprite_pipeline);
                     pass.set_bind_group(0, &sp.bind, &[]);
                     pass.draw(0..4, 0..1);

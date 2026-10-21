@@ -36,6 +36,9 @@ pub struct Recording {
     /// Project directory, set on load.
     #[serde(skip)]
     pub dir: PathBuf,
+    /// transcript.json, loaded alongside.
+    #[serde(skip)]
+    pub transcript: Option<crate::transcript::Transcript>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -117,6 +120,7 @@ impl Recording {
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         let mut rec: Self = serde_json::from_str(&text)?;
         rec.dir = dir.to_path_buf();
+        rec.transcript = crate::transcript::Transcript::load(dir);
         Ok(rec)
     }
 

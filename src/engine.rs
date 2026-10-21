@@ -159,6 +159,8 @@ pub struct Tracks {
     duration: f64,
     /// Shortcuts shown by the keycap overlay.
     pub shortcuts: Vec<crate::shortcuts::Shortcut>,
+    /// Caption lines (empty when captions are off or there is no transcript).
+    pub captions: Vec<crate::transcript::Line>,
 }
 
 impl Tracks {
@@ -308,7 +310,11 @@ impl Tracks {
         } else {
             vec![]
         };
-        Self { layout, cameras, cursor, duration: rec.duration, shortcuts }
+        let captions = match &rec.transcript {
+            Some(t) if edit.captions.show => crate::transcript::lines(t, edit, 42),
+            _ => vec![],
+        };
+        Self { layout, cameras, cursor, duration: rec.duration, shortcuts, captions }
     }
 
     fn index(&self, t: f64) -> (usize, f64) {
@@ -358,6 +364,18 @@ pub struct FrameState {
     pub masks: Vec<ActiveMask>,
     pub click: Option<ClickFx>,
     pub keys: Option<KeyOverlay>,
+    pub caption: Option<CaptionFrame>,
+}
+
+/// The caption line on screen.
+#[derive(Clone, Debug)]
+pub struct CaptionFrame {
+    pub words: Vec<String>,
+    /// How many words have been spoken.
+    pub spoken: usize,
+    pub opacity: f64,
+    /// Slide-in offset as a fraction of the caption height.
+    pub slide: f64,
 }
 
 /// Click highlight drawn under the cursor.
@@ -473,7 +491,38 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
         })
     };
     let click = cursor.as_ref().and_then(|_| click_fx(rec, edit, tracks, t));
-    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t), click, keys: key_overlay(edit, tracks, t) }
+    let caption = caption_frame(rec, edit, tracks, t);
+    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t), click, keys: key_overlay(edit, tracks, t), caption }
+}
+
+/// The caption line around `t`; lines stay up briefly after their last word.
+fn caption_frame(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64) -> Option<CaptionFrame> {
+    const HOLD: f64 = 0.6;
+    const FADE: f64 = 0.15;
+    let transcript = rec.transcript.as_ref()?;
+    let lines = &tracks.captions;
+    let i = lines.partition_point(|l| l.start <= t);
+    let line = lines[..i].last()?;
+    let next_start = lines.get(i).map_or(f64::INFINITY, |n| n.start);
+    let end = (line.end + HOLD).min(next_start);
+    if t >= end {
+        return None;
+    }
+    let words = &transcript.words;
+    let texts = line.words.iter().map(|w| edit.captions.word_text(*w, &words[*w].text).to_string()).collect();
+    let spoken = line.words.iter().filter(|w| words[**w].start <= t).count();
+    let (fade_in, fade_out) = (((t - line.start) / FADE).min(1.0), ((end - t) / FADE).min(1.0));
+    // Lines that follow straight on from the previous one don't re-animate.
+    let joined = i >= 2 && lines[i - 2].end + HOLD >= line.start;
+    let (opacity, slide) = match edit.captions.animation {
+        crate::edit::CaptionAnimation::Appear => (1.0, 0.0),
+        crate::edit::CaptionAnimation::Fade => (if joined { fade_out } else { fade_in.min(fade_out) }, 0.0),
+        crate::edit::CaptionAnimation::Slide => {
+            let p = if joined { 1.0 } else { fade_in };
+            (p.min(fade_out), (1.0 - p).powi(3) * 0.6)
+        }
+    };
+    Some(CaptionFrame { words: texts, spoken, opacity, slide })
 }
 
 /// Tilt following horizontal speed, up to about 25 degrees at full setting.
@@ -579,6 +628,7 @@ mod tests {
             audio: vec![],
             camera: None,
             dir: Default::default(),
+            transcript: None,
         }
     }
 
