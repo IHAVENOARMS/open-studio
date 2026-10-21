@@ -286,69 +286,153 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(8.2, 7.0), (8.2, 13.0)]);
             pen.line(&[(11.8, 7.0), (11.8, 13.0)]);
         }
+        // Rail icons, redrawn from Screen Studio's v4 rail (landing page
+        // video at 2x): heavier 1.6-unit strokes, filled details.
         Icon::RailBackground => {
-            // Dashed rounded square with a filled inner square.
-            let segs = [
-                ((4.0, 2.5), (8.0, 2.5)), ((12.0, 2.5), (16.0, 2.5)), ((4.0, 17.5), (8.0, 17.5)), ((12.0, 17.5), (16.0, 17.5)),
-                ((2.5, 4.0), (2.5, 8.0)), ((2.5, 12.0), (2.5, 16.0)), ((17.5, 4.0), (17.5, 8.0)), ((17.5, 12.0), (17.5, 16.0)),
-            ];
-            for (a, b) in segs {
-                pen.line(&[a, b]);
+            // Dashed rounded square (corner pieces plus two dashes a side)
+            // around a filled square.
+            let pen = Pen { s: Stroke::new(1.6 * k, color), ..pen };
+            let (x0, y0, x1, y1, r) = (3.55, 3.55, 16.45, 16.45, 2.0);
+            let arc = |cx: f32, cy: f32, a0: f32| -> Vec<(f32, f32)> {
+                (0..=6).map(|i| {
+                    let a = a0 + std::f32::consts::FRAC_PI_2 * i as f32 / 6.0;
+                    (cx + r * a.cos(), cy + r * a.sin())
+                }).collect()
+            };
+            use std::f32::consts::PI;
+            let arm = 0.6;
+            for (cx, cy, a0, start, end) in [
+                (x0 + r, y0 + r, PI, (x0, y0 + r + arm), (x0 + r + arm, y0)),
+                (x1 - r, y0 + r, -PI / 2.0, (x1 - r - arm, y0), (x1, y0 + r + arm)),
+                (x1 - r, y1 - r, 0.0, (x1, y1 - r - arm), (x1 - r - arm, y1)),
+                (x0 + r, y1 - r, PI / 2.0, (x0 + r + arm, y1), (x0, y1 - r - arm)),
+            ] {
+                let mut pts = vec![start];
+                pts.extend(arc(cx, cy, a0));
+                pts.push(end);
+                pen.line(&pts);
             }
-            p.rect_filled(Rect::from_min_max(pen.pt(6.0, 6.0), pen.pt(14.0, 14.0)), 1.5 * k, color);
+            let (g, d) = (1.5, 1.6);
+            let s0 = x0 + r + arm + g;
+            for (a, b) in [(s0, s0 + d), (s0 + d + g, s0 + 2.0 * d + g)] {
+                pen.line(&[(a, y0), (b, y0)]);
+                pen.line(&[(a, y1), (b, y1)]);
+                pen.line(&[(x0, a), (x0, b)]);
+                pen.line(&[(x1, a), (x1, b)]);
+            }
+            p.rect_filled(Rect::from_min_max(pen.pt(6.05, 6.05), pen.pt(13.95, 13.95)), 0.9 * k, color);
         }
-        Icon::RailCursor => pen.fill(&[(5.5, 2.5), (5.5, 16.0), (8.8, 12.9), (11.2, 17.6), (13.4, 16.6), (11.0, 12.0), (15.6, 12.0)]),
+        Icon::RailCursor => {
+            // Solid arrow: head and tail as two convex parts.
+            pen.fill(&[(5.6, 2.8), (5.8, 14.4), (9.0, 11.9), (11.2, 11.5), (14.8, 11.1)]);
+            pen.fill(&[(8.1, 12.2), (10.5, 17.4), (13.1, 16.4), (10.9, 11.4)]);
+            p.circle_filled(pen.pt(11.8, 16.9), 1.35 * k, color);
+        }
         Icon::RailCameraLayout => {
-            pen.rrect(2.5, 3.5, 17.5, 15.0, 2.0);
-            p.circle_filled(pen.pt(13.5, 10.0), 1.6 * k, color);
-            pen.fill(&[(10.8, 15.0), (11.2, 12.9), (13.5, 12.2), (15.8, 12.9), (16.2, 15.0)]);
+            // Screen outline with a person over its bottom-right corner,
+            // cut out from the outline.
+            let pen = Pen { s: Stroke::new(1.6 * k, color), ..pen };
+            pen.rrect(0.9, 4.2, 16.3, 16.2, 2.1);
+            let bg = crate::theme::BG;
+            p.circle_filled(pen.pt(15.0, 9.3), 3.4 * k, bg);
+            p.rect_filled(Rect::from_min_max(pen.pt(9.8, 11.6), pen.pt(20.0, 17.6)), 4.0 * k, bg);
+            p.circle_filled(pen.pt(15.0, 9.3), 2.6 * k, color);
+            dome(p, &pen, 10.6, 19.4, 12.4, 16.4, color);
         }
         Icon::RailCameraStyle => {
-            for (a, b, c) in [((2.5, 6.5), (2.5, 2.5), (6.5, 2.5)), ((13.5, 2.5), (17.5, 2.5), (17.5, 6.5)), ((17.5, 13.5), (17.5, 17.5), (13.5, 17.5)), ((6.5, 17.5), (2.5, 17.5), (2.5, 13.5))] {
-                pen.line(&[a, b, c]);
+            // Viewfinder corners around a person.
+            let pen = Pen { s: Stroke::new(1.6 * k, color), ..pen };
+            let (x0, y0, x1, y1, a) = (3.2, 3.3, 16.8, 16.7, 3.2);
+            for (p0, c, p1) in [
+                ((x0, y0 + a), (x0, y0), (x0 + a, y0)),
+                ((x1 - a, y0), (x1, y0), (x1, y0 + a)),
+                ((x1, y1 - a), (x1, y1), (x1 - a, y1)),
+                ((x0 + a, y1), (x0, y1), (x0, y1 - a)),
+            ] {
+                // Rounded corner: approach and leave the corner with a small curve.
+                let lerp = |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                let (q0, q1) = (lerp(c, p0, 0.45), lerp(c, p1, 0.45));
+                let mut pts = vec![p0, q0];
+                for i in 1..6 {
+                    let t = i as f32 / 6.0;
+                    let m = lerp(lerp(q0, c, t), lerp(c, q1, t), t);
+                    pts.push(m);
+                }
+                pts.extend([q1, p1]);
+                pen.line(&pts);
             }
-            p.circle_filled(pen.pt(10.0, 8.2), 2.4 * k, color);
-            pen.fill(&[(5.8, 15.0), (6.6, 12.4), (10.0, 11.4), (13.4, 12.4), (14.2, 15.0)]);
+            p.circle_filled(pen.pt(10.0, 7.6), 2.3 * k, color);
+            dome(p, &pen, 6.0, 14.0, 10.9, 14.3, color);
         }
         Icon::RailCaptions => {
-            pen.closed(&[(3.0, 3.5), (17.0, 3.5), (17.0, 13.5), (9.0, 13.5), (5.5, 17.0), (5.5, 13.5), (3.0, 13.5)]);
-            pen.line(&[(6.0, 7.0), (14.0, 7.0)]);
-            pen.line(&[(6.0, 10.0), (11.5, 10.0)]);
+            // Speech bubble with a tail at the lower left and two dashed lines.
+            let pen = Pen { s: Stroke::new(1.6 * k, color), ..pen };
+            pen.rrect(2.7, 3.1, 17.3, 14.2, 2.5);
+            let bg = crate::theme::BG;
+            p.rect_filled(Rect::from_min_max(pen.pt(6.3, 13.2), pen.pt(9.3, 15.0)), 0.0, bg);
+            pen.line(&[(5.8, 14.2), (6.5, 17.1), (10.0, 14.2)]);
+            let thin = Pen { s: Stroke::new(1.0 * k, color), ..pen };
+            for (y, segs) in [(8.9, [(5.9, 9.6), (10.9, 14.2)]), (11.0, [(5.9, 7.5), (8.8, 14.2)])] {
+                for (a, b) in segs {
+                    thin.line(&[(a, y), (b, y)]);
+                }
+            }
         }
         Icon::RailTranscript => {
-            for x in [3.5, 7.0] {
-                p.circle_filled(pen.pt(x, 5.0), 1.5 * k, color);
-                pen.line(&[(x + 1.3, 5.2), (x + 0.6, 8.0)]);
+            // Filled "66" quote, two short lines beside it, two full lines below.
+            let pen = Pen { s: Stroke::new(1.6 * k, color), ..pen };
+            let thin = Pen { s: Stroke::new(1.25 * k, color), ..pen };
+            for cx in [4.9, 8.6] {
+                p.circle_filled(pen.pt(cx, 6.4), 1.65 * k, color);
+                thin.line(&[(cx - 1.2, 6.0), (cx - 1.1, 4.6), (cx - 0.3, 3.4), (cx + 1.0, 2.9)]);
             }
-            pen.line(&[(11.0, 5.0), (17.5, 5.0)]);
-            pen.line(&[(2.5, 11.0), (17.5, 11.0)]);
-            pen.line(&[(2.5, 16.0), (13.0, 16.0)]);
+            for (y, x0) in [(4.9, 12.4), (8.3, 12.4), (11.8, 3.4), (15.2, 3.4)] {
+                pen.line(&[(x0, y), (16.8, y)]);
+            }
         }
         Icon::RailAudio => {
-            pen.closed(&[(3.0, 7.5), (6.5, 7.5), (10.5, 4.0), (10.5, 16.0), (6.5, 12.5), (3.0, 12.5)]);
-            let arc: Vec<(f32, f32)> = (0..=12).map(|i| {
-                let a = -0.9 + i as f32 / 12.0 * 1.8;
-                (11.5 + 5.0 * a.cos(), 10.0 + 5.0 * a.sin())
+            let pen = Pen { s: Stroke::new(1.6 * k, color), ..pen };
+            pen.closed(&[(3.6, 7.2), (7.0, 7.2), (11.6, 3.9), (11.6, 16.1), (7.0, 12.8), (3.6, 12.8)]);
+            let arc: Vec<(f32, f32)> = (0..=10).map(|i| {
+                let a = -0.7 + i as f32 / 10.0 * 1.4;
+                (12.6 + 3.3 * a.cos(), 10.0 + 3.3 * a.sin())
             }).collect();
             pen.line(&arc);
         }
         Icon::RailShortcuts => {
-            // Command (⌘) glyph: four loops joined by a square.
-            pen.rrect(7.5, 7.5, 12.5, 12.5, 0.2);
-            for (cx, cy) in [(5.5, 5.5), (14.5, 5.5), (14.5, 14.5), (5.5, 14.5)] {
-                pen.circle(cx, cy, 2.0);
+            // Command glyph: a square whose sides run out into four loops.
+            let pen = Pen { s: Stroke::new(1.5 * k, color), ..pen };
+            let (a, b, r) = (7.6, 12.4, 2.05);
+            pen.line(&[(a, a - r), (a, b + r)]);
+            pen.line(&[(b, a - r), (b, b + r)]);
+            pen.line(&[(a - r, a), (b + r, a)]);
+            pen.line(&[(a - r, b), (b + r, b)]);
+            use std::f32::consts::PI;
+            // Each loop leaves a side of the square and comes back on the
+            // other side, sweeping three quarters of a circle outwards.
+            for (cx, cy, a0, dir) in [(a - r, a - r, 0.0f32, -1.0f32), (b + r, a - r, PI, 1.0), (b + r, b + r, PI, -1.0), (a - r, b + r, 0.0, 1.0)] {
+                let pts: Vec<(f32, f32)> = (0..=18).map(|i| {
+                    let t = a0 + dir * 1.5 * PI * i as f32 / 18.0;
+                    (cx + r * t.cos(), cy + r * t.sin())
+                }).collect();
+                pen.line(&pts);
             }
         }
         Icon::RailAnimation => {
-            let pts: Vec<(f32, f32)> = (0..=20).map(|i| {
-                let t = i as f32 / 20.0;
-                let x = 4.0 + 12.0 * t;
-                let y = 15.5 - 11.0 * (t * t * (3.0 - 2.0 * t));
-                (x - 2.0 * (t * std::f32::consts::PI * 2.0).sin(), y)
+            // S-curve between two filled end dots.
+            let pen = Pen { s: Stroke::new(1.35 * k, color), ..pen };
+            let (p0, p1, p2, p3) = ((5.9f32, 4.6f32), (5.6f32, 11.8f32), (14.4f32, 8.2f32), (14.1f32, 15.4f32));
+            let pts: Vec<(f32, f32)> = (0..=24).map(|i| {
+                let t = i as f32 / 24.0;
+                let u = 1.0 - t;
+                (
+                    u * u * u * p0.0 + 3.0 * u * u * t * p1.0 + 3.0 * u * t * t * p2.0 + t * t * t * p3.0,
+                    u * u * u * p0.1 + 3.0 * u * u * t * p1.1 + 3.0 * u * t * t * p2.1 + t * t * t * p3.1,
+                )
             }).collect();
             pen.line(&pts);
-            p.circle_filled(pen.pt(4.0, 15.5), 1.8 * k, color);
-            p.circle_filled(pen.pt(16.0, 4.5), 1.8 * k, color);
+            p.circle_filled(pen.pt(p0.0, p0.1), 2.5 * k, color);
+            p.circle_filled(pen.pt(p3.0, p3.1), 2.5 * k, color);
         }
         Icon::Mic => {
             pen.rrect(7.5, 2.5, 12.5, 11.5, 2.5);
@@ -435,6 +519,18 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             p.circle_filled(pen.pt(10.0, 10.0), 2.0 * k, color);
         }
     }
+}
+
+/// Filled half-ellipse (a person's shoulders) from x0..x1, top to bottom.
+fn dome(p: &Painter, pen: &Pen, x0: f32, x1: f32, top: f32, bottom: f32, color: Color32) {
+    let (cx, rx, ry) = ((x0 + x1) / 2.0, (x1 - x0) / 2.0, bottom - top);
+    let pts: Vec<egui::Pos2> = (0..=20)
+        .map(|i| {
+            let a = std::f32::consts::PI * (1.0 + i as f32 / 20.0);
+            pen.pt(cx + rx * a.cos(), bottom + ry * a.sin())
+        })
+        .collect();
+    p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
 
 /// Lays out `icon` followed by `text` (either may be empty) centred in `rect`.

@@ -125,14 +125,15 @@ pub fn show(
                 } else if resp.hovered() {
                     Color32::WHITE
                 } else {
-                    Color32::from_rgb(0xd6, 0xd6, 0xda)
+                    // Screen Studio's idle icons are white, dimmed slightly
+                    // so hover still reads.
+                    Color32::from_rgb(0xec, 0xec, 0xef)
                 };
-                if resp.hovered() && enabled && !active {
-                    ui.painter().rect_filled(rect.shrink(2.0), CornerRadius::same(8), Color32::from_white_alpha(8));
-                }
-                icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(19.0, 19.0)), icon, color);
+                // Icons ~15pt in a 23pt box; active tab gets the lavender dot
+                // level with the icon's centre, as in the v4 rail.
+                icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(23.0, 23.0)), icon, color);
                 if active {
-                    ui.painter().circle_filled(pos2(rect.right() - 3.0, rect.center().y - 4.0), 2.0, theme::KNOB);
+                    ui.painter().circle_filled(pos2(rect.center().x + 13.5, rect.center().y), 2.1, theme::KNOB);
                 }
                 let tip = format!("{name}  (Ctrl+{})", i + 1);
                 let resp = if enabled { resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp.on_hover_text(format!("{name}: {}", disabled_reason(t))) };
