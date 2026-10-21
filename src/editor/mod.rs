@@ -98,6 +98,11 @@ pub struct Editor {
     /// Preview resolution divisor (Preview quality).
     preview_quality: u32,
     crop_tool: Option<CropTool>,
+    /// Undo history: settled states before each change, and undone ones.
+    history: Vec<EditConfig>,
+    future: Vec<EditConfig>,
+    /// The last settled state (a change settles when no mouse button is held).
+    committed: EditConfig,
     /// Camera track player and the frame index on the GPU.
     camera: Option<(Player, i64)>,
     /// Background-removal matte player, in step with the camera.
@@ -135,6 +140,7 @@ impl Editor {
             (p, -1)
         });
         let matte = open_matte(&dir, &rec, &edit, start, ctx);
+        let saved_copy = edit.clone();
         Ok(Self {
             name: paths.name(),
             dir,
@@ -152,6 +158,9 @@ impl Editor {
             preview_zoom: 1.0,
             preview_quality: Settings::load().preview_quality.clamp(1, 4),
             crop_tool: None,
+            history: vec![],
+            future: vec![],
+            committed: saved_copy,
             camera,
             matte,
             camera_changed: Instant::now(),
@@ -745,6 +754,16 @@ impl Editor {
                         {
                             self.export = Some(ExportDialog { settings: Settings::load(), job: None, picking_dir: None, saving: None });
                         }
+                        ui.add_space(10.0);
+                        // Redo and undo, dim when there is nothing to do.
+                        let (can_undo, can_redo) = (!self.history.is_empty(), !self.future.is_empty());
+                        if toolbar_button(ui, Icon::Redo, "", "", false, can_redo).on_hover_text("Redo  (Ctrl+Shift+Z)").clicked() {
+                            self.redo();
+                        }
+                        if toolbar_button(ui, Icon::Undo, "", "", false, can_undo).on_hover_text("Undo  (Ctrl+Z)").clicked() {
+                            self.undo();
+                        }
+
                         ui.centered_and_justified(|ui| self.title(ui));
                     });
                 });
@@ -846,6 +865,17 @@ impl Editor {
 
         self.export_dialog(&ctx);
 
+        // Undo history: a change settles once no mouse button is held, so a
+        // whole drag or slider move is one step.
+        if self.edit != self.committed && !ctx.input(|i| i.pointer.any_down()) {
+            let before = std::mem::replace(&mut self.committed, self.edit.clone());
+            self.history.push(before);
+            if self.history.len() > 200 {
+                self.history.remove(0);
+            }
+            self.future.clear();
+        }
+
         // Rebuild motion tracks when edits change. Nothing is written to
         // disk until the project is saved.
         if self.edit != self.tracks_for {
@@ -889,6 +919,14 @@ impl Editor {
         }
         if ctx.egui_wants_keyboard_input() {
             return;
+        }
+        // Ctrl+Z undoes; Ctrl+Shift+Z or Ctrl+Y redoes.
+        let redo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::Z) || i.consume_key(egui::Modifiers::COMMAND, Key::Y));
+        let undo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Z));
+        if redo {
+            self.redo();
+        } else if undo {
+            self.undo();
         }
         if self.crop_tool.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
             self.open_crop_tool();
@@ -941,6 +979,28 @@ impl Editor {
             self.seek(self.time + step);
         }
         if esc {
+            self.selected = None;
+        }
+    }
+
+    pub fn undo(&mut self) {
+        if self.edit != self.committed {
+            return; // a change is still in progress
+        }
+        if let Some(prev) = self.history.pop() {
+            self.future.push(std::mem::replace(&mut self.committed, prev.clone()));
+            self.edit = prev;
+            self.selected = None;
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if self.edit != self.committed {
+            return;
+        }
+        if let Some(next) = self.future.pop() {
+            self.history.push(std::mem::replace(&mut self.committed, next.clone()));
+            self.edit = next;
             self.selected = None;
         }
     }

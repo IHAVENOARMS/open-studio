@@ -30,6 +30,8 @@ pub enum Icon {
     Scissors,
     Loupe,
     ZoomAdd,
+    Undo,
+    Redo,
     AspectLayout,
     Crop,
     Quality,
@@ -466,6 +468,18 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 }
                 p.circle_filled(pen.pt(cx, cy), 1.0 * k, color);
             }
+        }
+        Icon::Undo | Icon::Redo => {
+            // A hooked arrow: back (undo) or forward (redo).
+            let flip = |x: f32| if icon == Icon::Redo { 20.0 - x } else { x };
+            let mut pts = vec![(flip(4.5), 8.0)];
+            pts.extend((0..=12).map(|i| {
+                let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 12.0;
+                (flip(11.0 + 4.6 * a.cos()), 12.6 + 4.6 * a.sin())
+            }));
+            pts.push((flip(8.0), 17.2));
+            pen.line(&pts);
+            pen.line(&[(flip(7.6), 4.8), (flip(4.5), 8.0), (flip(7.6), 11.2)]);
         }
         // Preview toolbar icons (Screen Studio v4).
         Icon::AspectLayout => {
