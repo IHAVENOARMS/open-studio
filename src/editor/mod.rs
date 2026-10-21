@@ -385,33 +385,59 @@ impl Editor {
         let Some(why) = self.leaving else { return Action::None };
         let mut out = Action::None;
         let new = self.is_new();
-        egui::Modal::new(egui::Id::NULL.with("leave-prompt")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            ui.spacing_mut().item_spacing.y = 8.0;
-            let title = if new { "Save this recording?".to_string() } else { format!("Save changes to \u{201c}{}\u{201d}?", self.name) };
-            ui.label(egui::RichText::new(title).font(theme::semibold(16.0)));
-            ui.label(
-                egui::RichText::new(if new {
-                    "It hasn't been saved yet. If you don't save it, the recording is deleted."
-                } else {
-                    "Your changes since the last save will be lost if you don't save them."
-                })
-                .size(13.0)
-                .color(theme::TEXT_DIM),
-            );
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let discard = if new { "Delete" } else { "Don't save" };
-                if ui.add(egui::Button::new(egui::RichText::new(discard).color(theme::RECORD)).min_size(egui::vec2(96.0, 32.0))).clicked() {
-                    if new {
-                        let _ = trash(&self.dir);
+        // Drawn like the macOS alert Screen Studio shows: app icon, centred
+        // bold title and message, full-width stacked buttons, default on top.
+        let frame = egui::Frame::new()
+            .fill(egui::Color32::from_rgb(0x26, 0x26, 0x29))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_white_alpha(22)))
+            .corner_radius(egui::CornerRadius::same(16))
+            .inner_margin(egui::Margin { left: 22, right: 22, top: 24, bottom: 20 })
+            .shadow(egui::epaint::Shadow { offset: [0, 18], blur: 50, spread: 0, color: egui::Color32::from_black_alpha(150) });
+        egui::Modal::new(egui::Id::NULL.with("leave-prompt"))
+            .frame(frame)
+            .backdrop_color(egui::Color32::from_black_alpha(110))
+            .show(ctx, |ui| {
+                let w = 248.0;
+                ui.set_width(w);
+                ui.vertical_centered(|ui| {
+                    // App icon: a lavender record ring on an indigo squircle.
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(56.0, 56.0), Sense::hover());
+                    let p = ui.painter();
+                    p.rect_filled(r, egui::CornerRadius::same(14), egui::Color32::from_rgb(0x1d, 0x16, 0x3f));
+                    p.rect_stroke(r, egui::CornerRadius::same(14), egui::Stroke::new(1.0, egui::Color32::from_white_alpha(30)), egui::StrokeKind::Inside);
+                    p.circle_stroke(r.center(), 15.0, egui::Stroke::new(5.0, theme::KNOB));
+                    p.circle_filled(r.center(), 6.0, theme::ACCENT);
+                    ui.add_space(14.0);
+                    let title = if new { "Save this recording?".to_string() } else { format!("Save changes to \u{201c}{}\u{201d}?", self.name) };
+                    ui.label(egui::RichText::new(title).font(theme::semibold(14.0)).color(egui::Color32::WHITE));
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(if new {
+                            "This recording hasn't been saved. If you don't save it, it will be deleted."
+                        } else {
+                            "Your changes will be lost if you don't save them."
+                        })
+                        .size(12.0)
+                        .color(egui::Color32::from_rgb(0xb4, 0xb4, 0xb9)),
+                    );
+                    if let Some((m, _)) = &self.status {
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new(m).size(11.5).color(theme::RECORD));
                     }
-                    self.edit = self.saved.clone();
-                    self.leaving = None;
-                    out = if new && why == Leaving::Home { Action::GoHome } else { leave_action(why) };
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::primary_button(ui, "Save").clicked() {
+                    ui.add_space(18.0);
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    let button = |ui: &mut egui::Ui, label: &str, fill: egui::Color32, text: egui::Color32| {
+                        ui.add_sized(
+                            [w, 30.0],
+                            egui::Button::new(egui::RichText::new(label).size(13.0).color(text))
+                                .fill(fill)
+                                .stroke(egui::Stroke::NONE)
+                                .corner_radius(egui::CornerRadius::same(8)),
+                        )
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    };
+                    let grey = egui::Color32::from_rgb(0x3a, 0x3a, 0x3e);
+                    if button(ui, "Save", theme::ACCENT, egui::Color32::WHITE).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
                         match self.save() {
                             Ok(()) => {
                                 self.leaving = None;
@@ -420,15 +446,20 @@ impl Editor {
                             Err(e) => self.notify(format!("Saving failed: {e:#}")),
                         }
                     }
-                    if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(80.0, 32.0))).clicked() {
+                    let discard = if new { "Delete" } else { "Don't Save" };
+                    if button(ui, discard, grey, egui::Color32::from_rgb(0xff, 0x6b, 0x61)).clicked() {
+                        if new {
+                            let _ = trash(&self.dir);
+                        }
+                        self.edit = self.saved.clone();
+                        self.leaving = None;
+                        out = leave_action(why);
+                    }
+                    if button(ui, "Cancel", grey, egui::Color32::WHITE).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
                         self.leaving = None;
                     }
                 });
             });
-            if let Some((m, _)) = &self.status {
-                ui.label(egui::RichText::new(m).size(12.0).color(theme::RECORD));
-            }
-        });
         out
     }
 
