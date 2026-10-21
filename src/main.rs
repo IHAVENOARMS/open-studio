@@ -196,7 +196,9 @@ fn visit_points(points: &str) -> Result<()> {
     let mut dev = VirtualDevice::builder()?.name("open-studio test pointer").with_relative_axes(&axes)?.with_keys(&keys)?.build()?;
     std::thread::sleep(std::time::Duration::from_millis(400));
     let orig = record::hyprland::cursor_pos()?;
-    let warp = |x: f64, y: f64| record::hyprland::request(&format!("dispatch hl.dsp.cursor.move({{x={x},y={y}}})"));
+    let warp = |x: f64, y: f64| {
+        record::hyprland::dispatch(&format!("hl.dsp.cursor.move({{x={x},y={y}}})"), &format!("movecursor {x} {y}"))
+    };
     for p in points.split_whitespace() {
         let Some((x, y)) = p.split_once(',') else { continue };
         let (x, y): (f64, f64) = (x.parse()?, y.parse()?);

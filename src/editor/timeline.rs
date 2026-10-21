@@ -8,6 +8,8 @@ use crate::util::format_time;
 use egui::{Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 const EDGE: f32 = 7.0;
+/// How far a hovered zoom segment rises, in points.
+const LIFT: f32 = 4.0;
 const MIN_SEG: f64 = 0.3;
 
 #[derive(Clone, Copy, Debug)]
@@ -185,8 +187,29 @@ pub fn show(
         Hit::Other
     };
 
+    // Segments lift while hovered or being dragged, and settle back down
+    // when the pointer leaves.
+    let hovered_seg = match (state.drag, hover.map(|h| hit(h, edit))) {
+        (None, Some(Hit::Segment(i, _))) => Some(i),
+        _ => None,
+    };
+    let dragged_seg = match state.drag {
+        Some(Drag::Move { idx, .. } | Drag::ResizeStart(idx) | Drag::ResizeEnd(idx)) => Some(idx),
+        _ => None,
+    };
     for (i, s) in edit.zoom_segments.iter().enumerate() {
-        let r = Rect::from_x_y_ranges(geo.x(s.start)..=geo.x(s.end), zoom.y_range());
+        let up = hovered_seg == Some(i) || dragged_seg == Some(i);
+        let lift = smooth(ui, ui.scope_id().with(("zoom-lift", i)), if up { 1.0 } else { 0.0 });
+        let r = Rect::from_x_y_ranges(geo.x(s.start)..=geo.x(s.end), zoom.y_range()).translate(vec2(0.0, -LIFT * lift));
+        if lift > 0.01 {
+            let shadow = egui::epaint::Shadow {
+                offset: [0, (3.0 + 3.0 * lift) as i8],
+                blur: (6.0 + 10.0 * lift) as u8,
+                spread: 0,
+                color: Color32::from_black_alpha((150.0 * lift) as u8),
+            };
+            p.add(shadow.as_shape(r, CornerRadius::same(10)));
+        }
         paint_zoom(&p, r, s, *selected == Some(i));
     }
     if edit.zoom_segments.is_empty() && hover.is_none_or(|h| !zoom.contains(h)) {
@@ -436,4 +459,22 @@ fn gradient_bar(
     p.add(mesh);
     // The anti-aliased border also hides the mesh's stair-stepped corners.
     p.rect_stroke(r, CornerRadius::same(rad as u8), Stroke::new(1.0, border.gamma_multiply(alpha)), StrokeKind::Inside);
+}
+
+/// Exponential approach to `target` (ease-out in both directions), stored per
+/// id across frames. Keeps repainting until settled.
+fn smooth(ui: &Ui, id: egui::Id, target: f32) -> f32 {
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+    let v = ui.data_mut(|d| {
+        let v = d.get_temp_mut_or(id, target);
+        *v += (target - *v) * (1.0 - (-dt * 14.0).exp());
+        if (target - *v).abs() < 0.002 {
+            *v = target;
+        }
+        *v
+    });
+    if v != target {
+        ui.ctx().request_repaint();
+    }
+    v
 }

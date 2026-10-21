@@ -226,7 +226,7 @@ fn supervise(
     let tray = control.as_ref().and_then(|c| c.tray());
     let pid = std::process::id();
     if hide {
-        let _ = hyprland::request(&format!("dispatch movetoworkspacesilent special:open-studio,pid:{pid}"));
+        let _ = hyprland::move_window_to_workspace(pid, "special:open-studio", false);
     }
     let mut failure = None;
     loop {
@@ -243,7 +243,7 @@ fn supervise(
     *phase.lock().unwrap() = RecPhase::Saving;
     if hide {
         if let Ok(ws) = hyprland::active_workspace() {
-            let _ = hyprland::request(&format!("dispatch movetoworkspace {ws},pid:{pid}"));
+            let _ = hyprland::move_window_to_workspace(pid, &ws.to_string(), true);
         }
     }
     ctx.request_repaint();

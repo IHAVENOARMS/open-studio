@@ -78,3 +78,25 @@ pub fn active_workspace() -> Result<i64> {
     let w: Workspace = serde_json::from_str(&request("j/activeworkspace")?)?;
     Ok(w.id)
 }
+
+/// Runs a dispatcher. Hyprland 0.56+ takes Lua (`hl.dsp...`); older versions
+/// take the classic `dispatch name args` form, used as a fallback.
+pub fn dispatch(lua: &str, legacy: &str) -> Result<()> {
+    let reply = request(&format!("dispatch {lua}"))?;
+    if reply.trim() == "ok" {
+        return Ok(());
+    }
+    let reply = request(&format!("dispatch {legacy}"))?;
+    if reply.trim() == "ok" { Ok(()) } else { Err(anyhow!("hyprctl dispatch failed: {}", reply.trim())) }
+}
+
+/// Moves the window owned by `pid` to a workspace without following it.
+pub fn move_window_to_workspace(pid: u32, workspace: &str, follow: bool) -> Result<()> {
+    let lua = format!("hl.dsp.window.move({{workspace=\"{workspace}\", follow={follow}, window=\"pid:{pid}\"}})");
+    let legacy = if follow {
+        format!("movetoworkspace {workspace},pid:{pid}")
+    } else {
+        format!("movetoworkspacesilent {workspace},pid:{pid}")
+    };
+    dispatch(&lua, &legacy)
+}
