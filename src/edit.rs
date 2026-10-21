@@ -504,7 +504,7 @@ pub struct CameraSettings {
 /// Default camera height (fraction of the canvas) and its height while the
 /// screen is zoomed in.
 pub const SIZE_DEFAULT: f64 = 0.38;
-pub const ZOOM_SIZE_DEFAULT: f64 = 0.33;
+pub const ZOOM_SIZE_DEFAULT: f64 = 0.30;
 
 impl Default for CameraSettings {
     fn default() -> Self {
@@ -755,10 +755,10 @@ impl EditConfig {
     pub fn load_or_create(dir: &Path, rec: &Recording) -> Self {
         if let Ok(text) = std::fs::read_to_string(dir.join(PROJECT_FILE)) {
             if let Ok(mut cfg) = serde_json::from_str::<Self>(&text) {
-                // Projects saved with the first camera defaults (30%, and 20%
-                // while zoomed) get the current, larger ones.
+                // Projects saved with earlier camera defaults get the current ones.
                 let c = &mut cfg.camera;
-                if (c.size - 0.3).abs() < 1e-9 && (c.zoom_size - 0.2).abs() < 1e-9 {
+                let old = |s: f64, z: f64| (c.size - s).abs() < 1e-9 && (c.zoom_size - z).abs() < 1e-9;
+                if old(0.3, 0.2) || old(0.38, 0.33) {
                     c.size = SIZE_DEFAULT;
                     c.zoom_size = ZOOM_SIZE_DEFAULT;
                 }
