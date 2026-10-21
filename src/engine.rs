@@ -391,6 +391,8 @@ pub struct CameraFrame {
     pub shadow: f64,
     /// Part of the camera picture shown: x, y, w, h (normalized).
     pub crop: [f64; 4],
+    /// 0..1, background removed (uses the matte).
+    pub cutout: f64,
 }
 
 /// Camera crop at camera time `t`: the chosen crop, moved to keep the face
@@ -590,6 +592,8 @@ pub struct Placement {
     pub screen: [f64; 3],
     /// 1 = the screen zoom is switched off (split, fullscreen).
     pub no_zoom: f64,
+    /// 1 = background removed (Cutout layout).
+    pub cutout: f64,
 }
 
 impl Placement {
@@ -601,6 +605,7 @@ impl Placement {
             opacity: l(a.opacity, b.opacity),
             screen: [l(a.screen[0], b.screen[0]), l(a.screen[1], b.screen[1]), l(a.screen[2], b.screen[2])],
             no_zoom: l(a.no_zoom, b.no_zoom),
+            cutout: l(a.cutout, b.cutout),
         }
     }
 }
@@ -615,6 +620,7 @@ fn layout_at(edit: &EditConfig, t: f64) -> (crate::edit::CameraLayoutKind, [u8; 
     let kind = match cam.layout {
         CameraDefaultLayout::Overlay => CameraLayoutKind::Default,
         CameraDefaultLayout::Split => CameraLayoutKind::Split,
+        CameraDefaultLayout::Cutout => CameraLayoutKind::Cutout,
     };
     (kind, cam.position, None)
 }
@@ -659,15 +665,30 @@ pub fn placement(
     match kind {
         CameraLayoutKind::Default => {
             let r = overlay(1.0);
-            Placement { radius: round(&r), camera: r, opacity: 1.0, screen: identity, no_zoom: 0.0 }
+            Placement { radius: round(&r), camera: r, opacity: 1.0, screen: identity, no_zoom: 0.0, cutout: 0.0 }
+        }
+        CameraLayoutKind::Cutout => {
+            // The person stands on the bottom edge, larger than the bubble,
+            // in the camera's own proportions so nothing is cut off.
+            let car = (camera_aspect * cam.crop[2] / cam.crop[3].max(0.01)).clamp(0.3, 3.0);
+            let mut h = (size.unwrap_or(cam.size) * 1.8).min(0.95);
+            let mut w = h * car;
+            if w > a * 0.7 {
+                w = a * 0.7;
+                h = w / car;
+            }
+            let m = 0.02;
+            let x = [m, (a - w) / 2.0, a - w - m][position[0].min(2) as usize];
+            let r = Rect { x, y: 1.0 - h, w, h };
+            Placement { radius: 0.0, camera: r, opacity: 1.0, screen: identity, no_zoom: 0.0, cutout: 1.0 }
         }
         CameraLayoutKind::Hide => {
             let r = overlay(0.8);
-            Placement { radius: round(&r), camera: r, opacity: 0.0, screen: identity, no_zoom: 0.0 }
+            Placement { radius: round(&r), camera: r, opacity: 0.0, screen: identity, no_zoom: 0.0, cutout: 0.0 }
         }
         CameraLayoutKind::Fullscreen => {
             let r = Rect { x: pad, y: pad, w: a - 2.0 * pad, h: 1.0 - 2.0 * pad };
-            Placement { camera: r, radius: screen_radius, opacity: 1.0, screen: identity, no_zoom: 1.0 }
+            Placement { camera: r, radius: screen_radius, opacity: 1.0, screen: identity, no_zoom: 1.0, cutout: 0.0 }
         }
         CameraLayoutKind::Split => {
             let area = Rect { x: pad, y: pad, w: a - 2.0 * pad, h: 1.0 - 2.0 * pad };
@@ -697,6 +718,7 @@ pub fn placement(
                 opacity: 1.0,
                 screen: [screen.x - s * card.x, screen.y - s * card.y, s],
                 no_zoom: 1.0,
+                cutout: 0.0,
             }
         }
     }
@@ -750,6 +772,7 @@ fn apply_camera_layout(fs: &mut FrameState, edit: &EditConfig, layout: &Layout, 
             mirror: edit.camera.mirror,
             shadow: edit.camera.shadow,
             crop: edit.camera.crop,
+            cutout: p.cutout,
         });
     }
 }

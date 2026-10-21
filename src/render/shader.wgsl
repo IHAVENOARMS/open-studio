@@ -340,11 +340,13 @@ struct CameraU {
     grade0: vec4f,   // look: exposure, contrast, saturation, temperature
     grade1: vec4f,   // look: tint, fade, split toning, mono
     grade2: vec4f,   // strength, LUT size (0 = none)
+    cut: vec4f,      // cutout amount, matte available, shadow strength
 };
 
 @group(0) @binding(0) var<uniform> camu: CameraU;
 @group(0) @binding(1) var camera_tex: texture_2d<f32>;
 @group(0) @binding(3) var camera_lut: texture_2d<f32>;
+@group(0) @binding(4) var camera_matte: texture_2d<f32>;
 
 fn to_srgb(c: vec3f) -> vec3f {
     return select(1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3f(0.0031308));
@@ -425,9 +427,21 @@ fn fs_camera(in: VsOut) -> @location(0) vec4f {
     }
     let blur = max(camu.rect.z, camu.rect.w) * 0.06;
     let ds = sd_round_rect(p - center - vec2f(0.0, blur * 0.35), half, r);
-    let sa = camu.params.z * 0.55 * (1.0 - smoothstep(-blur * 0.4, blur, ds));
-    let alpha = cover + sa * (1.0 - cover);
-    return vec4f(c * cover, alpha) * camu.params.y;
+    var sa = camu.params.z * 0.55 * (1.0 - smoothstep(-blur * 0.4, blur, ds));
+    var cov = cover;
+    let cut = camu.cut.x * camu.cut.y;
+    if (cut > 0.0) {
+        // Cutout: the matte is the alpha (no rounded frame), and the shadow
+        // follows the person: a blurred matte a little lower and to the side.
+        let inside = clamp(0.5 - sd_round_rect(p - center, half, 0.0), 0.0, 1.0);
+        let m = to_srgb(textureSampleLevel(camera_matte, samp, suv, 0.0).rgb).r;
+        cov = mix(cover, inside * m, cut);
+        let off = vec2f(0.012, -0.02) * (camu.uv.zw - camu.uv.xy);
+        let sm = to_srgb(textureSampleLevel(camera_matte, samp, suv + off, 3.0).rgb).r * inside;
+        sa = mix(sa, camu.cut.z * 0.45 * sm, cut);
+    }
+    let alpha = cov + sa * (1.0 - cov);
+    return vec4f(c * cov, alpha) * camu.params.y;
 }
 
 // ---- Mipmap generation ---------------------------------------------------

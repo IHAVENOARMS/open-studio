@@ -93,6 +93,8 @@ pub struct Editor {
     player: Player,
     /// Camera track player and the frame index on the GPU.
     camera: Option<(Player, i64)>,
+    /// Background-removal matte player, in step with the camera.
+    matte: Option<(Player, i64)>,
     /// When the camera picture last changed during playback (watchdog).
     camera_changed: Instant,
     audio: audio::AudioPreview,
@@ -125,6 +127,7 @@ impl Editor {
             p.seek((start - c.offset - edit.camera.delay).max(0.0));
             (p, -1)
         });
+        let matte = open_matte(&dir, &rec, &edit, start, ctx);
         Ok(Self {
             name: paths.name(),
             dir,
@@ -139,6 +142,7 @@ impl Editor {
             edit,
             player,
             camera,
+            matte,
             camera_changed: Instant::now(),
             audio,
             waveform: audio::envelope_async(&rec, ctx.clone()),
@@ -179,13 +183,15 @@ impl Editor {
     /// Keeps the camera player on the playhead: playing from `now`, or
     /// paused at the current time.
     fn camera_follow(&self, now: Option<Instant>) {
-        let (Some((p, _)), Some(c)) = (&self.camera, &self.rec.camera) else { return };
+        let Some(c) = &self.rec.camera else { return };
         let t = (self.time - c.offset - self.edit.camera.delay).max(0.0);
-        match now {
-            Some(at) => p.play(t, at),
-            None => {
-                p.pause();
-                p.seek(t);
+        for (p, _) in [&self.camera, &self.matte].into_iter().flatten() {
+            match now {
+                Some(at) => p.play(t, at),
+                None => {
+                    p.pause();
+                    p.seek(t);
+                }
             }
         }
     }
@@ -257,7 +263,7 @@ impl Editor {
             &[
                 (Icon::CamPip, "Camera overlay", 10),
                 (Icon::CamSplit, "Split screen", 11),
-                (Icon::CamCutout, "Camera cutout (needs background removal, not available yet)", 14),
+                (Icon::CamCutout, "Camera cutout: you without your background", 14),
                 (Icon::CamFull, "Camera fullscreen", 12),
                 (Icon::CamHidden, "Hide camera", 13),
             ],
@@ -280,7 +286,7 @@ impl Editor {
             }
             for (icon, tip, action) in g.iter().copied() {
                 let r = egui::Rect::from_min_size(egui::pos2(pill.left() + 5.0, y + 1.0), egui::vec2(40.0, step - 2.0));
-                let enabled = action < 10 || (has_camera && action != 14);
+                let enabled = action < 10 || has_camera;
                 let resp = ui.interact(r, ui.scope_id().with(("tool", tip)), egui::Sense::click());
                 if enabled && resp.hovered() {
                     ui.painter().rect_filled(r, 10.0, egui::Color32::from_white_alpha(14));
@@ -291,7 +297,7 @@ impl Editor {
                 let resp = if enabled {
                     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
                 } else {
-                    resp.on_hover_text(if action == 14 { tip.to_string() } else { format!("{tip}: record with a camera to use this") })
+                    resp.on_hover_text(format!("{tip}: record with a camera to use this"))
                 };
                 if enabled && resp.clicked() {
                     clicked = Some(action);
@@ -308,6 +314,10 @@ impl Editor {
             Some(11) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Split),
             Some(12) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Fullscreen),
             Some(13) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Hide),
+            Some(14) => {
+                self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Cutout);
+                self.sidebar.camera.start_cutout(&self.rec, ui.ctx());
+            }
             _ => {}
         }
     }
@@ -758,6 +768,15 @@ impl Editor {
                     if std::mem::take(&mut self.sidebar.camera.face_ready) {
                         self.tracks = Tracks::build(&self.rec, &self.edit);
                     }
+                    // Background removal finished: pick up the matte.
+                    if std::mem::take(&mut self.sidebar.camera.cutout_ready) {
+                        if let Ok(fresh) = Recording::load(&self.dir) {
+                            self.rec.camera = fresh.camera;
+                        }
+                        let ctx = ui.ctx().clone();
+                        self.matte = open_matte(&self.dir, &self.rec, &self.edit, self.time, &ctx);
+                        self.camera_follow(self.playing.map(|_| Instant::now()));
+                    }
                     if let Some(t) = sidebar::show(ui, &mut self.sidebar, &mut self.edit, &mut self.tab, &mut self.selected, &self.rec, self.time) {
                         self.seek(t);
                     }
@@ -903,6 +922,14 @@ impl Editor {
         let ppp = ui.ctx().pixels_per_point();
         let px = (((size.x * ppp) as u32).max(2), ((size.y * ppp) as u32).max(2));
 
+        if let Some((p, shown)) = &mut self.matte {
+            if let Some(f) = p.latest() {
+                if f.index != *shown {
+                    self.comp.upload_matte_frame(&f.rgba, f.width, f.height);
+                    *shown = f.index;
+                }
+            }
+        }
         let mut camera_stalled = false;
         if let Some((p, shown)) = &mut self.camera {
             if let Some(f) = p.latest() {
@@ -1263,6 +1290,15 @@ impl Editor {
 
 /// Moves a project to the desktop trash (recoverable), or deletes it when
 /// no trash is available.
+/// The matte player, when the recording has a background-removal matte.
+fn open_matte(dir: &std::path::Path, rec: &Recording, edit: &EditConfig, start: f64, ctx: &egui::Context) -> Option<(Player, i64)> {
+    let c = rec.camera.as_ref()?;
+    let file = c.matte.as_ref()?;
+    let p = Player::new(dir.join(file), crate::cutout::matte_size(c.width, c.height), c.fps, ctx.clone());
+    p.seek((start - c.offset - edit.camera.delay).max(0.0));
+    Some((p, -1))
+}
+
 struct Toast {
     title: String,
     detail: String,

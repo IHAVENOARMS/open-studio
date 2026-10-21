@@ -327,7 +327,7 @@ impl Recorder {
         match camera_result {
             Some(Ok(c)) => {
                 let offset = if paused_clock { (c.first_frame_ns - t0) as f64 / 1e9 } else { 0.0 };
-                rec.camera = Some(crate::project::CameraTrack { file: CAMERA_FILE.into(), width: c.width, height: c.height, offset, fps: CAMERA_FPS });
+                rec.camera = Some(crate::project::CameraTrack { file: CAMERA_FILE.into(), width: c.width, height: c.height, offset, fps: CAMERA_FPS, matte: None });
             }
             Some(Err(e)) => {
                 eprintln!("open-studio: camera not recorded: {e}");

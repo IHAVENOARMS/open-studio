@@ -399,6 +399,8 @@ pub enum CameraLayoutKind {
     Fullscreen,
     /// Screen only.
     Hide,
+    /// Just the person (background removed), in front of the screen.
+    Cutout,
 }
 
 impl CameraLayoutKind {
@@ -408,6 +410,7 @@ impl CameraLayoutKind {
             Self::Split => "Split screen",
             Self::Fullscreen => "Fullscreen",
             Self::Hide => "Hide camera",
+            Self::Cutout => "Cutout",
         }
     }
 }
@@ -417,6 +420,8 @@ impl CameraLayoutKind {
 pub enum CameraDefaultLayout {
     Overlay,
     Split,
+    /// Background removed, person in front of the screen.
+    Cutout,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

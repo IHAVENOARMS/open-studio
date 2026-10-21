@@ -116,6 +116,15 @@ pub fn export(
         }
         None => None,
     };
+    // Background-removal matte, stepped with the camera.
+    let mut matte = match rec.camera.as_ref().and_then(|c| c.matte.as_ref().map(|m| (c, m))) {
+        Some((c, m)) => {
+            let t0 = cam_time(times[0], c);
+            let d = Decoder::open(&dir.join(m), t0, crate::cutout::matte_size(c.width, c.height), None)?;
+            Some((d, (t0 * c.fps as f64).round() as i64 - 1, Vec::new(), c.clone()))
+        }
+        None => None,
+    };
 
     for (i, &t) in times.iter().enumerate() {
         let i = i as u64;
@@ -152,6 +161,20 @@ pub fn export(
             }
             if fresh {
                 comp.upload_camera_frame(buf, dec.width, dec.height);
+            }
+        }
+        if let Some((dec, index, buf, track)) = &mut matte {
+            let want = (cam_time(t, track) * track.fps as f64 + 1e-6).floor() as i64;
+            let mut fresh = false;
+            while *index < want {
+                if !dec.read(buf)? {
+                    break;
+                }
+                *index += 1;
+                fresh = true;
+            }
+            if fresh {
+                comp.upload_matte_frame(buf, dec.width, dec.height);
             }
         }
         let fs = frame_state(rec, edit, &tracks, t, opts.fps as f64);

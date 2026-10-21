@@ -565,6 +565,7 @@ fn paint_layout(p: &egui::Painter, r: Rect, seg: &CameraLayoutSegment, selected:
         CameraLayoutKind::Split => Icon::CamSplit,
         CameraLayoutKind::Fullscreen => Icon::CamFull,
         CameraLayoutKind::Hide => Icon::Window,
+        CameraLayoutKind::Cutout => Icon::CamCutout,
     };
     if r.width() > 70.0 {
         p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Layout", egui::FontId::proportional(12.0), Color32::from_white_alpha(120));

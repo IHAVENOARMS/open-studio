@@ -51,6 +51,9 @@ pub struct CameraTrack {
     pub offset: f64,
     #[serde(default = "default_camera_fps")]
     pub fps: u32,
+    /// Background-removal matte (greyscale video, same timing), once made.
+    #[serde(default)]
+    pub matte: Option<String>,
 }
 
 fn default_camera_fps() -> u32 {

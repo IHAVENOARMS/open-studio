@@ -5,6 +5,7 @@ mod cursor_themes;
 mod editor;
 mod settings;
 mod shortcuts;
+mod cutout;
 mod face;
 mod theme;
 mod voice;
@@ -109,6 +110,9 @@ enum Cmd {
     /// Mirror the first Android device, record its window briefly, report (development aid).
     #[command(hide = true)]
     DebugDevice,
+    /// Remove the camera background of a project (development aid).
+    #[command(hide = true)]
+    DebugCutout { project: PathBuf },
     /// Run face tracking on a project's camera video (development aid).
     #[command(hide = true)]
     DebugFace { project: PathBuf },
@@ -231,6 +235,12 @@ fn main() -> Result<()> {
             let rec = project::Recording::load(&dir)?;
             println!("recorded {}x{} {:.2}s kind={}", rec.width, rec.height, rec.duration, rec.source.kind);
             std::fs::remove_dir_all(&dir)?;
+        }
+        Some(Cmd::DebugCutout { project }) => {
+            let rec = project::Recording::load(&project)?;
+            let t = std::time::Instant::now();
+            cutout::process(&rec, &Default::default())?;
+            println!("matte written in {:.1}s", t.elapsed().as_secs_f32());
         }
         Some(Cmd::DebugFace { project }) => {
             let rec = project::Recording::load(&project)?;

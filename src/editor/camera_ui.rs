@@ -22,6 +22,70 @@ pub struct State {
     /// Set when face_track.json was written; the editor rebuilds its tracks.
     pub face_ready: bool,
     picking_lut: Option<std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>>,
+    cutout_job: Option<(std::sync::Arc<crate::cutout::Progress>, std::sync::mpsc::Receiver<Result<(), String>>)>,
+    cutout_error: Option<String>,
+    /// Set when the background-removal matte was written; the editor
+    /// reloads the recording and opens the matte.
+    pub cutout_ready: bool,
+}
+
+impl State {
+    /// Starts removing the camera background in the background, if it
+    /// isn't done or running already.
+    pub fn start_cutout(&mut self, rec: &Recording, ctx: &egui::Context) {
+        if self.cutout_job.is_some() || rec.camera.as_ref().is_none_or(|c| c.matte.is_some()) {
+            return;
+        }
+        let progress = std::sync::Arc::new(crate::cutout::Progress::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (r, p, ctx) = (rec.clone(), progress.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::cutout::process(&r, &p).map(|_| ()).map_err(|e| format!("{e:#}")));
+            ctx.request_repaint();
+        });
+        self.cutout_job = Some((progress, rx));
+        self.cutout_error = None;
+    }
+
+    /// Polls the job; returns its progress 0..1 while running.
+    fn poll_cutout(&mut self, ctx: &egui::Context) -> Option<f32> {
+        let (p, rx) = self.cutout_job.as_ref()?;
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.cutout_job = None;
+                self.cutout_ready = true;
+                None
+            }
+            Ok(Err(e)) => {
+                self.cutout_error = Some(e);
+                self.cutout_job = None;
+                None
+            }
+            Err(_) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                Some(p.permille.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0)
+            }
+        }
+    }
+}
+
+/// Progress or error line for background removal.
+fn cutout_status(ui: &mut Ui, st: &mut State) {
+    if let Some(p) = st.poll_cutout(ui.ctx()) {
+        let w = ui.available_width();
+        let (r, _) = ui.allocate_exact_size(vec2(w, 6.0), Sense::hover());
+        ui.painter().rect_filled(r, CornerRadius::same(3), theme::TRACK);
+        ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(w * p.max(0.02), 6.0)), CornerRadius::same(3), theme::ACCENT);
+        help(ui, &if p == 0.0 { "Preparing background removal…".to_string() } else { format!("Removing background…  {:.0}%", p * 100.0) });
+        if widgets::wide_button(ui, "Cancel").clicked() {
+            if let Some((p, _)) = &st.cutout_job {
+                p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    if let Some(e) = &st.cutout_error {
+        ui.label(RichText::new(e).size(12.0).color(theme::RECORD));
+    }
 }
 
 pub fn show(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recording, layout: bool) {
@@ -31,13 +95,13 @@ pub fn show(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recording,
         return;
     }
     if layout {
-        camera_layout(ui, edit, rec);
+        camera_layout(ui, st, edit, rec);
     } else {
         camera_style(ui, st, edit, rec);
     }
 }
 
-fn camera_layout(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
+fn camera_layout(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recording) {
     let c = &mut edit.camera;
     // "Hide camera" with its eye-slash icon on the left.
     ui.horizontal(|ui| {
@@ -57,7 +121,7 @@ fn camera_layout(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
         for (value, label, enabled) in [
             (Some(CameraDefaultLayout::Overlay), "Camera overlay", true),
             (Some(CameraDefaultLayout::Split), "Split screen", true),
-            (None, "Camera cutout", false),
+            (Some(CameraDefaultLayout::Cutout), "Camera cutout", true),
         ] {
             ui.vertical(|ui| {
                 ui.set_width(w);
@@ -71,12 +135,18 @@ fn camera_layout(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
                 };
                 if let (true, Some(v)) = (resp.clicked(), value) {
                     c.layout = v;
+                    if v == CameraDefaultLayout::Cutout {
+                        st.start_cutout(rec, ui.ctx());
+                    }
                 }
                 let col = if !enabled { Color32::from_rgb(0x53, 0x53, 0x55) } else if selected { theme::TEXT } else { theme::TEXT_DIM };
                 ui.label(RichText::new(label).size(12.5).color(col));
             });
         }
     });
+    if c.layout == CameraDefaultLayout::Cutout {
+        cutout_status(ui, st);
+    }
     widgets::divider(ui);
     theme::section(ui, "Camera Position");
     position_grid(ui, &mut c.position);
@@ -120,10 +190,19 @@ fn camera_style(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Record
     widgets::divider(ui);
     color_grading(ui, st, edit);
     widgets::divider(ui);
-    ui.add_enabled_ui(false, |ui| {
-        let mut off = false;
-        toggle_help(ui, "Camera cutout", "Removes your background. Needs a background removal model, not available yet.", &mut off);
-    });
+    {
+        let c = &mut edit.camera;
+        let mut on = c.layout == CameraDefaultLayout::Cutout;
+        if toggle_help(ui, "Camera cutout", "Remove your background and place you in front of your screen. Processed on this computer.", &mut on) {
+            c.layout = if on { CameraDefaultLayout::Cutout } else { CameraDefaultLayout::Overlay };
+            if on {
+                st.start_cutout(rec, ui.ctx());
+            }
+        }
+        if on {
+            cutout_status(ui, st);
+        }
+    }
     widgets::divider(ui);
     let c = &mut edit.camera;
     egui::CollapsingHeader::new(RichText::new("Advanced").size(13.5)).id_salt("camera-advanced").show(ui, |ui| {
@@ -370,6 +449,7 @@ pub fn segment_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &m
             (CameraLayoutKind::Default, Icon::CamPip, "Default"),
             (CameraLayoutKind::Split, Icon::CamSplit, "Split"),
             (CameraLayoutKind::Fullscreen, Icon::CamFull, "Fullscreen"),
+            (CameraLayoutKind::Cutout, Icon::CamCutout, "Cutout"),
             (CameraLayoutKind::Hide, Icon::CamHidden, "Hide"),
         ] {
             let sel = seg.kind == kind;
@@ -391,6 +471,7 @@ pub fn segment_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &m
             CameraLayoutKind::Split => "Show screen and camera side by side",
             CameraLayoutKind::Fullscreen => "Show camera in fullscreen mode",
             CameraLayoutKind::Hide => "Only show the screen and hide the camera",
+            CameraLayoutKind::Cutout => "Show only you, without your background, in front of the screen",
         },
     );
     if seg.kind == CameraLayoutKind::Default {

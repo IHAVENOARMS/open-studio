@@ -66,6 +66,8 @@ struct CameraUniform {
     grade1: [f32; 4],
     /// Look strength, LUT size (0 = none), unused x2.
     grade2: [f32; 4],
+    /// Cutout amount (0..1), matte available (0/1), shadow strength, unused.
+    cut: [f32; 4],
 }
 
 #[repr(C)]
@@ -120,6 +122,11 @@ pub struct Compositor {
     camera: Option<VideoTexture>,
     camera_buf: wgpu::Buffer,
     camera_bind: Option<wgpu::BindGroup>,
+    /// Camera pass bindings: the scene ones plus the matte (binding 4).
+    camera_layout: wgpu::BindGroupLayout,
+    /// Background-removal matte for the camera, when there is one.
+    matte: Option<VideoTexture>,
+    matte_placeholder: wgpu::TextureView,
     /// Camera LUT (path, view, size); a 1x1 placeholder when none.
     lut: (Option<String>, wgpu::TextureView, u32),
     /// Background image (1x1 placeholder when unused) and what it was loaded from.
@@ -222,8 +229,12 @@ impl Compositor {
         let sprite_pipeline =
             pipeline(&scene_layout, "vs_sprite", "fs_sprite", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
         let mip_pipeline = pipeline(&mip_layout, "vs_full", "fs_mip", None);
+        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera"),
+            entries: &[uniform_entry(0), texture_entry(1), sampler_entry(2), texture_entry(3), texture_entry(4)],
+        });
         let camera_pipeline =
-            pipeline(&scene_layout, "vs_camera", "fs_camera", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
+            pipeline(&camera_layout, "vs_camera", "fs_camera", Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING));
         let camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera uniform"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -295,6 +306,9 @@ impl Compositor {
             camera_buf,
             camera_bind: None,
             lut: (None, placeholder_lut.create_view(&Default::default()), 0),
+            camera_layout,
+            matte: None,
+            matte_placeholder: placeholder_lut.create_view(&Default::default()),
             bg_view: placeholder.create_view(&Default::default()),
             bg_key: None,
             bg_aspect: 1.0,
@@ -493,16 +507,27 @@ impl Compositor {
         self.upload_into(self.camera.as_ref().unwrap(), rgba);
     }
 
+    /// Uploads a background-removal matte frame (greyscale as RGBA).
+    pub fn upload_matte_frame(&mut self, rgba: &[u8], w: u32, h: u32) {
+        if !self.matte.as_ref().is_some_and(|v| v.size == (w, h)) {
+            self.matte = Some(self.video_texture(w, h));
+            self.rebuild_camera_bind();
+        }
+        self.upload_into(self.matte.as_ref().unwrap(), rgba);
+    }
+
     fn rebuild_camera_bind(&mut self) {
         let Some(tex) = &self.camera else { return };
+        let matte = self.matte.as_ref().map_or(&self.matte_placeholder, |m| &m.view);
         self.camera_bind = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("camera"),
-            layout: &self.scene_layout,
+            layout: &self.camera_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: self.camera_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tex.view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.lut.1) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(matte) },
             ],
         }));
     }
@@ -842,6 +867,7 @@ impl Compositor {
                 grade0,
                 grade1,
                 grade2: [strength, lut_size as f32, 0.0, 0.0],
+                cut: [cv.cutout as f32, if self.matte.is_some() { 1.0 } else { 0.0 }, cv.shadow as f32, 0.0],
             };
             self.queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&u));
         }
