@@ -402,22 +402,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&arc);
         }
         Icon::RailShortcuts => {
-            // Command glyph: a square whose sides run out into four loops.
-            let pen = Pen { s: Stroke::new(1.5 * k, color), ..pen };
-            let (a, b, r) = (7.6, 12.4, 2.05);
-            pen.line(&[(a, a - r), (a, b + r)]);
-            pen.line(&[(b, a - r), (b, b + r)]);
-            pen.line(&[(a - r, a), (b + r, a)]);
-            pen.line(&[(a - r, b), (b + r, b)]);
-            use std::f32::consts::PI;
-            // Each loop leaves a side of the square and comes back on the
-            // other side, sweeping three quarters of a circle outwards.
-            for (cx, cy, a0, dir) in [(a - r, a - r, 0.0f32, -1.0f32), (b + r, a - r, PI, 1.0), (b + r, b + r, PI, -1.0), (a - r, b + r, 0.0, 1.0)] {
-                let pts: Vec<(f32, f32)> = (0..=18).map(|i| {
-                    let t = a0 + dir * 1.5 * PI * i as f32 / 18.0;
-                    (cx + r * t.cos(), cy + r * t.sin())
-                }).collect();
-                pen.line(&pts);
+            // The Linux Super key symbol (❖): four diamonds around the centre.
+            let (h, d) = (3.1, 3.55);
+            for (dx, dy) in [(0.0, -d), (d, 0.0), (0.0, d), (-d, 0.0)] {
+                let (x, y) = (10.0 + dx, 10.0 + dy);
+                pen.fill(&[(x, y - h), (x + h, y), (x, y + h), (x - h, y)]);
             }
         }
         Icon::RailAnimation => {

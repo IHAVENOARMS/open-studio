@@ -590,43 +590,30 @@ fn audio(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording)
     }
 }
 
-fn shortcuts(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
-    heading(ui, "Keyboard shortcuts");
+fn shortcuts(ui: &mut Ui, edit: &mut EditConfig, _rec: &Recording) {
+    // Laid out as Screen Studio's Keyboard shortcuts panel.
+    ui.label(RichText::new("Shortcuts").size(12.5).color(theme::TEXT_DIM));
+    ui.add_space(4.0);
     let o = &mut edit.shortcuts;
     toggle_help(ui, "Show shortcuts", "Show pressed shortcut labels in the video.", &mut o.show);
-    if o.show {
-        theme::section(ui, "Shortcut labels size");
-        widgets::slider(ui, &mut o.size, 0.5..=2.0, Some(1.0));
-        toggle_help(
-            ui,
-            "Show single key shortcuts",
-            "By default, only 2+ keys shortcuts are shown. Enable this option to show single letter shortcuts as well.",
-            &mut o.single_keys,
-        );
-    }
+    ui.add_space(8.0);
+    theme::section(ui, "Shortcut labels size");
+    widgets::slider(ui, &mut o.size, 0.5..=2.0, Some(1.0));
+    ui.add_space(8.0);
+    toggle_help(
+        ui,
+        "Show single key shortcuts",
+        "By default, only 2+ keys shortcuts are shown. Enable this option to show single letter shortcuts as well.",
+        &mut o.single_keys,
+    );
     widgets::divider(ui);
-    let found = crate::shortcuts::detect(rec, o.single_keys);
-    theme::section(ui, &format!("Recorded shortcuts  ·  {}", found.len()));
-    help(ui, "Click a shortcut to hide or show it in the video.");
-    for (i, sc) in found.iter().enumerate().take(60) {
-        let hidden = o.disabled.contains(&sc.id);
-        ui.horizontal(|ui| {
-            let label = format!("{}   {}", crate::util::format_time(sc.t), sc.label());
-            let col = if hidden { theme::TEXT_DIM } else { theme::TEXT };
-            let mut text = RichText::new(label).size(13.0).color(col);
-            if hidden {
-                text = text.strikethrough();
-            }
-            let r = ui.add(egui::Button::new(text).frame(false));
-            if r.clicked() {
-                if hidden {
-                    o.disabled.retain(|d| *d != sc.id);
-                } else {
-                    o.disabled.push(sc.id);
-                }
-            }
-            let _ = i;
-        });
+    ui.add_space(8.0);
+    let label = if o.timeline { "Hide shortcuts timeline" } else { "Show shortcuts timeline" };
+    if widgets::wide_button_icon(ui, Some(Icon::Keyboard), label).clicked() {
+        o.timeline = !o.timeline;
+    }
+    if o.timeline {
+        help(ui, "Click a shortcut on the timeline to hide or show it. Right-click it to hide or show all of the same shortcut.");
     }
 }
 

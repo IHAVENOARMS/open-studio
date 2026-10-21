@@ -801,8 +801,11 @@ fn click_fx(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64) -> Opti
 }
 
 /// The shortcut on screen at `t`: shown for 1.4s or until the next one.
+/// How long a shortcut stays on screen (unless the next one comes sooner).
+pub const SHORTCUT_SHOW: f64 = 1.4;
+
 fn key_overlay(edit: &EditConfig, tracks: &Tracks, t: f64) -> Option<KeyOverlay> {
-    const SHOW: f64 = 1.4;
+    const SHOW: f64 = SHORTCUT_SHOW;
     const FADE_IN: f64 = 0.12;
     const FADE_OUT: f64 = 0.25;
     let list = &tracks.shortcuts;

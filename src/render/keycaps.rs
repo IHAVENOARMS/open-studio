@@ -15,7 +15,8 @@ fn modifier(key: &str) -> Option<(&'static str, &'static str)> {
         "Ctrl" => ("\u{2303}", "control"),
         "Alt" => ("\u{2325}", "alt"),
         "Shift" => ("\u{21E7}", "shift"),
-        "Super" => ("\u{2318}", "super"),
+        // Drawn as ❖ (see `Canvas::super_symbol`), the Linux Super key.
+        "Super" => ("\u{2756}", "super"),
         _ => return None,
     })
 }
@@ -60,7 +61,9 @@ pub fn render(keys: &[&str], key_h: u32) -> Image {
             let white = [1.0, 1.0, 1.0];
             if let Some((sym, name)) = modifier(k) {
                 let left = x + h * 0.14;
-                if has_glyph(f, sym) {
+                if *k == "Super" {
+                    cv.super_symbol(left + h * 0.13, pad + h * 0.3, h * 0.3, white);
+                } else if has_glyph(f, sym) {
                     cv.text(f, sym, h * 0.3, left, pad + h * 0.4, white);
                 }
                 cv.text(f, name, h * 0.24, left, pad + h * 0.84, white);
@@ -82,7 +85,7 @@ pub fn render(keys: &[&str], key_h: u32) -> Image {
 mod tests {
     #[test]
     fn renders_shortcut() {
-        let img = super::render(&["Ctrl", "Shift", "M"], 96);
+        let img = super::render(&["Super", "Shift", "M"], 96);
         assert_eq!(img.rgba.len(), (img.width * img.height * 4) as usize);
         assert!(img.width > 300 && img.height > 96);
         // Somewhere on the M key there is white text.

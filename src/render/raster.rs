@@ -77,6 +77,49 @@ impl Canvas {
         }
     }
 
+    /// Filled convex or concave polygon, 4x4 supersampled.
+    pub fn polygon(&mut self, pts: &[(f32, f32)], c: [f32; 3], alpha: f32) {
+        let (x0, x1) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));
+        let (y0, y1) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+        let inside = |x: f32, y: f32| {
+            let mut c = false;
+            let mut j = pts.len() - 1;
+            for i in 0..pts.len() {
+                let (a, b) = (pts[i], pts[j]);
+                if (a.1 > y) != (b.1 > y) && x < (b.0 - a.0) * (y - a.1) / (b.1 - a.1) + a.0 {
+                    c = !c;
+                }
+                j = i;
+            }
+            c
+        };
+        for py in y0.floor().max(0.0) as usize..(y1.ceil() as usize).min(self.h) {
+            for px in x0.floor().max(0.0) as usize..(x1.ceil() as usize).min(self.w) {
+                let mut n = 0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        if inside(px as f32 + (sx as f32 + 0.5) / 4.0, py as f32 + (sy as f32 + 0.5) / 4.0) {
+                            n += 1;
+                        }
+                    }
+                }
+                if n > 0 {
+                    self.blend(px, py, c, alpha * n as f32 / 16.0);
+                }
+            }
+        }
+    }
+
+    /// The Super key symbol (❖): four diamonds around a centre, drawn by hand
+    /// because few fonts have the glyph.
+    pub fn super_symbol(&mut self, cx: f32, cy: f32, size: f32, c: [f32; 3]) {
+        let (h, d) = (size * 0.25, size * 0.27);
+        for (dx, dy) in [(0.0, -d), (d, 0.0), (0.0, d), (-d, 0.0)] {
+            let (x, y) = (cx + dx, cy + dy);
+            self.polygon(&[(x, y - h), (x + h, y), (x, y + h), (x - h, y)], c, 1.0);
+        }
+    }
+
     pub fn text(&mut self, font: &FontVec, s: &str, size: f32, x: f32, baseline: f32, color: [f32; 3]) {
         self.text_alpha(font, s, size, x, baseline, color, 1.0);
     }

@@ -198,6 +198,7 @@ pub fn show(
     selected: &mut Option<Selection>,
     waveform: Option<&[f32]>,
     has_camera: bool,
+    shortcuts: &[crate::shortcuts::Shortcut],
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
@@ -464,11 +465,76 @@ pub fn show(
         }
     }
 
+    // Shortcuts track (toggled from the Keyboard shortcuts tab).
+    let mut line_bottom = bottom;
+    if !shortcuts.is_empty() {
+        let row = Rect::from_min_max(pos2(full.left(), bottom + 10.0), pos2(full.right(), bottom + 44.0));
+        ui.allocate_rect(row, Sense::hover());
+        shortcut_track(ui, row, &geo, edit, shortcuts, duration);
+        line_bottom = row.bottom();
+    }
+
     // Playhead.
     let x = geo.x(time);
-    p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, bottom)], Stroke::new(1.5, theme::PLAYHEAD));
+    let p = ui.painter();
+    p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, line_bottom)], Stroke::new(1.5, theme::PLAYHEAD));
     p.circle_filled(pos2(x, ruler.top() + 4.0), 6.0, theme::PLAYHEAD);
     out
+}
+
+/// One pill per detected shortcut, as long as it shows in the video. Click
+/// to hide or show it; right-click for all shortcuts with the same keys.
+fn shortcut_track(ui: &mut Ui, row: Rect, geo: &Geo, edit: &mut EditConfig, list: &[crate::shortcuts::Shortcut], duration: f64) {
+    let font = egui::FontId::proportional(12.0);
+    for (i, sc) in list.iter().enumerate() {
+        let end = list.get(i + 1).map_or(sc.t + crate::engine::SHORTCUT_SHOW, |n| n.t.min(sc.t + crate::engine::SHORTCUT_SHOW)).min(duration);
+        let (x0, x1) = (geo.x(sc.t), geo.x(end).max(geo.x(sc.t) + 22.0));
+        let r = Rect::from_x_y_ranges(x0..=x1 - 2.0, row.y_range());
+        let off = edit.shortcuts.disabled.contains(&sc.id);
+        let resp = ui.interact(r, ui.scope_id().with(("shortcut", sc.id)), Sense::click());
+        let fill = match (off, resp.hovered()) {
+            (true, _) => Color32::from_rgb(0x22, 0x24, 0x29),
+            (false, true) => Color32::from_rgb(0x3a, 0x3d, 0x46),
+            (false, false) => Color32::from_rgb(0x2e, 0x31, 0x39),
+        };
+        let p = ui.painter_at(r);
+        p.rect_filled(r, CornerRadius::same(8), fill);
+        p.rect_stroke(r, CornerRadius::same(8), Stroke::new(1.0, Color32::from_white_alpha(if off { 10 } else { 24 })), StrokeKind::Inside);
+        let label = sc.label();
+        let col = if off { Color32::from_rgb(0x5c, 0x5e, 0x66) } else { Color32::WHITE };
+        let g = p.layout_no_wrap(label.clone(), font.clone(), col);
+        let tx = (r.center().x - g.size().x / 2.0).max(r.left() + 6.0);
+        let gw = g.size().x;
+        p.galley(pos2(tx, r.center().y - g.size().y / 2.0), g, col);
+        if off {
+            p.line_segment([pos2(tx, r.center().y), pos2(tx + gw, r.center().y)], Stroke::new(1.0, col));
+        }
+        let resp = resp.on_hover_text(if off { "Hidden. Click to show it in the video." } else { "Click to hide it from the video." });
+        if resp.clicked() {
+            let d = &mut edit.shortcuts.disabled;
+            if off {
+                d.retain(|x| *x != sc.id);
+            } else {
+                d.push(sc.id);
+            }
+        }
+        resp.context_menu(|ui| {
+            let same: Vec<usize> = list.iter().filter(|o| o.keys == sc.keys).map(|o| o.id).collect();
+            let d = &mut edit.shortcuts.disabled;
+            if ui.button(format!("Disable all \"{label}\" shortcuts")).clicked() {
+                for id in &same {
+                    if !d.contains(id) {
+                        d.push(*id);
+                    }
+                }
+                ui.close();
+            }
+            if ui.button(format!("Enable all \"{label}\" shortcuts")).clicked() {
+                d.retain(|x| !same.contains(x));
+                ui.close();
+            }
+        });
+    }
 }
 
 /// Allowed range for an item without overlapping its neighbours.

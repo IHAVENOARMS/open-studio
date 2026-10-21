@@ -86,6 +86,8 @@ pub struct Editor {
     /// Unsaved-changes prompt.
     leaving: Option<Leaving>,
     saving_as: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
+    /// Detected shortcuts by single-key setting, for the shortcuts track.
+    shortcuts_cache: Option<(bool, Vec<crate::shortcuts::Shortcut>)>,
     /// Short message under the title ("Saved", errors).
     status: Option<(String, Instant)>,
     player: Player,
@@ -130,6 +132,7 @@ impl Editor {
             renaming: None,
             leaving: None,
             saving_as: None,
+            shortcuts_cache: None,
             status: None,
             edit,
             player,
@@ -605,9 +608,23 @@ impl Editor {
                 });
             });
 
+        // Detected shortcuts for the timeline track, recomputed only when
+        // the single-key setting changes.
+        let shortcuts = if self.edit.shortcuts.timeline {
+            let single = self.edit.shortcuts.single_keys;
+            if self.shortcuts_cache.as_ref().is_none_or(|(s, _)| *s != single) {
+                self.shortcuts_cache = Some((single, crate::shortcuts::detect(&self.rec, single)));
+            }
+            self.shortcuts_cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
+        } else {
+            vec![]
+        };
         egui::Panel::bottom("timeline")
             .resizable(false)
-            .exact_size(if self.rec.camera.is_some() { 348.0 } else { 278.0 })
+            .exact_size(
+                if self.rec.camera.is_some() { 348.0 } else { 278.0 }
+                    + if self.edit.shortcuts.timeline && !self.rec.events.keys.is_empty() { 44.0 } else { 0.0 },
+            )
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 16, right: 16, top: 6, bottom: 14 }))
             .show(ui, |ui| {
                 let out = timeline::show(
@@ -620,6 +637,7 @@ impl Editor {
                     &mut self.selected,
                     self.waveform.lock().unwrap().as_deref(),
                     self.rec.camera.is_some(),
+                    &shortcuts,
                 );
                 if let Some(t) = out.seek {
                     self.seek(t);

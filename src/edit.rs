@@ -378,11 +378,13 @@ pub struct ShortcutOverlay {
     pub single_keys: bool,
     /// Indices into the recording's detected shortcuts that are hidden.
     pub disabled: Vec<usize>,
+    /// The shortcuts track is shown on the timeline.
+    pub timeline: bool,
 }
 
 impl Default for ShortcutOverlay {
     fn default() -> Self {
-        Self { show: true, size: 1.0, single_keys: false, disabled: vec![] }
+        Self { show: true, size: 1.0, single_keys: false, disabled: vec![], timeline: false }
     }
 }
 
