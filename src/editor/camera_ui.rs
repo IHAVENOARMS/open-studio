@@ -153,12 +153,14 @@ fn camera_layout(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recor
     theme::section(ui, "Camera Position");
     position_grid(ui, &mut c.position);
     widgets::divider(ui);
-    theme::section(ui, "Size");
+    use crate::edit::{SIZE_DEFAULT, ZOOM_SIZE_DEFAULT};
+    theme::section(ui, &format!("Size  ·  {:.0}%", c.size * 100.0));
     help(ui, "Size of camera when recording is not zoomed in");
-    widgets::slider(ui, &mut c.size, 0.12..=0.6, Some(0.3));
+    widgets::slider(ui, &mut c.size, 0.12..=0.75, Some(SIZE_DEFAULT));
     toggle_help(ui, "Camera size during zoom", "Make the camera smaller while the screen is zoomed in.", &mut c.shrink_on_zoom);
     if c.shrink_on_zoom {
-        widgets::slider(ui, &mut c.zoom_size, 0.08..=0.6, Some(0.2));
+        theme::section(ui, &format!("Size while zoomed in  ·  {:.0}%", c.zoom_size * 100.0));
+        widgets::slider(ui, &mut c.zoom_size, 0.08..=0.75, Some(ZOOM_SIZE_DEFAULT));
     }
     widgets::divider(ui);
     let has_mic = rec.audio.iter().any(|a| a.kind == "microphone");

@@ -954,10 +954,10 @@ impl Editor {
             let a = self.edit.aspect;
             let resp = toolbar_button(ui, Icon::AspectLayout, a.name(), a.label(), true, true);
             egui::Popup::menu(&resp).show(|ui| {
-                ui.set_min_width(180.0);
+                ui.set_min_width(200.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
                 for opt in Aspect::ALL {
-                    let text = if opt.label().is_empty() { opt.name().to_string() } else { format!("{}   {}", opt.name(), opt.label()) };
-                    if ui.selectable_label(a == opt, text).clicked() {
+                    if menu_item(ui, opt.name(), opt.label(), a == opt).clicked() {
                         self.edit.aspect = opt;
                         ui.close();
                     }
@@ -984,13 +984,14 @@ impl Editor {
                 };
                 let resp = toolbar_button(ui, Icon::Quality, "Preview quality", q, true, true);
                 egui::Popup::menu(&resp).show(|ui| {
-                    ui.set_min_width(240.0);
+                    ui.set_min_width(260.0);
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     for (d, name, help) in [
                         (1u32, "Full", "Sharpest preview, looks exactly like the export."),
                         (2, "Half", "Half resolution, smoother playback."),
                         (4, "Quarter", "Fastest playback on slower computers."),
                     ] {
-                        let r = ui.selectable_label(self.preview_quality == d, name).on_hover_text(help);
+                        let r = menu_item(ui, name, "", self.preview_quality == d).on_hover_text(help);
                         if r.clicked() {
                             self.preview_quality = d;
                             let mut s = Settings::load();
@@ -999,7 +1000,12 @@ impl Editor {
                             ui.close();
                         }
                     }
-                    ui.label(egui::RichText::new("Only the preview; exports are always full quality.").size(11.5).color(theme::TEXT_DIM));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        ui.label(egui::RichText::new("Only the preview; exports are always full quality.").size(11.5).color(theme::TEXT_DIM));
+                    });
+                    ui.add_space(2.0);
                 });
             });
         });
@@ -1605,6 +1611,32 @@ fn open_matte(dir: &std::path::Path, rec: &Recording, edit: &EditConfig, start: 
     let p = Player::new(dir.join(file), crate::cutout::matte_size(c.width, c.height), c.fps, ctx.clone());
     p.seek((start - c.offset - edit.camera.delay).max(0.0));
     Some((p, -1))
+}
+
+/// Dropdown row: roomy padding, a check on the selected item, a soft
+/// hover fill, and an optional dim value on the right.
+fn menu_item(ui: &mut egui::Ui, label: &str, value: &str, selected: bool) -> egui::Response {
+    let w = ui.available_width().max(160.0);
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 34.0), Sense::click());
+    let p = ui.painter();
+    if resp.hovered() {
+        p.rect_filled(r, egui::CornerRadius::same(7), Color32::from_white_alpha(16));
+    } else if selected {
+        p.rect_filled(r, egui::CornerRadius::same(7), Color32::from_white_alpha(8));
+    }
+    if selected {
+        let c = egui::pos2(r.left() + 18.0, r.center().y);
+        p.line(
+            vec![c + egui::vec2(-4.5, 0.0), c + egui::vec2(-1.3, 3.2), c + egui::vec2(4.5, -3.5)],
+            egui::Stroke::new(1.8, theme::KNOB),
+        );
+    }
+    let font = egui::FontId::proportional(14.0);
+    p.text(egui::pos2(r.left() + 34.0, r.center().y), egui::Align2::LEFT_CENTER, label, font.clone(), theme::TEXT);
+    if !value.is_empty() {
+        p.text(egui::pos2(r.right() - 14.0, r.center().y), egui::Align2::RIGHT_CENTER, value, font, theme::TEXT_DIM);
+    }
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// A button in the row above the preview: icon, white label, dim value and

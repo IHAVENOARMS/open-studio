@@ -501,15 +501,20 @@ pub struct CameraSettings {
     pub lut: Option<String>,
 }
 
+/// Default camera height (fraction of the canvas) and its height while the
+/// screen is zoomed in.
+pub const SIZE_DEFAULT: f64 = 0.38;
+pub const ZOOM_SIZE_DEFAULT: f64 = 0.28;
+
 impl Default for CameraSettings {
     fn default() -> Self {
         Self {
             hidden: false,
             layout: CameraDefaultLayout::Overlay,
             position: [2, 2],
-            size: 0.3,
+            size: SIZE_DEFAULT,
             shrink_on_zoom: true,
-            zoom_size: 0.2,
+            zoom_size: ZOOM_SIZE_DEFAULT,
             aspect: CameraAspect::Square,
             roundness: 0.45,
             mirror: false,
