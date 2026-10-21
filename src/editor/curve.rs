@@ -170,7 +170,7 @@ fn graph(ui: &mut Ui, curve: &mut ZoomCurve) -> bool {
         lo = lo.min(y1.min(y2) - 0.05);
         hi = hi.max(y1.max(y2) + 0.05);
     }
-    let plot = Rect::from_min_max(card.min + vec2(20.0, 56.0), card.max - vec2(20.0, 30.0));
+    let plot = Rect::from_min_max(card.min + vec2(20.0, 54.0), card.max - vec2(20.0, 30.0));
     let to = |x: f64, y: f64| pos2(plot.left() + x as f32 * plot.width(), plot.bottom() - ((y - lo) / (hi - lo)) as f32 * plot.height());
     let from = |q: Pos2| (((q.x - plot.left()) / plot.width()) as f64, lo + ((plot.bottom() - q.y) / plot.height()) as f64 * (hi - lo));
 
@@ -251,8 +251,10 @@ fn graph(ui: &mut Ui, curve: &mut ZoomCurve) -> bool {
     p.rect_stroke(frame, CornerRadius::same(5), Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
 
     // Captions.
-    let mono = egui::FontId::monospace(11.5);
-    let room = frame.left() - card.left() - 24.0;
+    // Caption sits in the bottom row between the time labels, clear of the
+    // preview thumbnail.
+    let mono = egui::FontId::monospace(11.0);
+    let room = plot.width() - 90.0;
     let caption = match *curve {
         ZoomCurve::Bezier { x1, y1, x2, y2, .. } => {
             let full = format!("cubic-bezier({x1:.2}, {y1:.2}, {x2:.2}, {y2:.2})");
@@ -265,7 +267,8 @@ fn graph(ui: &mut Ui, curve: &mut ZoomCurve) -> bool {
         }
         ZoomCurve::Spring { .. } => format!("Settles in {settle:.2}s"),
     };
-    p.text(card.min + vec2(16.0, 14.0), egui::Align2::LEFT_TOP, caption, mono, theme::TEXT_DIM);
+    let caption = if p.layout_no_wrap(caption.clone(), mono.clone(), theme::TEXT_DIM).size().x <= room { caption } else { String::new() };
+    p.text(pos2(plot.center().x, card.bottom() - 14.0), egui::Align2::CENTER_CENTER, caption, mono, theme::TEXT_DIM);
     let small = egui::FontId::proportional(11.0);
     p.text(pos2(plot.left(), card.bottom() - 14.0), egui::Align2::LEFT_CENTER, "0s", small.clone(), theme::TEXT_DIM);
     p.text(pos2(plot.right(), card.bottom() - 14.0), egui::Align2::RIGHT_CENTER, format!("{span:.2}s"), small, theme::TEXT_DIM);
