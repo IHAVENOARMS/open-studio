@@ -754,7 +754,14 @@ impl EditConfig {
     /// Loads project.json, or builds a fresh config with automatic zooms.
     pub fn load_or_create(dir: &Path, rec: &Recording) -> Self {
         if let Ok(text) = std::fs::read_to_string(dir.join(PROJECT_FILE)) {
-            if let Ok(cfg) = serde_json::from_str(&text) {
+            if let Ok(mut cfg) = serde_json::from_str::<Self>(&text) {
+                // Projects saved with the first camera defaults (30%, and 20%
+                // while zoomed) get the current, larger ones.
+                let c = &mut cfg.camera;
+                if (c.size - 0.3).abs() < 1e-9 && (c.zoom_size - 0.2).abs() < 1e-9 {
+                    c.size = SIZE_DEFAULT;
+                    c.zoom_size = ZOOM_SIZE_DEFAULT;
+                }
                 return cfg;
             }
         }
