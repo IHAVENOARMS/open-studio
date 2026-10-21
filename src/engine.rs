@@ -249,7 +249,7 @@ fn clamp_in_canvas(cx: f64, cy: f64, scale: f64, layout: &Layout) -> (f64, f64) 
 }
 
 /// Everything the compositor needs for one output frame.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FrameState {
     pub camera: Camera,
     /// Camera a fraction of a frame earlier, for motion blur.
@@ -257,7 +257,7 @@ pub struct FrameState {
     pub cursor: Option<CursorState>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CursorState {
     /// Canvas units.
     pub x: f64,
@@ -265,16 +265,45 @@ pub struct CursorState {
     /// Multiplier including click squish.
     pub scale: f64,
     pub opacity: f64,
+    pub shape: CursorShape,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CursorShape {
+    /// Canonical cursor name.
+    Named(String),
+    /// Captured image: path, hotspot in pixels, capture scale.
+    Custom { path: std::path::PathBuf, hotspot: (f64, f64), scale: f64 },
+}
+
+fn cursor_shape(rec: &Recording, edit: &EditConfig, t: f64) -> Option<CursorShape> {
+    if edit.cursor.always_default {
+        return Some(CursorShape::Named("default".into()));
+    }
+    let s = rec.shape_at(t);
+    if s == "hidden" {
+        return None;
+    }
+    if let Some(i) = s.strip_prefix("custom:").and_then(|i| i.parse::<usize>().ok()) {
+        if let Some(c) = rec.custom_cursors.get(i) {
+            return Some(CursorShape::Custom { path: rec.dir.join(&c.file), hotspot: (c.hotspot[0], c.hotspot[1]), scale: c.scale });
+        }
+    }
+    Some(CursorShape::Named(s.to_string()))
 }
 
 pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, fps: f64) -> FrameState {
     let camera = tracks.camera(t);
     let prev_camera = if edit.motion_blur { tracks.camera(t - 0.5 / fps) } else { camera };
-    let cursor = (!rec.cursor_embedded && !rec.events.moves.is_empty()).then(|| {
-        let (vx, vy) = tracks.cursor(t);
-        let (x, y) = tracks.layout.video_to_canvas(vx, vy);
-        CursorState { x, y, scale: edit.cursor.size * click_squish(rec, edit, t), opacity: idle_opacity(rec, edit, t) }
-    });
+    let cursor = if rec.cursor_embedded || rec.events.moves.is_empty() {
+        None
+    } else {
+        cursor_shape(rec, edit, t).map(|shape| {
+            let (vx, vy) = tracks.cursor(t);
+            let (x, y) = tracks.layout.video_to_canvas(vx, vy);
+            CursorState { x, y, scale: edit.cursor.size * click_squish(rec, edit, t), opacity: idle_opacity(rec, edit, t), shape }
+        })
+    };
     FrameState { camera, prev_camera, cursor }
 }
 

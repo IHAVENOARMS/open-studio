@@ -78,7 +78,7 @@ pub fn fetch(w: &Wallpaper) -> Result<()> {
     std::fs::create_dir_all(dir.join("thumbs"))?;
     let tmp = dir.join(format!(".{}.download", w.id));
     run(Command::new("curl")
-        .args(["-fsSL", "--retry", "2", "--max-time", "120", "-A", "open-studio/0.1", "-o"])
+        .args(["-fsSL", "--retry", "2", "--max-time", "120", "-A", "OpenStudio/0.1 (open-source screen recorder; wallpaper download)", "-o"])
         .arg(&tmp)
         .arg(&w.url))
     .with_context(|| format!("downloading {}", w.title))?;
@@ -102,7 +102,7 @@ pub fn fetch_missing(done: &AtomicUsize) -> Vec<String> {
     let next = AtomicUsize::new(0);
     let errors = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|s| {
-        for _ in 0..6 {
+        for _ in 0..3 {
             s.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);

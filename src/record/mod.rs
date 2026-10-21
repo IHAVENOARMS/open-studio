@@ -2,11 +2,13 @@
 //! out as a project directory.
 
 pub mod capture;
+pub mod cursor_shape;
 pub mod hyprland;
 pub mod input;
 pub mod portal;
 
-use crate::project::{Click, Events, Key, Recording, Source, VIDEO_FILE};
+use crate::project::{Click, CustomCursor, Events, Key, Recording, ShapeEvent, Source, VIDEO_FILE};
+use cursor_shape::{Shape, ShapeChange};
 use crate::util::{monotonic_ns, recordings_dir};
 use anyhow::{Context, Result};
 use capture::{Capture, CaptureSource};
@@ -40,6 +42,7 @@ pub struct Recorder {
     capture: Capture,
     stop: Arc<AtomicBool>,
     moves: Arc<Mutex<Vec<(i64, f64, f64)>>>,
+    shapes: Arc<Mutex<Vec<ShapeChange>>>,
     input_rx: Receiver<InputEvent>,
     source: Source,
     show_system_cursor: bool,
@@ -81,6 +84,12 @@ impl Recorder {
         } else {
             eprintln!("open-studio: not running under Hyprland, cursor tracking disabled");
         }
+        let shapes = Arc::new(Mutex::new(Vec::new()));
+        if !opts.test_source && !opts.show_system_cursor && hyprland::available() {
+            if let Err(e) = cursor_shape::spawn(stop.clone(), shapes.clone()) {
+                eprintln!("open-studio: cursor shapes won't be tracked: {e:#}");
+            }
+        }
         let (tx, input_rx) = channel();
         if !opts.test_source && input::spawn(stop.clone(), tx) == 0 {
             eprintln!("open-studio: no readable input devices; clicks won't be tracked (add yourself to the `input` group)");
@@ -90,6 +99,7 @@ impl Recorder {
             capture,
             stop,
             moves,
+            shapes,
             input_rx,
             source,
             show_system_cursor: opts.show_system_cursor,
@@ -148,8 +158,27 @@ impl Recorder {
             duration,
             cursor_embedded: self.show_system_cursor,
             source,
-            events: Events { moves, clicks: vec![], keys: vec![] },
+            events: Events { moves, clicks: vec![], keys: vec![], shapes: vec![] },
+            custom_cursors: vec![],
+            dir: self.dir.clone(),
         };
+        for change in self.shapes.lock().unwrap().iter() {
+            let shape = match &change.shape {
+                Shape::Hidden => "hidden".to_string(),
+                Shape::Named(n) => n.to_string(),
+                Shape::Custom { width, height, rgba, hotspot, scale } => {
+                    let idx = rec.custom_cursors.len();
+                    let file = format!("cursors/custom-{idx}.png");
+                    let _ = std::fs::create_dir_all(self.dir.join("cursors"));
+                    if image::save_buffer(self.dir.join(&file), rgba, *width, *height, image::ExtendedColorType::Rgba8).is_err() {
+                        continue;
+                    }
+                    rec.custom_cursors.push(CustomCursor { file, hotspot: [hotspot.0, hotspot.1], scale: *scale });
+                    format!("custom:{idx}")
+                }
+            };
+            rec.events.shapes.push(ShapeEvent { t: secs(change.t_ns).max(0.0), shape });
+        }
         for ev in self.input_rx.try_iter() {
             match ev {
                 InputEvent::Button { t_ns, code, down } => {

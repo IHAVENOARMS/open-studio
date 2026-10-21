@@ -239,6 +239,10 @@ fn cursor(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording) {
     }
     widgets::divider(ui);
     widgets::toggle_row(ui, "Hide when not moving", &mut edit.cursor.hide_when_idle);
+    widgets::toggle_row(ui, "Always use default cursor", &mut edit.cursor.always_default);
+    if !edit.cursor.always_default && !rec.events.shapes.is_empty() {
+        help(ui, "Text, link and resize cursors are redrawn from what the apps showed while recording.");
+    }
     widgets::toggle_row(ui, "Click animation", &mut edit.cursor.click_effect);
 }
 

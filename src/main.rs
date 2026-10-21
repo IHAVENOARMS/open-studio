@@ -13,6 +13,7 @@ mod record;
 mod render;
 mod util;
 mod wallpapers;
+mod xcursor;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -54,6 +55,17 @@ enum Cmd {
     Wallpapers {
         #[arg(long)]
         list: bool,
+    },
+    /// Print cursor image changes for a few seconds (development aid).
+    #[command(hide = true)]
+    DebugCursor {
+        #[arg(long, default_value_t = 5.0)]
+        seconds: f64,
+        #[arg(long)]
+        dump: Option<PathBuf>,
+        /// Visit these global points ("x,y x,y ...") with real pointer motion.
+        #[arg(long)]
+        visit: Option<String>,
     },
     /// Open a project in the editor.
     Edit { project: PathBuf },
@@ -103,6 +115,29 @@ fn main() -> Result<()> {
             println!("{}", out.display());
         }
         Some(Cmd::Edit { project }) => app::run(Some(project))?,
+        Some(Cmd::DebugCursor { seconds, dump, visit }) => {
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            record::cursor_shape::spawn(stop.clone(), sink.clone())?;
+            if let Some(points) = visit {
+                visit_points(&points)?;
+            } else {
+                std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+            }
+            stop.store(true, Ordering::Relaxed);
+            for (i, c) in sink.lock().unwrap().iter().enumerate() {
+                match &c.shape {
+                    record::cursor_shape::Shape::Custom { width, height, rgba, hotspot, .. } => {
+                        println!("{i}: t={} custom {width}x{height} hotspot={hotspot:?}", c.t_ns);
+                        if let Some(d) = &dump {
+                            std::fs::create_dir_all(d)?;
+                            image::save_buffer(d.join(format!("{i}.png")), rgba, *width, *height, image::ExtendedColorType::Rgba8)?;
+                        }
+                    }
+                    s => println!("{i}: t={} {s:?}", c.t_ns),
+                }
+            }
+        }
         Some(Cmd::Wallpapers { list }) => {
             if list {
                 for w in wallpapers::manifest() {
@@ -146,4 +181,34 @@ fn record_blocking(opts: record::RecordOptions, duration: Option<f64>) -> Result
         }
     }
     rec.stop()
+}
+
+/// Development aid: warps the pointer to each point, then nudges it through a
+/// virtual uinput mouse so applications see real motion and update their
+/// cursor. Restores the original position.
+fn visit_points(points: &str) -> Result<()> {
+    use evdev::{AttributeSet, EventType, InputEvent, RelativeAxisCode, uinput::VirtualDevice};
+    let mut axes = AttributeSet::<RelativeAxisCode>::new();
+    axes.insert(RelativeAxisCode::REL_X);
+    axes.insert(RelativeAxisCode::REL_Y);
+    let mut keys = AttributeSet::<evdev::KeyCode>::new();
+    keys.insert(evdev::KeyCode::BTN_LEFT);
+    let mut dev = VirtualDevice::builder()?.name("open-studio test pointer").with_relative_axes(&axes)?.with_keys(&keys)?.build()?;
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let orig = record::hyprland::cursor_pos()?;
+    let warp = |x: f64, y: f64| record::hyprland::request(&format!("dispatch hl.dsp.cursor.move({{x={x},y={y}}})"));
+    for p in points.split_whitespace() {
+        let Some((x, y)) = p.split_once(',') else { continue };
+        let (x, y): (f64, f64) = (x.parse()?, y.parse()?);
+        warp(x - 2.0, y)?;
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        for _ in 0..2 {
+            dev.emit(&[InputEvent::new(EventType::RELATIVE.0, RelativeAxisCode::REL_X.0, 1)])?;
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(900));
+    }
+    warp(orig.0, orig.1)?;
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(())
 }

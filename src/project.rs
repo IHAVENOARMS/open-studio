@@ -24,6 +24,30 @@ pub struct Recording {
     pub cursor_embedded: bool,
     pub source: Source,
     pub events: Events,
+    /// Cursor images that matched no theme cursor ("custom:N" shapes).
+    #[serde(default)]
+    pub custom_cursors: Vec<CustomCursor>,
+    /// Project directory, set on load.
+    #[serde(skip)]
+    pub dir: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct CustomCursor {
+    /// PNG relative to the project directory.
+    pub file: String,
+    /// Hotspot in image pixels.
+    pub hotspot: [f64; 2],
+    /// Output scale the image was captured at.
+    pub scale: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ShapeEvent {
+    pub t: f64,
+    /// Canonical cursor name ("default", "text", "pointer", ...), "hidden",
+    /// or "custom:N" indexing `custom_cursors`.
+    pub shape: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -41,6 +65,8 @@ pub struct Events {
     pub moves: Vec<[f64; 3]>,
     pub clicks: Vec<Click>,
     pub keys: Vec<Key>,
+    #[serde(default)]
+    pub shapes: Vec<ShapeEvent>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]
@@ -63,7 +89,16 @@ impl Recording {
     pub fn load(dir: &Path) -> Result<Self> {
         let path = dir.join(RECORDING_FILE);
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        Ok(serde_json::from_str(&text)?)
+        let mut rec: Self = serde_json::from_str(&text)?;
+        rec.dir = dir.to_path_buf();
+        Ok(rec)
+    }
+
+    /// Cursor shape showing at time `t`.
+    pub fn shape_at(&self, t: f64) -> &str {
+        let s = &self.events.shapes;
+        let i = s.partition_point(|e| e.t <= t);
+        if i == 0 { s.first().map(|e| e.shape.as_str()).unwrap_or("default") } else { &s[i - 1].shape }
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {

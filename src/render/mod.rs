@@ -5,7 +5,7 @@ pub mod background;
 pub mod cursor_image;
 
 use crate::edit::{Background, EditConfig};
-use crate::engine::{Camera, FrameState, Layout};
+use crate::engine::{Camera, CursorShape, FrameState, Layout};
 use egui_wgpu::wgpu;
 use wgpu::util::DeviceExt;
 
@@ -31,6 +31,17 @@ struct SpriteUniform {
     tint: [f32; 4],
 }
 
+/// A cursor image on the GPU, with its size and hotspot in cursor units
+/// (see [`cursor_image::PX_PER_UNIT`]).
+struct Sprite {
+    bind: wgpu::BindGroup,
+    size: (f32, f32),
+    hotspot: (f32, f32),
+}
+
+/// Cursor units per nominal (24 px theme) cursor pixel.
+const UNITS_PER_THEME_PX: f32 = 0.9;
+
 struct VideoTexture {
     size: (u32, u32),
     texture: wgpu::Texture,
@@ -50,7 +61,8 @@ pub struct Compositor {
     sampler: wgpu::Sampler,
     scene_buf: wgpu::Buffer,
     sprite_buf: wgpu::Buffer,
-    sprite_bind: wgpu::BindGroup,
+    /// Cursor sprites by shape key, created on first use.
+    sprites: std::collections::HashMap<String, Option<Sprite>>,
     video: Option<VideoTexture>,
     /// Background image (1x1 placeholder when unused) and what it was loaded from.
     bg_view: wgpu::TextureView,
@@ -173,38 +185,6 @@ impl Compositor {
             mapped_at_creation: false,
         });
 
-        let (cw, ch) = cursor_image::SIZE;
-        let cursor_tex = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                label: Some("cursor"),
-                size: wgpu::Extent3d { width: cw, height: ch, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &cursor_image::rasterize(),
-        );
-        let sprite_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cursor"),
-            layout: &scene_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: sprite_buf.as_entire_binding() },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&cursor_tex.create_view(&Default::default())),
-                },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&cursor_tex.create_view(&Default::default())),
-                },
-            ],
-        });
         let placeholder = device.create_texture_with_data(
             &queue,
             &wgpu::TextureDescriptor {
@@ -232,13 +212,79 @@ impl Compositor {
             sampler,
             scene_buf,
             sprite_buf,
-            sprite_bind,
+            sprites: Default::default(),
             video: None,
             bg_view: placeholder.create_view(&Default::default()),
             bg_key: None,
             bg_aspect: 1.0,
             bg_height: 1,
             scene_bind: None,
+        }
+    }
+
+    fn make_sprite(&self, rgba_premul: &[u8], w: u32, h: u32, size: (f32, f32), hotspot: (f32, f32)) -> Sprite {
+        let tex = self.device.create_texture_with_data(
+            &self.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("cursor"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            rgba_premul,
+        );
+        let view = tex.create_view(&Default::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cursor"),
+            layout: &self.scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.sprite_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view) },
+            ],
+        });
+        Sprite { bind, size, hotspot }
+    }
+
+    /// Loads the sprite for a cursor shape: our vector drawing when we have
+    /// one, otherwise the theme's largest image, or the captured image.
+    fn load_sprite(&self, shape: &CursorShape) -> Option<Sprite> {
+        match shape {
+            CursorShape::Named(name) => {
+                if let Some(v) = cursor_image::Vector::for_name(name) {
+                    let n = cursor_image::CANVAS;
+                    let u = cursor_image::PX_PER_UNIT;
+                    let hot = v.hotspot();
+                    return Some(self.make_sprite(&cursor_image::rasterize(v), n, n, (n as f32 / u, n as f32 / u), (hot.0 / u, hot.1 / u)));
+                }
+                let img = crate::xcursor::load_named(name, 96)?;
+                let k = UNITS_PER_THEME_PX * 24.0 / img.size as f32;
+                Some(self.make_sprite(
+                    &img.rgba,
+                    img.width,
+                    img.height,
+                    (img.width as f32 * k, img.height as f32 * k),
+                    (img.hotspot.0 as f32 * k, img.hotspot.1 as f32 * k),
+                ))
+            }
+            CursorShape::Custom { path, hotspot, scale } => {
+                let mut img = image::open(path).ok()?.to_rgba8();
+                for px in img.pixels_mut() {
+                    let a = px[3] as u32;
+                    for c in 0..3 {
+                        px[c] = (px[c] as u32 * a / 255) as u8;
+                    }
+                }
+                let (w, h) = img.dimensions();
+                let k = UNITS_PER_THEME_PX / *scale as f32 * 24.0 / crate::xcursor::base_size() as f32;
+                Some(self.make_sprite(&img, w, h, (w as f32 * k, h as f32 * k), (hotspot.0 as f32 * k, hotspot.1 as f32 * k)))
+            }
         }
     }
 
@@ -456,16 +502,30 @@ impl Compositor {
         };
         self.queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&u));
 
-        let cursor = frame.cursor.filter(|c| c.opacity > 0.0);
+        let cursor = frame.cursor.as_ref().filter(|c| c.opacity > 0.0);
+        let mut sprite_key = None;
         if let Some(cs) = cursor {
+            let key = format!("{:?}", cs.shape);
+            if !self.sprites.contains_key(&key) {
+                let mut sprite = self.load_sprite(&cs.shape);
+                if sprite.is_none() {
+                    sprite = self.load_sprite(&CursorShape::Named("default".into()));
+                }
+                self.sprites.insert(key.clone(), sprite);
+            }
+            sprite_key = Some(key);
+        }
+        let sprite = sprite_key.as_ref().and_then(|k| self.sprites.get(k)).and_then(|s| s.as_ref());
+        if let (Some(cs), Some(sp)) = (cursor, sprite) {
             let to_out = |x: f64, y: f64| {
                 (((x - cam.cx) * cam.scale + layout.aspect * 0.5) * oh as f64, ((y - cam.cy) * cam.scale + 0.5) * oh as f64)
             };
             let (px, py) = to_out(cs.x, cs.y);
-            let h = c.h * 0.035 * cs.scale * cam.scale * oh as f64;
-            let w = h * cursor_image::SIZE.0 as f64 / cursor_image::SIZE.1 as f64;
-            let x0 = px - w * cursor_image::HOTSPOT.0 as f64;
-            let y0 = py - h * cursor_image::HOTSPOT.1 as f64;
+            // Output pixels per cursor unit; an arrow is ~3.5% of the video height at size 1.
+            let k = c.h * 0.035 * cs.scale * cam.scale * oh as f64 / 176.0 * cursor_image::PX_PER_UNIT as f64;
+            let (w, h) = (sp.size.0 as f64 * k, sp.size.1 as f64 * k);
+            let x0 = px - sp.hotspot.0 as f64 * k;
+            let y0 = py - sp.hotspot.1 as f64 * k;
             let ndc = |x: f64, y: f64| [(x / ow as f64 * 2.0 - 1.0) as f32, (1.0 - y / oh as f64 * 2.0) as f32];
             let a = ndc(x0, y0);
             let b = ndc(x0 + w, y0 + h);
@@ -481,9 +541,9 @@ impl Compositor {
                 pass.set_pipeline(&self.scene_pipeline);
                 pass.set_bind_group(0, bind, &[]);
                 pass.draw(0..3, 0..1);
-                if cursor.is_some() {
+                if let (Some(_), Some(sp)) = (cursor, sprite) {
                     pass.set_pipeline(&self.sprite_pipeline);
-                    pass.set_bind_group(0, &self.sprite_bind, &[]);
+                    pass.set_bind_group(0, &sp.bind, &[]);
                     pass.draw(0..4, 0..1);
                 }
             }

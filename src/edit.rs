@@ -92,11 +92,13 @@ pub struct CursorStyle {
     pub speed: AnimationSpeed,
     pub hide_when_idle: bool,
     pub click_effect: bool,
+    /// Ignore recorded cursor shapes and always draw the arrow.
+    pub always_default: bool,
 }
 
 impl Default for CursorStyle {
     fn default() -> Self {
-        Self { size: 1.5, smooth: true, speed: AnimationSpeed::Mellow, hide_when_idle: false, click_effect: true }
+        Self { size: 1.5, smooth: true, speed: AnimationSpeed::Mellow, hide_when_idle: false, click_effect: true, always_default: false }
     }
 }
 

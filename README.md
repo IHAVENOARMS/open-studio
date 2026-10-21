@@ -18,6 +18,15 @@ GIF export are not built yet.
   separately rather than baked into the video.
 - **Cursor and clicks**: the cursor position comes from Hyprland IPC, and clicks
   and keys are read from evdev. Reading evdev requires being in the `input` group.
+- **Cursor shapes**: while recording, a small region around the pointer is
+  captured twice per frame through wlr-screencopy, with and without the
+  cursor. The difference is the cursor as drawn, and the cursor-free copy is
+  the background under it. That is matched against the active XCursor theme
+  to tell the arrow from the I-beam, pointing hand, resize arrows, and so on.
+  The editor redraws each shape as a high-resolution vector cursor (or the
+  theme's 96 px image for rarer shapes). Hyprland's ext-image-copy-capture
+  cursor sessions only cover client-drawn cursors, which is why this
+  approach is used.
 - **Auto zoom**: each burst of clicks becomes a zoom segment (2× by default):
   - it starts 0.4 s before the first click and holds 2.5 s after the last one;
   - bursts with gaps of up to 2.5 s merge into one segment.

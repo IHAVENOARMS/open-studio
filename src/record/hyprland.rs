@@ -41,6 +41,7 @@ pub fn cursor_pos() -> Result<(f64, f64)> {
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Monitor {
+    pub name: String,
     pub x: f64,
     pub y: f64,
     pub width: f64,
