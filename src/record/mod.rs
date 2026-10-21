@@ -13,7 +13,7 @@ pub mod portal;
 
 use crate::project::{Click, CustomCursor, Events, Key, Recording, ShapeEvent, Source, VIDEO_FILE};
 use cursor_shape::{Shape, ShapeChange};
-use crate::util::{monotonic_ns, recordings_dir};
+use crate::util::monotonic_ns;
 use anyhow::{Context, Result};
 use capture::{Capture, CaptureSource};
 use clock::RecClock;
@@ -81,7 +81,7 @@ impl Recorder {
     pub fn start(opts: RecordOptions) -> Result<Self> {
         let dir = match &opts.out_dir {
             Some(d) => d.clone(),
-            None => recordings_dir().join(format!("Recording {}", crate::util::local_timestamp())),
+            None => crate::util::unsaved_dir().join(format!("Recording {}", crate::util::local_timestamp())),
         };
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 

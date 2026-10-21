@@ -168,7 +168,8 @@ fn main() -> Result<()> {
                 direct,
                 microphone: mic.map(|m| if m == "default" { record::audio::DEFAULT_MIC.to_string() } else { m }),
                 system_audio,
-                out_dir: out,
+                // Headless recordings are saved straight into the projects folder.
+                out_dir: out.or_else(|| Some(util::unique_path(&util::projects_dir(), &format!("Recording {}", util::local_timestamp())))),
                 fps,
                 show_system_cursor: system_cursor,
                 reuse_selection: reuse,

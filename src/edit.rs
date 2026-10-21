@@ -19,6 +19,29 @@ pub struct ZoomSegment {
     pub end: f64,
     pub scale: f64,
     pub focus: ZoomFocus,
+    /// A camera zoom, or a Glass Loupe lens that magnifies a spot in place.
+    #[serde(default)]
+    pub kind: ZoomKind,
+    /// Loupe lens size multiplier.
+    #[serde(default = "one")]
+    pub size: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ZoomKind {
+    #[default]
+    Zoom,
+    Loupe,
+}
+
+impl ZoomSegment {
+    pub fn new(start: f64, end: f64, scale: f64, kind: ZoomKind) -> Self {
+        Self { start, end, scale, focus: ZoomFocus::Auto, kind, size: 1.0 }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

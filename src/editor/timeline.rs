@@ -69,7 +69,7 @@ fn set_span(edit: &mut EditConfig, sel: Selection, start: f64, end: f64) {
 fn add_item(edit: &mut EditConfig, track: Track, start: f64, end: f64) -> Selection {
     let index = match track {
         Track::Zoom => {
-            edit.zoom_segments.push(ZoomSegment { start, end, scale: edit.default_zoom, focus: ZoomFocus::Auto });
+            edit.zoom_segments.push(ZoomSegment::new(start, end, edit.default_zoom, crate::edit::ZoomKind::Zoom));
             edit.zoom_segments.sort_by(|a, b| a.start.total_cmp(&b.start));
             edit.zoom_segments.iter().position(|z| z.start == start).unwrap_or(0)
         }
@@ -461,7 +461,8 @@ fn paint_zoom(p: &egui::Painter, r: Rect, seg: &ZoomSegment, selected: bool) {
             ZoomFocus::Manual { .. } => "Manual",
         };
         let scale = if (seg.scale - seg.scale.round()).abs() < 0.05 { format!("{:.0}×", seg.scale) } else { format!("{:.1}×", seg.scale) };
-        p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Zoom", egui::FontId::proportional(12.0), Color32::from_white_alpha(150));
+        let loupe = seg.kind == crate::edit::ZoomKind::Loupe;
+        p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, if loupe { "Glass Loupe" } else { "Zoom" }, egui::FontId::proportional(12.0), Color32::from_white_alpha(150));
         // "[zoom icon] 2x   [mouse icon] Auto"
         let font = egui::FontId::proportional(13.5);
         let a = p.layout_no_wrap(scale, font.clone(), Color32::WHITE);
@@ -470,7 +471,7 @@ fn paint_zoom(p: &egui::Painter, r: Rect, seg: &ZoomSegment, selected: bool) {
         let total = icon + 3.0 + a.size().x + 12.0 + icon + 3.0 + b.size().x;
         let mut x = r.center().x - total / 2.0;
         let y = r.center().y + 9.0;
-        icons::paint(p, Rect::from_center_size(pos2(x + icon / 2.0, y), vec2(icon, icon)), Icon::Zoom, Color32::WHITE);
+        icons::paint(p, Rect::from_center_size(pos2(x + icon / 2.0, y), vec2(icon, icon)), if loupe { Icon::Loupe } else { Icon::Zoom }, Color32::WHITE);
         x += icon + 3.0;
         let aw = a.size();
         p.galley(pos2(x, y - aw.y / 2.0), a, Color32::WHITE);

@@ -33,7 +33,7 @@ pub fn auto_zoom_segments(rec: &Recording, scale: f64) -> Vec<ZoomSegment> {
             Some(last) if start - last.end <= MERGE_GAP => {
                 last.end = last.end.max(end);
             }
-            _ => segs.push(ZoomSegment { start, end, scale, focus: ZoomFocus::Auto }),
+            _ => segs.push(ZoomSegment::new(start, end, scale, crate::edit::ZoomKind::Zoom)),
         }
     }
     for s in &mut segs {
@@ -230,7 +230,7 @@ impl Tracks {
         let mut cameras = Vec::with_capacity(n);
         for i in 0..n {
             let t = i as f64 * DT;
-            let seg_idx = edit.zoom_segments.iter().position(|s| t >= s.start && t < s.end);
+            let seg_idx = edit.zoom_segments.iter().position(|s| s.kind == crate::edit::ZoomKind::Zoom && t >= s.start && t < s.end);
             let (target, target_scale) = match seg_idx {
                 Some(si) => {
                     let seg = &edit.zoom_segments[si];
@@ -365,6 +365,20 @@ pub struct FrameState {
     pub click: Option<ClickFx>,
     pub keys: Option<KeyOverlay>,
     pub caption: Option<CaptionFrame>,
+    pub loupe: Option<LoupeFrame>,
+}
+
+/// Glass Loupe lens: magnifies a spot of the video in place.
+#[derive(Clone, Copy, Debug)]
+pub struct LoupeFrame {
+    /// Lens centre, normalized video coordinates.
+    pub x: f64,
+    pub y: f64,
+    /// Radius as a fraction of the video height.
+    pub radius: f64,
+    pub magnification: f64,
+    /// 0..1 grow-in / shrink-out.
+    pub amount: f64,
 }
 
 /// The caption line on screen.
@@ -493,7 +507,25 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
     // Click effects also show with a hidden cursor (taps on phone recordings).
     let click = if rec.cursor_embedded || rec.events.moves.is_empty() { None } else { click_fx(rec, edit, tracks, t) };
     let caption = caption_frame(rec, edit, tracks, t);
-    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t), click, keys: key_overlay(edit, tracks, t), caption }
+    let loupe = loupe_frame(edit, tracks, t);
+    FrameState { camera, blur_from, blur_to, cursor, masks: active_masks(edit, t), click, keys: key_overlay(edit, tracks, t), caption, loupe }
+}
+
+/// The loupe active at `t`: grows in and out over 0.3s with a soft overshoot
+/// and follows the smoothed cursor (Auto) or stays on its point (Manual).
+fn loupe_frame(edit: &EditConfig, tracks: &Tracks, t: f64) -> Option<LoupeFrame> {
+    const GROW: f64 = 0.3;
+    let seg = edit.zoom_segments.iter().find(|s| s.kind == crate::edit::ZoomKind::Loupe && t >= s.start && t < s.end)?;
+    let f = ((t - seg.start) / GROW).min((seg.end - t) / GROW).clamp(0.0, 1.0);
+    let amount = crate::edit::cubic_bezier(0.34, 1.3, 0.64, 1.0, f);
+    let (x, y) = match seg.focus {
+        ZoomFocus::Auto => {
+            let (vx, vy) = tracks.cursor(t);
+            (vx / tracks.layout.video_w, vy / tracks.layout.video_h)
+        }
+        ZoomFocus::Manual { x, y } => (x, y),
+    };
+    Some(LoupeFrame { x, y, radius: 0.15 * seg.size, magnification: seg.scale.max(1.0), amount })
 }
 
 /// The caption line around `t`; lines stay up briefly after their last word.
@@ -635,7 +667,7 @@ mod tests {
 
     fn scales(curve: ZoomCurve) -> Vec<f64> {
         let edit = EditConfig {
-            zoom_segments: vec![ZoomSegment { start: 1.0, end: 5.0, scale: 2.0, focus: ZoomFocus::Auto }],
+            zoom_segments: vec![ZoomSegment::new(1.0, 5.0, 2.0, crate::edit::ZoomKind::Zoom)],
             zoom_curve: Some(curve),
             ..Default::default()
         };
@@ -688,7 +720,7 @@ mod tests {
     #[test]
     fn instant_animation_cuts() {
         let mut edit = EditConfig {
-            zoom_segments: vec![ZoomSegment { start: 1.0, end: 5.0, scale: 2.0, focus: ZoomFocus::Auto }],
+            zoom_segments: vec![ZoomSegment::new(1.0, 5.0, 2.0, crate::edit::ZoomKind::Zoom)],
             ..Default::default()
         };
         edit.instant_animation = true;

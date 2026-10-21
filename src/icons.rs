@@ -28,6 +28,14 @@ pub enum Icon {
     File,
     Trash,
     Scissors,
+    Loupe,
+    CamPip,
+    CamSplit,
+    CamFull,
+    CamOnly,
+    CamHidden,
+    MaskHighlight,
+    MaskBlur,
     Mask,
     Display,
     Window,
@@ -351,6 +359,59 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Mask => {
             pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);
             p.rect_filled(Rect::from_min_max(pen.pt(5.0, 7.0), pen.pt(12.0, 13.0)), k, color);
+        }
+        Icon::Loupe => {
+            // Magnifier with a plus, the lens drawn doubled like glass.
+            pen.circle(8.5, 8.5, 6.0);
+            pen.line(&[(13.0, 13.0), (17.5, 17.5)]);
+            pen.line(&[(6.0, 8.5), (11.0, 8.5)]);
+            pen.line(&[(8.5, 6.0), (8.5, 11.0)]);
+            p.add(egui::Shape::line(
+                (0..=8).map(|i| {
+                    let a = std::f32::consts::PI * (1.05 + 0.4 * i as f32 / 8.0);
+                    pen.pt(8.5 + 4.0 * a.cos(), 8.5 + 4.0 * a.sin())
+                }).collect(),
+                Stroke::new(1.0 * k, color.gamma_multiply(0.7)),
+            ));
+        }
+        Icon::CamPip => {
+            pen.rrect(4.5, 3.5, 17.5, 13.5, 2.0);
+            p.circle_filled(pen.pt(4.5, 14.5), 3.2 * k, color);
+        }
+        Icon::CamSplit => {
+            pen.rrect(2.5, 4.0, 17.5, 16.0, 2.0);
+            pen.line(&[(10.0, 4.0), (10.0, 16.0)]);
+        }
+        Icon::CamFull => {
+            pen.rrect(2.5, 3.5, 17.5, 16.5, 2.0);
+            p.circle_filled(pen.pt(10.0, 8.5), 2.3 * k, color);
+            pen.fill(&[(5.5, 16.5), (6.3, 13.0), (10.0, 11.8), (13.7, 13.0), (14.5, 16.5)]);
+            for x in [5.0, 15.0] {
+                p.circle_filled(pen.pt(x, 6.0), 0.8 * k, color);
+            }
+        }
+        Icon::CamOnly => {
+            pen.rrect(3.5, 3.5, 16.5, 16.5, 2.5);
+            p.circle_filled(pen.pt(10.0, 8.5), 2.4 * k, color);
+            pen.fill(&[(5.8, 16.5), (6.6, 13.2), (10.0, 12.0), (13.4, 13.2), (14.2, 16.5)]);
+        }
+        Icon::CamHidden => {
+            pen.circle(10.0, 7.0, 3.0);
+            pen.line(&[(4.5, 17.0), (5.5, 13.0), (10.0, 11.5), (14.5, 13.0), (15.5, 17.0)]);
+            pen.line(&[(3.0, 3.0), (17.0, 17.5)]);
+        }
+        Icon::MaskHighlight => {
+            pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);
+            pen.circle(10.0, 10.0, 3.6);
+            pen.line(&[(7.4, 12.6), (12.6, 7.4)]);
+        }
+        Icon::MaskBlur => {
+            pen.rrect(2.5, 4.0, 17.5, 16.0, 2.5);
+            for i in 0..5 {
+                let x = 3.0 + i as f32 * 3.2;
+                pen.line(&[(x, 15.5), ((x + 6.0).min(17.0), 15.5 - (x + 6.0).min(17.0) + x)]);
+            }
+            p.circle_filled(pen.pt(10.0, 10.0), 2.0 * k, color);
         }
     }
 }

@@ -2,7 +2,7 @@
 
 use super::widgets;
 use super::timeline::{Selection, Track};
-use crate::edit::{AnimationSpeed, Background, ClickSound, ClickVisual, EditConfig, Mask, MaskKind, MicMode, ScreenAnimation, ShadowStyle, ZoomFocus};
+use crate::edit::{ZoomKind, AnimationSpeed, Background, ClickSound, ClickVisual, EditConfig, Mask, MaskKind, MicMode, ScreenAnimation, ShadowStyle, ZoomFocus};
 use crate::project::Recording;
 use crate::render::background::PRESETS;
 use crate::dialogs;
@@ -691,6 +691,37 @@ fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Opt
     ui.add_space(8.0);
     let default_zoom = edit.default_zoom;
     let seg = &mut edit.zoom_segments[i];
+    theme::section(ui, "Type");
+    if widgets::tabs(ui, &mut seg.kind, &[(ZoomKind::Zoom, "Zoom"), (ZoomKind::Loupe, "Glass Loupe")]) && seg.kind == ZoomKind::Loupe {
+        seg.scale = seg.scale.max(1.5);
+    }
+    if seg.kind == ZoomKind::Loupe {
+        help(ui, "Magnify a detail under a glass lens. Viewers see it up close, along with everything around it. Use it where a classic zoom would move too much of your screen.");
+        theme::section(ui, "Lens position");
+        let mut manual = matches!(seg.focus, ZoomFocus::Manual { .. });
+        if widgets::tabs(ui, &mut manual, &[(false, "Follow cursor"), (true, "Manual")]) {
+            seg.focus = if manual { ZoomFocus::Manual { x: 0.5, y: 0.5 } } else { ZoomFocus::Auto };
+        }
+        if manual {
+            help(ui, "Click on the preview to place the lens.");
+        }
+        theme::section(ui, &format!("Magnification  ·  {:.1}×", seg.scale));
+        widgets::slider(ui, &mut seg.scale, 1.2..=4.0, Some(2.0));
+        theme::section(ui, &format!("Lens size  ·  {:.0}%", seg.size * 100.0));
+        widgets::slider(ui, &mut seg.size, 0.4..=2.5, Some(1.0));
+        widgets::divider(ui);
+        let remove = ui.add(
+            egui::Button::new(RichText::new("Remove loupe").size(13.5).color(theme::RECORD))
+                .fill(theme::SURFACE)
+                .corner_radius(CornerRadius::same(8))
+                .min_size(vec2(ui.available_width(), 38.0)),
+        );
+        if remove.clicked() {
+            edit.zoom_segments.remove(i);
+            *selected = None;
+        }
+        return;
+    }
     theme::section(ui, "Zoom mode");
     let mut manual = matches!(seg.focus, ZoomFocus::Manual { .. });
     if widgets::tabs(ui, &mut manual, &[(false, "Auto"), (true, "Manual")]) {
@@ -714,7 +745,7 @@ fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Opt
         edit.default_zoom = scale;
     }
     if widgets::wide_button(ui, "Apply to all zooms").clicked() {
-        for s in &mut edit.zoom_segments {
+        for s in edit.zoom_segments.iter_mut().filter(|s| s.kind == ZoomKind::Zoom) {
             s.scale = scale;
         }
     }

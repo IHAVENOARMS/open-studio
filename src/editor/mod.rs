@@ -62,6 +62,15 @@ pub enum Action {
     GoHome,
     /// The project was deleted; leave the editor.
     Deleted,
+    /// Close the app (after the unsaved-changes prompt).
+    Quit,
+}
+
+/// What the user was doing when asked about unsaved changes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Leaving {
+    Home,
+    Quit,
 }
 
 pub struct Editor {
@@ -72,7 +81,13 @@ pub struct Editor {
     tracks: Tracks,
     tracks_for: EditConfig,
     saved: EditConfig,
-    changed_at: Option<Instant>,
+    /// Title being edited (click the project name to rename).
+    renaming: Option<String>,
+    /// Unsaved-changes prompt.
+    leaving: Option<Leaving>,
+    saving_as: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
+    /// Short message under the title ("Saved", errors).
+    status: Option<(String, Instant)>,
     player: Player,
     audio: audio::AudioPreview,
     /// Waveform envelope for the clip track (computed in the background).
@@ -105,7 +120,10 @@ impl Editor {
             tracks,
             tracks_for: edit.clone(),
             saved: edit.clone(),
-            changed_at: None,
+            renaming: None,
+            leaving: None,
+            saving_as: None,
+            status: None,
             edit,
             player,
             audio,
@@ -154,26 +172,264 @@ impl Editor {
         }
     }
 
-    /// Selects the mask under the playhead, or adds a new one there.
-    fn add_mask_at_playhead(&mut self) {
+    /// Selects the mask under the playhead, or adds a new one of `kind` there.
+    fn add_mask_at_playhead(&mut self, kind: crate::edit::MaskKind) {
         if let Some(i) = self.edit.masks.iter().position(|m| self.time >= m.start && self.time < m.end) {
             self.selected = Some(Selection { track: Track::Mask, index: i });
             return;
         }
         let start = self.time.min(self.rec.duration - 0.3).max(0.0);
         let Some((s, e)) = timeline::free_span_on(&self.edit, Track::Mask, start, 3.0, self.rec.duration) else { return };
-        let index = timeline::add_mask(&mut self.edit, crate::edit::Mask::new(s, e));
+        let mut mask = crate::edit::Mask::new(s, e);
+        mask.kind = kind;
+        let index = timeline::add_mask(&mut self.edit, mask);
         self.selected = Some(Selection { track: Track::Mask, index });
     }
 
-    pub fn save(&mut self) {
-        if self.edit != self.saved {
-            if let Err(e) = self.edit.save(&self.dir) {
-                eprintln!("open-studio: saving project failed: {e:#}");
-            }
-            self.saved = self.edit.clone();
+    /// Selects the zoom under the playhead, or adds a zoom or loupe there.
+    fn add_zoom_at_playhead(&mut self, kind: crate::edit::ZoomKind) {
+        if let Some(i) = self.edit.zoom_segments.iter().position(|z| self.time >= z.start && self.time < z.end) {
+            self.selected = Some(Selection { track: Track::Zoom, index: i });
+            return;
         }
-        self.changed_at = None;
+        let start = self.time.min(self.rec.duration - 0.3).max(0.0);
+        let Some((s, e)) = timeline::free_span_on(&self.edit, Track::Zoom, start, 3.0, self.rec.duration) else { return };
+        let scale = if kind == crate::edit::ZoomKind::Loupe { 2.0 } else { self.edit.default_zoom };
+        self.edit.zoom_segments.push(crate::edit::ZoomSegment::new(s, e, scale, kind));
+        self.edit.zoom_segments.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let index = self.edit.zoom_segments.iter().position(|z| z.start == s).unwrap_or(0);
+        self.selected = Some(Selection { track: Track::Zoom, index });
+    }
+
+    /// Screen Studio's toolbar next to the preview: add zooms, camera layouts
+    /// and masks at the playhead.
+    fn tool_pill(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        use crate::edit::{MaskKind, ZoomKind};
+        let has_camera = self.rec.camera.is_some();
+        let groups: [&[(Icon, &str, u8)]; 3] = [
+            &[(Icon::Zoom, "Add zoom", 0), (Icon::Loupe, "Add Glass Loupe: magnify a detail under a glass lens", 1)],
+            &[
+                (Icon::CamPip, "Camera in a corner", 10),
+                (Icon::CamSplit, "Split screen", 10),
+                (Icon::CamFull, "Camera fullscreen", 10),
+                (Icon::CamOnly, "Camera only", 10),
+                (Icon::CamHidden, "Hide camera", 10),
+            ],
+            &[(Icon::MaskHighlight, "Add highlight mask", 2), (Icon::MaskBlur, "Add sensitive data mask", 3)],
+        ];
+        // Shrinks to fit short windows.
+        let n: usize = groups.iter().map(|g| g.len()).sum();
+        let gap = 16.0f32.min(rect.height() * 0.03);
+        let step = ((rect.height() - 2.0 * gap - 16.0) / n as f32).clamp(22.0, 42.0);
+        let h = n as f32 * step + 2.0 * gap + 16.0;
+        let pill = egui::Rect::from_center_size(egui::pos2(rect.left() + 26.0, rect.center().y), egui::vec2(50.0, h));
+        let p = ui.painter();
+        p.rect_filled(pill, 16.0, egui::Color32::from_rgb(0x1b, 0x1d, 0x22));
+        p.rect_stroke(pill, 16.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(0x26, 0x28, 0x2d)), egui::StrokeKind::Inside);
+        let mut y = pill.top() + 8.0;
+        let mut clicked = None;
+        for (gi, g) in groups.iter().enumerate() {
+            if gi > 0 {
+                y += gap;
+            }
+            for (icon, tip, action) in g.iter().copied() {
+                let r = egui::Rect::from_min_size(egui::pos2(pill.left() + 5.0, y + 1.0), egui::vec2(40.0, step - 2.0));
+                let enabled = action != 10 || has_camera;
+                let resp = ui.interact(r, ui.scope_id().with(("tool", tip)), egui::Sense::click());
+                if enabled && resp.hovered() {
+                    ui.painter().rect_filled(r, 10.0, egui::Color32::from_white_alpha(14));
+                }
+                let col = if enabled { egui::Color32::WHITE } else { egui::Color32::from_rgb(0x53, 0x53, 0x55) };
+                let size = (step * 0.45).clamp(14.0, 19.0);
+                icons::paint(ui.painter(), egui::Rect::from_center_size(r.center(), egui::vec2(size, size)), icon, col);
+                let resp = if enabled {
+                    resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
+                } else {
+                    resp.on_hover_text(format!("{tip}: record with a camera to use this"))
+                };
+                if enabled && resp.clicked() {
+                    clicked = Some(action);
+                }
+                y += step;
+            }
+        }
+        match clicked {
+            Some(0) => self.add_zoom_at_playhead(ZoomKind::Zoom),
+            Some(1) => self.add_zoom_at_playhead(ZoomKind::Loupe),
+            Some(2) => self.add_mask_at_playhead(MaskKind::Highlight),
+            Some(3) => self.add_mask_at_playhead(MaskKind::Blur),
+            _ => {}
+        }
+    }
+
+    /// Project name in the top bar; click it to rename. "Edited" shows while
+    /// there are unsaved changes.
+    fn title(&mut self, ui: &mut egui::Ui) {
+        let font = egui::FontId::proportional(14.0);
+        if let Some(text) = &mut self.renaming {
+            let r = ui.add(egui::TextEdit::singleline(text).font(font).desired_width(260.0));
+            r.request_focus();
+            let (enter, esc) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+            if esc {
+                self.renaming = None;
+            } else if enter || r.lost_focus() {
+                let name = self.renaming.take().unwrap_or_default();
+                if let Err(e) = self.rename(&name) {
+                    self.notify(format!("Couldn't rename: {e:#}"));
+                }
+            }
+            return;
+        }
+        let mut job = egui::text::LayoutJob::default();
+        job.append(&self.name, 0.0, egui::TextFormat::simple(font.clone(), theme::TEXT));
+        job.append(".openstudio", 0.0, egui::TextFormat::simple(font.clone(), theme::TEXT_DIM));
+        let status = self.status.as_ref().filter(|(_, t)| t.elapsed().as_secs_f32() < 4.0).map(|(m, _)| m.clone());
+        if let Some(m) = status {
+            job.append(&format!("   {m}"), 0.0, egui::TextFormat::simple(egui::FontId::proportional(12.5), theme::TEXT_DIM));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        } else if self.has_unsaved_changes() {
+            let note = if self.is_new() { "   Not saved" } else { "   Edited" };
+            job.append(note, 0.0, egui::TextFormat::simple(egui::FontId::proportional(12.5), theme::TEXT_DIM));
+        }
+        let r = ui.add(egui::Label::new(job).sense(Sense::click()));
+        let r = r.on_hover_text("Click to rename.  Ctrl+S saves, Ctrl+Shift+S saves to another folder.").on_hover_cursor(egui::CursorIcon::Text);
+        if r.clicked() {
+            self.renaming = Some(self.name.clone());
+        }
+    }
+
+    /// A new recording that hasn't been saved yet.
+    pub fn is_new(&self) -> bool {
+        self.dir.starts_with(crate::util::unsaved_dir())
+    }
+
+    pub fn has_unsaved_changes(&self) -> bool {
+        self.is_new() || self.edit != self.saved
+    }
+
+    fn set_dir(&mut self, dir: PathBuf) {
+        self.rec.dir = dir.clone();
+        self.dir = dir;
+    }
+
+    fn notify(&mut self, msg: impl Into<String>) {
+        self.status = Some((msg.into(), Instant::now()));
+    }
+
+    /// Ctrl+S: writes the project; a new recording moves into the projects
+    /// folder under its name.
+    pub fn save(&mut self) -> anyhow::Result<()> {
+        if self.is_new() {
+            let target = crate::util::unique_path(&crate::util::projects_dir(), &self.name);
+            crate::util::move_dir(&self.dir, &target)?;
+            self.set_dir(target);
+        }
+        self.edit.save(&self.dir)?;
+        self.saved = self.edit.clone();
+        Ok(())
+    }
+
+    /// Ctrl+Shift+S: saves into `folder`. A saved project is copied there and
+    /// the editor continues on the copy.
+    fn save_as(&mut self, folder: &std::path::Path) -> anyhow::Result<()> {
+        let target = crate::util::unique_path(folder, &self.name);
+        if self.is_new() {
+            crate::util::move_dir(&self.dir, &target)?;
+        } else {
+            crate::util::copy_dir(&self.dir, &target)?;
+        }
+        self.set_dir(target);
+        self.edit.save(&self.dir)?;
+        self.saved = self.edit.clone();
+        Ok(())
+    }
+
+    /// Renames the project; a saved project's folder is renamed with it.
+    fn rename(&mut self, name: &str) -> anyhow::Result<()> {
+        let name = name.trim().replace('/', "-");
+        if name.is_empty() || name == self.name {
+            return Ok(());
+        }
+        if !self.is_new() {
+            let target = self.dir.with_file_name(&name);
+            if target.exists() {
+                anyhow::bail!("a project named \"{name}\" already exists");
+            }
+            std::fs::rename(&self.dir, &target)?;
+            self.set_dir(target);
+        }
+        self.name = name;
+        Ok(())
+    }
+
+    /// Leaves the editor, asking first when there are unsaved changes.
+    pub fn request_leave(&mut self, why: Leaving) -> Action {
+        if self.has_unsaved_changes() {
+            self.leaving = Some(why);
+            Action::None
+        } else {
+            leave_action(why)
+        }
+    }
+
+    fn save_with_feedback(&mut self) {
+        match self.save() {
+            Ok(()) => self.notify(format!("Saved to {}", self.dir.display())),
+            Err(e) => self.notify(format!("Saving failed: {e:#}")),
+        }
+    }
+
+    /// The unsaved-changes prompt. Screen Studio asks whether to save or
+    /// delete a new recording; for a saved project, whether to save changes.
+    fn leave_prompt(&mut self, ctx: &egui::Context) -> Action {
+        let Some(why) = self.leaving else { return Action::None };
+        let mut out = Action::None;
+        let new = self.is_new();
+        egui::Modal::new(egui::Id::NULL.with("leave-prompt")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            let title = if new { "Save this recording?".to_string() } else { format!("Save changes to \u{201c}{}\u{201d}?", self.name) };
+            ui.label(egui::RichText::new(title).font(theme::semibold(16.0)));
+            ui.label(
+                egui::RichText::new(if new {
+                    "It hasn't been saved yet. If you don't save it, the recording is deleted."
+                } else {
+                    "Your changes since the last save will be lost if you don't save them."
+                })
+                .size(13.0)
+                .color(theme::TEXT_DIM),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let discard = if new { "Delete" } else { "Don't save" };
+                if ui.add(egui::Button::new(egui::RichText::new(discard).color(theme::RECORD)).min_size(egui::vec2(96.0, 32.0))).clicked() {
+                    if new {
+                        let _ = trash(&self.dir);
+                    }
+                    self.edit = self.saved.clone();
+                    self.leaving = None;
+                    out = if new && why == Leaving::Home { Action::GoHome } else { leave_action(why) };
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::primary_button(ui, "Save").clicked() {
+                        match self.save() {
+                            Ok(()) => {
+                                self.leaving = None;
+                                out = leave_action(why);
+                            }
+                            Err(e) => self.notify(format!("Saving failed: {e:#}")),
+                        }
+                    }
+                    if ui.add(egui::Button::new("Cancel").min_size(egui::vec2(80.0, 32.0))).clicked() {
+                        self.leaving = None;
+                    }
+                });
+            });
+            if let Some((m, _)) = &self.status {
+                ui.label(egui::RichText::new(m).size(12.0).color(theme::RECORD));
+            }
+        });
+        out
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) -> Action {
@@ -212,14 +468,13 @@ impl Editor {
                         .on_hover_text("Projects")
                         .clicked()
                     {
-                        action = Action::GoHome;
+                        action = self.request_leave(Leaving::Home);
                     }
                     ui.add_space(4.0);
                     if icons::button(ui, Icon::Trash, "", egui::FontId::proportional(15.0), theme::TEXT, None, Vec2::ZERO)
                         .on_hover_text("Delete project (moves it to the trash)")
                         .clicked()
                     {
-                        self.save();
                         match trash(&self.dir) {
                             Ok(()) => action = Action::Deleted,
                             Err(e) => eprintln!("open-studio: deleting project failed: {e:#}"),
@@ -231,12 +486,7 @@ impl Editor {
                         {
                             self.export = Some(ExportDialog { settings: Settings::load(), job: None, picking_dir: None, saving: None });
                         }
-                        ui.centered_and_justified(|ui| {
-                            let mut job = egui::text::LayoutJob::default();
-                            job.append(&self.name, 0.0, egui::TextFormat::simple(egui::FontId::proportional(14.0), theme::TEXT));
-                            job.append(".openstudio", 0.0, egui::TextFormat::simple(egui::FontId::proportional(14.0), theme::TEXT_DIM));
-                            ui.label(job);
-                        });
+                        ui.centered_and_justified(|ui| self.title(ui));
                     });
                 });
             });
@@ -294,17 +544,13 @@ impl Editor {
                             }
                         }
                     });
-                    let mask_active = matches!(self.selected, Some(Selection { track: Track::Mask, .. }));
-                    let col = if mask_active { theme::KNOB } else { theme::TEXT };
-                    let mb = icons::button(ui, Icon::Mask, "Mask", egui::FontId::proportional(13.5), col, Some(theme::SURFACE), egui::vec2(0.0, 30.0))
-                        .on_hover_text("Add a blur or highlight mask at the playhead");
-                    if mb.clicked() {
-                        self.add_mask_at_playhead();
-                    }
                 });
                 let bar_h = 48.0;
                 let avail = ui.available_rect_before_wrap();
-                let preview_rect = egui::Rect::from_min_max(avail.min, egui::pos2(avail.max.x, avail.max.y - bar_h));
+                // Tool pill on the left, preview to its right.
+                let pill_rect = egui::Rect::from_min_max(avail.min, egui::pos2(avail.min.x + 56.0, avail.max.y - bar_h));
+                self.tool_pill(ui, pill_rect);
+                let preview_rect = egui::Rect::from_min_max(egui::pos2(avail.min.x + 68.0, avail.min.y), egui::pos2(avail.max.x, avail.max.y - bar_h));
                 ui.scope_builder(egui::UiBuilder::new().max_rect(preview_rect), |ui| self.preview(ui, rs));
                 let bar_rect = egui::Rect::from_min_max(egui::pos2(avail.min.x, avail.max.y - bar_h), avail.max);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
@@ -321,21 +567,43 @@ impl Editor {
 
         self.export_dialog(&ctx);
 
-        // Rebuild motion tracks when edits change, autosave shortly after.
+        // Rebuild motion tracks when edits change. Nothing is written to
+        // disk until the project is saved.
         if self.edit != self.tracks_for {
             self.tracks = Tracks::build(&self.rec, &self.edit);
             self.tracks_for = self.edit.clone();
-            self.changed_at = Some(Instant::now());
         }
-        if self.changed_at.is_some_and(|t| t.elapsed().as_secs_f64() > 1.0) {
-            self.save();
-        } else if self.changed_at.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        // Save As folder chosen.
+        if let Some(rx) = &self.saving_as {
+            match rx.try_recv() {
+                Ok(folders) => {
+                    self.saving_as = None;
+                    if let Some(f) = folders.into_iter().next() {
+                        match self.save_as(&f) {
+                            Ok(()) => self.notify(format!("Saved to {}", self.dir.display())),
+                            Err(e) => self.notify(format!("Saving failed: {e:#}")),
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.saving_as = None,
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
+        if let Action::None = action {
+            action = self.leave_prompt(&ctx);
         }
         action
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        // Ctrl+S saves, Ctrl+Shift+S asks where.
+        let save_as = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::S));
+        let save = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::S));
+        if save_as && self.saving_as.is_none() {
+            self.saving_as = Some(crate::dialogs::open_folder(ctx.clone(), "Save project to", Some(crate::util::projects_dir())));
+        } else if save {
+            self.save_with_feedback();
+        }
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -733,6 +1001,13 @@ impl Editor {
 
 /// Moves a project to the desktop trash (recoverable), or deletes it when
 /// no trash is available.
+fn leave_action(why: Leaving) -> Action {
+    match why {
+        Leaving::Home => Action::GoHome,
+        Leaving::Quit => Action::Quit,
+    }
+}
+
 fn trash(dir: &std::path::Path) -> anyhow::Result<()> {
     let ok = std::process::Command::new("gio").arg("trash").arg(dir).status().map(|s| s.success()).unwrap_or(false);
     if !ok {

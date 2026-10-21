@@ -1,12 +1,12 @@
 //! Top-level window: home screen, recording state and the editor.
 
 use crate::control::ControlServer;
-use crate::editor::{Action, Editor};
+use crate::editor::{Action, Editor, Leaving};
 use crate::icons::{self, Icon};
 use crate::project::Recording;
 use crate::record::{RecordOptions, Recorder, hyprland};
 use crate::theme;
-use crate::util::{format_time, recordings_dir};
+use crate::util::format_time;
 use egui::{Color32, CornerRadius, RichText, Sense, vec2};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,6 +37,7 @@ struct ProjectEntry {
     name: String,
     duration: f64,
     modified: std::time::SystemTime,
+    unsaved: bool,
 }
 
 pub struct App {
@@ -46,17 +47,24 @@ pub struct App {
     hide_while_recording: bool,
     error: Option<String>,
     control: Option<Arc<ControlServer>>,
+    /// The unsaved-changes prompt has been answered; let the window close.
+    may_close: bool,
+    picking_projects_dir: Option<Receiver<Vec<PathBuf>>>,
 }
 
+/// Saved projects, plus recordings never saved (left over when the app was
+/// closed abruptly), which are listed so they can be saved or deleted.
 fn scan_projects() -> Vec<ProjectEntry> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(recordings_dir()) else { return out };
-    for e in entries.flatten() {
-        let dir = e.path();
-        let Ok(rec) = Recording::load(&dir) else { continue };
-        let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
-        let name = crate::project::ProjectPaths::new(&dir).name();
-        out.push(ProjectEntry { dir, name, duration: rec.duration, modified });
+    for (root, unsaved) in [(crate::util::projects_dir(), false), (crate::util::unsaved_dir(), true)] {
+        let Ok(entries) = std::fs::read_dir(root) else { continue };
+        for e in entries.flatten() {
+            let dir = e.path();
+            let Ok(rec) = Recording::load(&dir) else { continue };
+            let modified = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            let name = crate::project::ProjectPaths::new(&dir).name();
+            out.push(ProjectEntry { dir, name, duration: rec.duration, modified, unsaved });
+        }
     }
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
     out
@@ -72,6 +80,8 @@ impl App {
             hide_while_recording: hyprland::available(),
             error: None,
             control: ControlServer::start().ok().map(Arc::new),
+            may_close: false,
+            picking_projects_dir: None,
         };
         if let (Some(dir), Some(rs)) = (open, cc.wgpu_render_state.as_ref()) {
             app.open_editor(dir, &cc.egui_ctx, rs);
@@ -143,7 +153,26 @@ impl App {
                     }
                     ui.add_space(28.0);
                 });
-                ui.label(RichText::new("Recent projects").font(theme::semibold(14.0)));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Recent projects").font(theme::semibold(14.0)));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(rx) = &self.picking_projects_dir {
+                            if let Ok(f) = rx.try_recv() {
+                                if let Some(dir) = f.into_iter().next() {
+                                    let mut s = crate::settings::Settings::load();
+                                    s.projects_dir = dir;
+                                    s.save();
+                                    self.projects = scan_projects();
+                                }
+                                self.picking_projects_dir = None;
+                            }
+                        }
+                        if ui.button("Change").on_hover_text("Folder where saved projects go").clicked() && self.picking_projects_dir.is_none() {
+                            self.picking_projects_dir = Some(crate::dialogs::open_folder(ctx.clone(), "Projects folder", Some(crate::util::projects_dir())));
+                        }
+                        ui.label(RichText::new(crate::util::projects_dir().display().to_string()).size(12.0).color(theme::TEXT_DIM));
+                    });
+                });
                 ui.add_space(6.0);
                 let mut open = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -154,7 +183,10 @@ impl App {
                         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
                         let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::PANEL };
                         ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
-                        ui.painter().text(rect.left_center() + vec2(16.0, 0.0), egui::Align2::LEFT_CENTER, &p.name, egui::FontId::proportional(14.0), theme::TEXT);
+                        let g = ui.painter().text(rect.left_center() + vec2(16.0, 0.0), egui::Align2::LEFT_CENTER, &p.name, egui::FontId::proportional(14.0), theme::TEXT);
+                        if p.unsaved {
+                            ui.painter().text(g.right_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, "Not saved", egui::FontId::proportional(12.5), theme::TEXT_DIM);
+                        }
                         ui.painter().text(rect.right_center() - vec2(16.0, 0.0), egui::Align2::RIGHT_CENTER, format_time(p.duration), egui::FontId::proportional(13.0), theme::TEXT_DIM);
                         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                             open = Some(p.dir.clone());
@@ -292,14 +324,26 @@ impl eframe::App for App {
             ui.label("Open Studio needs the wgpu renderer.");
             return;
         };
+        // Closing the window with unsaved changes asks first.
+        if ui.ctx().input(|i| i.viewport().close_requested()) && !self.may_close {
+            if let Mode::Editor(ed) = &mut self.mode {
+                if ed.has_unsaved_changes() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ed.request_leave(Leaving::Quit);
+                }
+            }
+        }
         match &mut self.mode {
             Mode::Home => self.home(ui, &rs),
             Mode::Recording(_) => self.recording(ui, &rs),
             Mode::Editor(ed) => match ed.ui(ui, &rs) {
                 Action::GoHome => {
-                    ed.save();
                     self.projects = scan_projects();
                     self.mode = Mode::Home;
+                }
+                Action::Quit => {
+                    self.may_close = true;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 Action::Deleted => {
                     // Close the app and go back to the recording bar.
@@ -312,11 +356,6 @@ impl eframe::App for App {
         }
     }
 
-    fn on_exit(&mut self) {
-        if let Mode::Editor(ed) = &mut self.mode {
-            ed.save();
-        }
-    }
 }
 
 /// Set when the app closes to return to the recording bar.

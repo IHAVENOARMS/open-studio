@@ -56,6 +56,8 @@ pub enum Destination {
 #[serde(default)]
 pub struct Settings {
     pub export_dir: PathBuf,
+    /// Where Save puts projects.
+    pub projects_dir: PathBuf,
     pub format: Format,
     pub fps: u32,
     /// None means the recording's native height.
@@ -138,6 +140,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             export_dir: crate::util::recordings_dir(),
+            projects_dir: crate::util::recordings_dir(),
             format: Format::Mp4,
             fps: 60,
             height: None,

@@ -15,6 +15,56 @@ pub fn recordings_dir() -> PathBuf {
     base.join("Open Studio")
 }
 
+/// Where saved projects go (Settings > projects folder).
+pub fn projects_dir() -> PathBuf {
+    crate::settings::Settings::load().projects_dir
+}
+
+/// New recordings live here until they are saved (Ctrl+S), as in Screen
+/// Studio; closing one without saving deletes it.
+pub fn unsaved_dir() -> PathBuf {
+    directories::ProjectDirs::from("", "", "open-studio")
+        .map(|d| d.data_dir().join("unsaved"))
+        .unwrap_or_else(|| std::env::temp_dir().join("open-studio-unsaved"))
+}
+
+/// `dir/name`, or `dir/name 2`, `dir/name 3`… if taken.
+pub fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let mut p = dir.join(name);
+    let mut n = 2;
+    while p.exists() {
+        p = dir.join(format!("{name} {n}"));
+        n += 1;
+    }
+    p
+}
+
+/// Moves a directory, copying when it crosses filesystems.
+pub fn move_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_dir(from, to)?;
+    std::fs::remove_dir_all(from)
+}
+
+pub fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let target = to.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir(&e.path(), &target)?;
+        } else {
+            std::fs::copy(e.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn config_dir() -> PathBuf {
     directories::ProjectDirs::from("", "", "open-studio")
         .map(|d| d.config_dir().to_path_buf())

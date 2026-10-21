@@ -20,6 +20,8 @@ struct Scene {
     shadow: vec4f,       // offset x, y, blur radius, inner screen radius
     click: vec4f,        // click effect x, y, progress, kind (0 none, 1 circle, 2 ripple)
     click2: vec4f,       // base radius
+    loupe: vec4f,        // lens centre (video uv), radius (video heights), magnification
+    loupe2: vec4f,       // grow amount (0 = off), video aspect
 };
 
 @group(0) @binding(0) var<uniform> u: Scene;
@@ -185,15 +187,46 @@ fn scene(q: vec2f, px: f32) -> vec3f {
         cover = clamp(0.5 - d / px, 0.0, 1.0);
     }
     if (cover > 0.0) {
-        let uv = (q - u.content.xy) / u.content.zw;
+        var uv = (q - u.content.xy) / u.content.zw;
+        // Glass Loupe: inside the lens, sample a magnified view of its centre.
+        var lens = -1.0; // distance from the lens centre / radius; < 0 when off
+        var lens_d = vec2f(0.0);
+        let lr = u.loupe.z * u.loupe2.x;
+        if (u.loupe2.x > 0.001) {
+            lens_d = (uv - u.loupe.xy) * vec2f(u.loupe2.y, 1.0);
+            lens = length(lens_d) / lr;
+        }
+        let in_lens = lens >= 0.0 && lens < 1.0;
         var v: vec3f;
-        if (u.params.z > 0.5) {
+        if (in_lens) {
+            // Slightly less magnification towards the rim, like curved glass.
+            let m = u.loupe.w / (1.0 + 0.22 * pow(lens, 4.0));
+            uv = u.loupe.xy + (uv - u.loupe.xy) / m;
+            v = sample_bicubic(uv);
+        } else if (u.params.z > 0.5) {
             v = sample_bicubic(uv);
         } else {
             v = textureSampleLevel(video, samp, uv, u.params.x).rgb;
         }
         if (u.mask_info.x > 0.5) {
             v = apply_masks(v, uv);
+        }
+        if (lens >= 0.0) {
+            let pxv = px / u.content.w * u.loupe2.y / lr; // one output pixel, in lens radii
+            if (in_lens) {
+                // Darker inner edge and a soft highlight on the upper left.
+                v = v * (1.0 - 0.22 * pow(lens, 10.0));
+                let dir = lens_d / max(length(lens_d), 1e-6);
+                let spec = smoothstep(0.55, 1.0, dot(dir, normalize(vec2f(-0.55, -0.85)))) * smoothstep(0.7, 0.97, lens);
+                v = mix(v, vec3f(1.0), 0.28 * spec);
+            } else {
+                // Drop shadow around the lens, a little below it.
+                let ds = length(lens_d + vec2f(0.0, -0.035 * lr)) / lr;
+                v = v * (1.0 - 0.45 * (1.0 - smoothstep(0.98, 1.22, ds)));
+            }
+            // Thin bright rim.
+            let rim = clamp(1.0 - abs(lens - 1.0) / max(pxv * 1.6, 0.004), 0.0, 1.0);
+            v = mix(v, vec3f(1.0), 0.75 * rim);
         }
         col = mix(col, v, cover);
     }

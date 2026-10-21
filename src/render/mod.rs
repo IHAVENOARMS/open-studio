@@ -43,6 +43,10 @@ struct SceneUniform {
     click: [f32; 4],
     /// Click effect base radius, unused x3.
     click2: [f32; 4],
+    /// Loupe centre (video uv), radius (video heights), magnification.
+    loupe: [f32; 4],
+    /// Loupe grow amount (0 = off), video aspect.
+    loupe2: [f32; 4],
 }
 
 #[repr(C)]
@@ -589,6 +593,8 @@ impl Compositor {
                 [k.x as f32, k.y as f32, k.progress as f32, kind]
             }),
             click2: [(c.h * 0.035 * edit.cursor.size) as f32, 0.0, 0.0, 0.0],
+            loupe: frame.loupe.map_or([0.0; 4], |l| [l.x as f32, l.y as f32, l.radius as f32, l.magnification as f32]),
+            loupe2: [frame.loupe.map_or(0.0, |l| l.amount.max(0.0) as f32), (layout.video_w / layout.video_h) as f32, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&u));
 
