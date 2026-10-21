@@ -30,6 +30,11 @@ pub enum Icon {
     Scissors,
     Loupe,
     ZoomAdd,
+    AspectLayout,
+    Crop,
+    Quality,
+    ZoomOutLens,
+    ZoomInLens,
     CamCutout,
     CamPip,
     CamSplit,
@@ -460,6 +465,33 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                     ));
                 }
                 p.circle_filled(pen.pt(cx, cy), 1.0 * k, color);
+            }
+        }
+        // Preview toolbar icons (Screen Studio v4).
+        Icon::AspectLayout => {
+            pen.rrect(2.5, 4.0, 17.5, 16.0, 2.2);
+            pen.line(&[(2.5, 8.2), (17.5, 8.2)]);
+            pen.line(&[(11.6, 8.2), (11.6, 16.0)]);
+        }
+        Icon::Crop => {
+            pen.line(&[(5.5, 2.5), (5.5, 14.5), (17.5, 14.5)]);
+            pen.line(&[(2.5, 5.5), (14.5, 5.5), (14.5, 17.5)]);
+        }
+        Icon::Quality => {
+            // Seven rings: one in the middle, six around it.
+            let r = 1.75;
+            pen.circle(10.0, 10.0, r);
+            for i in 0..6 {
+                let a = std::f32::consts::PI / 3.0 * i as f32;
+                pen.circle(10.0 + 4.3 * a.cos(), 10.0 + 4.3 * a.sin(), r);
+            }
+        }
+        Icon::ZoomOutLens | Icon::ZoomInLens => {
+            pen.circle(8.6, 8.6, 5.6);
+            pen.line(&[(12.7, 12.7), (16.8, 16.8)]);
+            pen.line(&[(6.2, 8.6), (11.0, 8.6)]);
+            if icon == Icon::ZoomInLens {
+                pen.line(&[(8.6, 6.2), (8.6, 11.0)]);
             }
         }
         Icon::CamPip => {

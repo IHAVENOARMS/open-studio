@@ -48,6 +48,8 @@ struct SceneUniform {
     loupe: [f32; 4],
     /// Loupe grow amount (0 = off), video aspect.
     loupe2: [f32; 4],
+    /// Screen crop: x, y, w, h as fractions of the recording.
+    crop: [f32; 4],
     /// Screen card placement: offset x, y, scale.
     screen_xf: [f32; 4],
 }
@@ -720,7 +722,7 @@ impl Compositor {
         };
         // Texels per output pixel; below ~1 we are magnifying.
         let density = match &self.video {
-            Some(v) => v.size.1 as f64 / (c.h * oh as f64 * cam.scale),
+            Some(v) => v.size.1 as f64 * layout.crop[3] / (c.h * oh as f64 * cam.scale),
             None => 1.0,
         };
         let lod = density.log2().max(0.0) as f32;
@@ -790,6 +792,7 @@ impl Compositor {
             click2: [(c.h * 0.035 * edit.cursor.size * frame.screen_xf[2]) as f32, 0.0, 0.0, 0.0],
             loupe: frame.loupe.map_or([0.0; 4], |l| [l.x as f32, l.y as f32, l.radius as f32, l.magnification as f32]),
             loupe2: [frame.loupe.map_or(0.0, |l| l.amount.max(0.0) as f32), (layout.video_w / layout.video_h) as f32, 0.0, 0.0],
+            crop: layout.crop.map(|v| v as f32),
             screen_xf: [frame.screen_xf[0] as f32, frame.screen_xf[1] as f32, frame.screen_xf[2].max(1e-3) as f32, 0.0],
         };
         self.queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&u));

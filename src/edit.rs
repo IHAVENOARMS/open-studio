@@ -163,17 +163,30 @@ pub enum Aspect {
     Vertical,
     Square,
     Classic,
+    Tall,
 }
 
 impl Aspect {
-    pub const ALL: [Aspect; 5] = [Self::Auto, Self::Wide, Self::Vertical, Self::Square, Self::Classic];
-    pub fn label(self) -> &'static str {
+    pub const ALL: [Aspect; 6] = [Self::Auto, Self::Wide, Self::Vertical, Self::Square, Self::Classic, Self::Tall];
+    /// Screen Studio's names: "Wide" with "16:9" beside it.
+    pub fn name(self) -> &'static str {
         match self {
             Self::Auto => "Auto",
+            Self::Wide => "Wide",
+            Self::Vertical => "Vertical",
+            Self::Square => "Square",
+            Self::Classic => "Classic",
+            Self::Tall => "Tall",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "",
             Self::Wide => "16:9",
             Self::Vertical => "9:16",
             Self::Square => "1:1",
             Self::Classic => "4:3",
+            Self::Tall => "3:4",
         }
     }
     pub fn ratio(self, video_ratio: f64) -> f64 {
@@ -183,6 +196,7 @@ impl Aspect {
             Self::Vertical => 9.0 / 16.0,
             Self::Square => 1.0,
             Self::Classic => 4.0 / 3.0,
+            Self::Tall => 3.0 / 4.0,
         }
     }
 }
@@ -475,6 +489,8 @@ pub struct CameraSettings {
     pub delay: f64,
     /// Part of the camera picture kept: x, y, w, h (normalized).
     pub crop: [f64; 4],
+    /// Height of the cutout (Camera cutout layout) as a fraction of the canvas.
+    pub cutout_size: f64,
     /// Keep the face centred by moving the crop (uses face_track.json).
     pub face_tracking: bool,
     /// Hide the camera while nobody is speaking.
@@ -500,6 +516,7 @@ impl Default for CameraSettings {
             shadow: 0.6,
             delay: 0.0,
             crop: [0.0, 0.0, 1.0, 1.0],
+            cutout_size: 0.54,
             face_tracking: false,
             hide_during_silence: false,
             look: crate::render::looks::Look::None,
@@ -669,6 +686,8 @@ pub struct EditConfig {
     pub shortcuts: ShortcutOverlay,
     /// Removed stretches, sorted and non-overlapping.
     pub cuts: Vec<Cut>,
+    /// Part of the screen recording kept (Crop): x, y, w, h as fractions.
+    pub crop: [f64; 4],
     pub captions: CaptionSettings,
     pub camera: CameraSettings,
     /// Layout changes over time (the Layouts track), sorted.
@@ -707,6 +726,7 @@ impl Default for EditConfig {
             instant_animation: false,
             shortcuts: ShortcutOverlay::default(),
             cuts: vec![],
+            crop: [0.0, 0.0, 1.0, 1.0],
             captions: CaptionSettings::default(),
             camera: CameraSettings::default(),
             camera_layouts: vec![],

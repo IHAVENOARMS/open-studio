@@ -146,6 +146,8 @@ fn camera_layout(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recor
     });
     if c.layout == CameraDefaultLayout::Cutout {
         cutout_status(ui, st);
+        theme::section(ui, "Cutout size");
+        widgets::slider(ui, &mut c.cutout_size, 0.25..=0.95, Some(0.54));
     }
     widgets::divider(ui);
     theme::section(ui, "Camera Position");
@@ -439,7 +441,7 @@ pub fn segment_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &m
         return;
     }
     ui.add_space(8.0);
-    let default_size = edit.camera.size;
+    let default_size = if edit.camera_layouts[i].kind == CameraLayoutKind::Cutout { edit.camera.cutout_size } else { edit.camera.size };
     let default_pos = edit.camera.position;
     let seg = &mut edit.camera_layouts[i];
     theme::section(ui, "Camera layout");
@@ -474,7 +476,7 @@ pub fn segment_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &m
             CameraLayoutKind::Cutout => "Show only you, without your background, in front of the screen",
         },
     );
-    if seg.kind == CameraLayoutKind::Default {
+    if matches!(seg.kind, CameraLayoutKind::Default | CameraLayoutKind::Cutout) {
         theme::section(ui, "Camera position");
         let mut pos = seg.position.unwrap_or(default_pos);
         if position_grid(ui, &mut pos) {
@@ -490,7 +492,8 @@ pub fn segment_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &m
             seg.custom_size = custom.then_some(default_size);
         }
         if let Some(size) = &mut seg.custom_size {
-            widgets::slider(ui, size, 0.12..=0.6, Some(default_size));
+            let range = if seg.kind == CameraLayoutKind::Cutout { 0.25..=0.95 } else { 0.12..=0.6 };
+            widgets::slider(ui, size, range, Some(default_size));
         }
     }
     toggle_help(ui, "Disable layout", "", &mut seg.disabled);

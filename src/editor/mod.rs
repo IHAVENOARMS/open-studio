@@ -93,6 +93,11 @@ pub struct Editor {
     player: Player,
     /// For reopening players when the project folder moves.
     ctx: egui::Context,
+    /// Preview size relative to the space available (zoom out / in).
+    preview_zoom: f32,
+    /// Preview resolution divisor (Preview quality).
+    preview_quality: u32,
+    crop_tool: Option<CropTool>,
     /// Camera track player and the frame index on the GPU.
     camera: Option<(Player, i64)>,
     /// Background-removal matte player, in step with the camera.
@@ -144,6 +149,9 @@ impl Editor {
             edit,
             player,
             ctx: ctx.clone(),
+            preview_zoom: 1.0,
+            preview_quality: Settings::load().preview_quality.clamp(1, 4),
+            crop_tool: None,
             camera,
             matte,
             camera_changed: Instant::now(),
@@ -814,18 +822,8 @@ impl Editor {
                 });
                 let main_rect = egui::Rect::from_min_max(full.min, egui::pos2(full.max.x - side_w - 16.0, full.max.y));
                 let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(main_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-                ui.horizontal(|ui| {
-                    let label = format!("Aspect  {}", self.edit.aspect.label());
-                    let resp = icons::button(ui, Icon::Aspect, &label, egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), egui::vec2(0.0, 30.0));
-                    egui::Popup::menu(&resp).show(|ui| {
-                        for a in crate::edit::Aspect::ALL {
-                            if ui.selectable_label(self.edit.aspect == a, a.label()).clicked() {
-                                self.edit.aspect = a;
-                                ui.close();
-                            }
-                        }
-                    });
-                });
+                self.preview_toolbar(ui);
+                ui.add_space(8.0);
                 let bar_h = 48.0;
                 let avail = ui.available_rect_before_wrap();
                 // Tool pill on the left, preview to its right.
@@ -892,6 +890,21 @@ impl Editor {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
+        if self.crop_tool.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
+            self.open_crop_tool();
+            return;
+        }
+        let steps = [1.0f32, 0.75, 0.5, 0.33];
+        let zi = steps.iter().position(|s| (s - self.preview_zoom).abs() < 0.01).unwrap_or(0);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Minus)) && zi + 1 < steps.len() {
+            self.preview_zoom = steps[zi + 1];
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Equals) || i.consume_key(egui::Modifiers::COMMAND, Key::Plus)) && zi > 0 {
+            self.preview_zoom = steps[zi - 1];
+        }
+        if self.crop_tool.is_some() {
+            return;
+        }
         let (space, del, left, right, esc) = ctx.input(|i| {
             (
                 i.key_pressed(Key::Space),
@@ -932,8 +945,264 @@ impl Editor {
         }
     }
 
+    /// The row above the preview, as in Screen Studio: aspect ratio and Crop
+    /// on the left; Preview quality and preview zoom on the right.
+    fn preview_toolbar(&mut self, ui: &mut egui::Ui) {
+        use crate::edit::Aspect;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let a = self.edit.aspect;
+            let resp = toolbar_button(ui, Icon::AspectLayout, a.name(), a.label(), true, true);
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(180.0);
+                for opt in Aspect::ALL {
+                    let text = if opt.label().is_empty() { opt.name().to_string() } else { format!("{}   {}", opt.name(), opt.label()) };
+                    if ui.selectable_label(a == opt, text).clicked() {
+                        self.edit.aspect = opt;
+                        ui.close();
+                    }
+                }
+            });
+            if toolbar_button(ui, Icon::Crop, "Crop", "", false, true).on_hover_text("Crop the recording  (C)").clicked() {
+                self.open_crop_tool();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(4.0);
+                let steps = [1.0f32, 0.75, 0.5, 0.33];
+                let i = steps.iter().position(|s| (s - self.preview_zoom).abs() < 0.01).unwrap_or(0);
+                if toolbar_button(ui, Icon::ZoomInLens, "", "", false, i > 0).on_hover_text("Zoom in preview  (Ctrl+=)").clicked() && i > 0 {
+                    self.preview_zoom = steps[i - 1];
+                }
+                if toolbar_button(ui, Icon::ZoomOutLens, "", "", false, i + 1 < steps.len()).on_hover_text("Zoom out preview  (Ctrl+-)").clicked() && i + 1 < steps.len() {
+                    self.preview_zoom = steps[i + 1];
+                }
+                ui.add_space(6.0);
+                let q = match self.preview_quality {
+                    1 => "Full",
+                    2 => "Half",
+                    _ => "Quarter",
+                };
+                let resp = toolbar_button(ui, Icon::Quality, "Preview quality", q, true, true);
+                egui::Popup::menu(&resp).show(|ui| {
+                    ui.set_min_width(240.0);
+                    for (d, name, help) in [
+                        (1u32, "Full", "Sharpest preview, looks exactly like the export."),
+                        (2, "Half", "Half resolution, smoother playback."),
+                        (4, "Quarter", "Fastest playback on slower computers."),
+                    ] {
+                        let r = ui.selectable_label(self.preview_quality == d, name).on_hover_text(help);
+                        if r.clicked() {
+                            self.preview_quality = d;
+                            let mut s = Settings::load();
+                            s.preview_quality = d;
+                            s.save();
+                            ui.close();
+                        }
+                    }
+                    ui.label(egui::RichText::new("Only the preview; exports are always full quality.").size(11.5).color(theme::TEXT_DIM));
+                });
+            });
+        });
+    }
+
+    fn open_crop_tool(&mut self) {
+        if self.crop_tool.is_none() {
+            self.set_playing(false);
+            self.crop_tool = Some(CropTool { rect: crate::engine::clamp_crop(self.edit.crop), ratio: None, drag: None, tex: None, tex_index: -1 });
+        }
+    }
+
+    /// Crop tool in place of the preview: drag the edges or the middle,
+    /// pick a ratio or type a size, then Done.
+    fn crop_ui(&mut self, ui: &mut egui::Ui) {
+        let (vw, vh) = (self.rec.width as f64, self.rec.height as f64);
+        let frame = self.player.latest();
+        let Some(tool) = &mut self.crop_tool else { return };
+        // Picture of the current frame (downscaled; it's only a guide).
+        if let Some(f) = &frame {
+            if tool.tex.is_none() || tool.tex_index != f.index {
+                let (w, h) = (f.width as usize, f.height as usize);
+                let tw = w.min(1600);
+                let th = h * tw / w;
+                let mut px = Vec::with_capacity(tw * th * 4);
+                for y in 0..th {
+                    for x in 0..tw {
+                        let o = ((y * h / th) * w + x * w / tw) * 4;
+                        px.extend_from_slice(&f.rgba[o..o + 4]);
+                    }
+                }
+                tool.tex = Some(ui.ctx().load_texture("crop-frame", egui::ColorImage::from_rgba_unmultiplied([tw, th], &px), egui::TextureOptions::LINEAR));
+                tool.tex_index = f.index;
+            }
+        }
+        let full = ui.available_rect_before_wrap();
+        let controls_h = 46.0;
+        let area = Rect::from_min_max(full.min, egui::pos2(full.max.x, full.max.y - controls_h - 8.0)).shrink(12.0);
+        let ar = (vw / vh) as f32;
+        let mut size = area.size();
+        if size.x / size.y > ar {
+            size.x = size.y * ar;
+        } else {
+            size.y = size.x / ar;
+        }
+        let pic = Rect::from_center_size(area.center(), size);
+        let p = ui.painter();
+        if let Some(t) = &tool.tex {
+            p.image(t.id(), pic, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+        } else {
+            p.rect_filled(pic, 0.0, theme::SURFACE);
+        }
+        let [x, y, w, h] = tool.rect;
+        let kept = Rect::from_min_size(
+            egui::pos2(pic.left() + x as f32 * pic.width(), pic.top() + y as f32 * pic.height()),
+            egui::vec2(w as f32 * pic.width(), h as f32 * pic.height()),
+        );
+        let dim = Color32::from_black_alpha(160);
+        p.rect_filled(Rect::from_min_max(pic.min, egui::pos2(pic.right(), kept.top())), 0.0, dim);
+        p.rect_filled(Rect::from_min_max(egui::pos2(pic.left(), kept.bottom()), pic.max), 0.0, dim);
+        p.rect_filled(Rect::from_min_max(egui::pos2(pic.left(), kept.top()), egui::pos2(kept.left(), kept.bottom())), 0.0, dim);
+        p.rect_filled(Rect::from_min_max(egui::pos2(kept.right(), kept.top()), egui::pos2(pic.right(), kept.bottom())), 0.0, dim);
+        // Thirds guides and the frame.
+        let guide = egui::Stroke::new(1.0, Color32::from_white_alpha(70));
+        for k in [1.0 / 3.0, 2.0 / 3.0] {
+            let gx = kept.left() + kept.width() * k;
+            let gy = kept.top() + kept.height() * k;
+            p.line_segment([egui::pos2(gx, kept.top()), egui::pos2(gx, kept.bottom())], guide);
+            p.line_segment([egui::pos2(kept.left(), gy), egui::pos2(kept.right(), gy)], guide);
+        }
+        p.rect_stroke(kept, 0.0, egui::Stroke::new(1.5, Color32::WHITE), egui::StrokeKind::Middle);
+        // Corner and edge handles.
+        let handles = [
+            (kept.left_top(), (true, true, false, false)),
+            (kept.right_top(), (false, true, true, false)),
+            (kept.left_bottom(), (true, false, false, true)),
+            (kept.right_bottom(), (false, false, true, true)),
+            (kept.center_top(), (false, true, false, false)),
+            (kept.center_bottom(), (false, false, false, true)),
+            (kept.left_center(), (true, false, false, false)),
+            (kept.right_center(), (false, false, true, false)),
+        ];
+        for (c, _) in handles {
+            p.rect_filled(Rect::from_center_size(c, egui::vec2(9.0, 9.0)), 2.0, Color32::WHITE);
+        }
+        let resp = ui.interact(pic.expand(8.0), ui.scope_id().with("crop-drag"), Sense::drag());
+        if resp.drag_started() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                tool.drag = handles
+                    .iter()
+                    .find(|(c, _)| c.distance(pos) < 12.0)
+                    .map(|(_, e)| CropDrag::Resize(e.0, e.1, e.2, e.3))
+                    .or_else(|| kept.contains(pos).then_some(CropDrag::Move));
+            }
+        }
+        if let (Some(d), Some(pos)) = (tool.drag, resp.interact_pointer_pos()) {
+            let u = ((pos.x - pic.left()) / pic.width()).clamp(0.0, 1.0) as f64;
+            let v = ((pos.y - pic.top()) / pic.height()).clamp(0.0, 1.0) as f64;
+            let [mut x0, mut y0, w0, h0] = tool.rect;
+            let (mut x1, mut y1) = (x0 + w0, y0 + h0);
+            match d {
+                CropDrag::Move => {
+                    let dlt = resp.drag_delta();
+                    x0 = (x0 + (dlt.x / pic.width()) as f64).clamp(0.0, 1.0 - w0);
+                    y0 = (y0 + (dlt.y / pic.height()) as f64).clamp(0.0, 1.0 - h0);
+                    (x1, y1) = (x0 + w0, y0 + h0);
+                }
+                CropDrag::Resize(l, t, r, b) => {
+                    let min = 0.05;
+                    if l {
+                        x0 = u.min(x1 - min);
+                    }
+                    if r {
+                        x1 = u.max(x0 + min);
+                    }
+                    if t {
+                        y0 = v.min(y1 - min);
+                    }
+                    if b {
+                        y1 = v.max(y0 + min);
+                    }
+                    // Keep the locked ratio by adjusting the height.
+                    if let Some(ratio) = tool.ratio {
+                        let hh = ((x1 - x0) * vw / ratio / vh).min(1.0);
+                        if t && !b {
+                            y0 = (y1 - hh).max(0.0);
+                        } else {
+                            y1 = (y0 + hh).min(1.0);
+                        }
+                    }
+                }
+            }
+            tool.rect = crate::engine::clamp_crop([x0, y0, x1 - x0, y1 - y0]);
+        }
+        if resp.drag_stopped() {
+            tool.drag = None;
+        }
+        // Controls: ratios, size in pixels, Reset / Cancel / Done.
+        let bar = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - controls_h), full.max);
+        let mut done = None;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (label, ratio) in [("Free", None), ("16:9", Some(16.0 / 9.0)), ("4:3", Some(4.0 / 3.0)), ("1:1", Some(1.0)), ("9:16", Some(9.0 / 16.0))] {
+                if widgets::chip(ui, label, tool.ratio == ratio).clicked() {
+                    tool.ratio = ratio;
+                    if let Some(r) = ratio {
+                        // Largest centred area with that ratio inside the current one.
+                        let [x, y, w, h] = tool.rect;
+                        let (pw, ph) = (w * vw, h * vh);
+                        let (nw, nh) = if pw / ph > r { (ph * r, ph) } else { (pw, pw / r) };
+                        let (nw, nh) = (nw / vw, nh / vh);
+                        tool.rect = crate::engine::clamp_crop([x + (w - nw) / 2.0, y + (h - nh) / 2.0, nw, nh]);
+                    }
+                }
+            }
+            ui.add_space(10.0);
+            let mut pw = (tool.rect[2] * vw).round();
+            let mut ph = (tool.rect[3] * vh).round();
+            ui.label(egui::RichText::new("W").size(12.5).color(theme::TEXT_DIM));
+            let cw = ui.add(egui::DragValue::new(&mut pw).range(16.0..=vw).speed(2.0)).changed();
+            ui.label(egui::RichText::new("H").size(12.5).color(theme::TEXT_DIM));
+            let ch = ui.add(egui::DragValue::new(&mut ph).range(16.0..=vh).speed(2.0)).changed();
+            if cw || ch {
+                let [x, y, _, _] = tool.rect;
+                tool.rect = crate::engine::clamp_crop([x, y, pw / vw, ph / vh]);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::primary_button(ui, "  Done  ").clicked() {
+                    done = Some(true);
+                }
+                if widgets::chip(ui, "Cancel", false).clicked() {
+                    done = Some(false);
+                }
+                if widgets::chip(ui, "Reset", false).clicked() {
+                    tool.rect = [0.0, 0.0, 1.0, 1.0];
+                    tool.ratio = None;
+                }
+            });
+        });
+        let (enter, esc) = ui.input(|i| (i.key_pressed(Key::Enter), i.key_pressed(Key::Escape)));
+        if enter {
+            done = Some(true);
+        } else if esc {
+            done = Some(false);
+        }
+        match done {
+            Some(true) => {
+                let r = tool.rect;
+                self.edit.crop = r;
+                self.crop_tool = None;
+            }
+            Some(false) => self.crop_tool = None,
+            None => {}
+        }
+    }
+
     fn preview(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
-        let avail = ui.available_rect_before_wrap();
+        if self.crop_tool.is_some() {
+            self.crop_ui(ui);
+            return;
+        }
+        let full_avail = ui.available_rect_before_wrap();
+        let avail = Rect::from_center_size(full_avail.center(), full_avail.size() * self.preview_zoom);
         let aspect = self.tracks.layout.aspect as f32;
         let mut size = avail.size();
         if size.x / size.y > aspect {
@@ -942,7 +1211,7 @@ impl Editor {
             size.y = size.x / aspect;
         }
         let rect = Rect::from_center_size(avail.center(), size);
-        let ppp = ui.ctx().pixels_per_point();
+        let ppp = ui.ctx().pixels_per_point() / self.preview_quality.max(1) as f32;
         let px = (((size.x * ppp) as u32).max(2), ((size.y * ppp) as u32).max(2));
 
         if let Some((p, shown)) = &mut self.matte {
@@ -1336,6 +1605,64 @@ fn open_matte(dir: &std::path::Path, rec: &Recording, edit: &EditConfig, start: 
     let p = Player::new(dir.join(file), crate::cutout::matte_size(c.width, c.height), c.fps, ctx.clone());
     p.seek((start - c.offset - edit.camera.delay).max(0.0));
     Some((p, -1))
+}
+
+/// A button in the row above the preview: icon, white label, dim value and
+/// an optional chevron, with a soft hover fill (Screen Studio's style).
+fn toolbar_button(ui: &mut egui::Ui, icon: Icon, label: &str, value: &str, chevron: bool, enabled: bool) -> egui::Response {
+    let font = egui::FontId::proportional(14.0);
+    let white = if enabled { theme::TEXT } else { Color32::from_rgb(0x3a, 0x3c, 0x42) };
+    let dim = Color32::from_rgb(0x6c, 0x6e, 0x75);
+    let gl = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.to_string(), font.clone(), white));
+    let gv = (!value.is_empty()).then(|| ui.painter().layout_no_wrap(value.to_string(), font.clone(), dim));
+    let mut w = 10.0 + 18.0 + 10.0;
+    if let Some(g) = &gl {
+        w += g.size().x + 8.0;
+    }
+    if let Some(g) = &gv {
+        w += g.size().x + 6.0;
+    }
+    if chevron {
+        w += 16.0;
+    }
+    if gl.is_none() && gv.is_none() {
+        w = 34.0;
+    }
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), if enabled { Sense::click() } else { Sense::hover() });
+    let p = ui.painter();
+    if enabled && resp.hovered() {
+        p.rect_filled(r, egui::CornerRadius::same(8), Color32::from_white_alpha(12));
+    }
+    let mut x = if gl.is_none() && gv.is_none() { r.center().x - 9.0 } else { r.left() + 10.0 };
+    icons::paint(p, egui::Rect::from_min_size(egui::pos2(x, r.center().y - 9.0), egui::vec2(18.0, 18.0)), icon, white);
+    x += 18.0 + 8.0;
+    for (g, c) in [(gl, white), (gv, dim)].into_iter().filter_map(|(g, c)| g.map(|g| (g, c))) {
+        let gw = g.size().x;
+        p.galley(egui::pos2(x, r.center().y - g.size().y / 2.0), g, c);
+        x += gw + 6.0;
+    }
+    if chevron {
+        icons::paint(p, egui::Rect::from_min_size(egui::pos2(x, r.center().y - 6.0), egui::vec2(12.0, 12.0)), Icon::ChevronDown, dim);
+    }
+    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+}
+
+/// The crop tool: the whole recording with the kept area outlined.
+struct CropTool {
+    /// x, y, w, h as fractions of the recording.
+    rect: [f64; 4],
+    /// Locked aspect ratio (width / height in pixels), None = free.
+    ratio: Option<f64>,
+    drag: Option<CropDrag>,
+    tex: Option<egui::TextureHandle>,
+    tex_index: i64,
+}
+
+#[derive(Clone, Copy)]
+enum CropDrag {
+    Move,
+    /// Edges being moved: left, top, right, bottom.
+    Resize(bool, bool, bool, bool),
 }
 
 struct Toast {

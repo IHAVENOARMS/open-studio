@@ -22,6 +22,7 @@ struct Scene {
     click2: vec4f,       // base radius
     loupe: vec4f,        // lens centre (video uv), radius (video heights), magnification
     loupe2: vec4f,       // grow amount (0 = off), video aspect
+    crop: vec4f,         // screen crop: x, y, w, h (fractions of the recording)
     screen_xf: vec4f,    // screen card placement: offset x, y, scale (camera Split layout)
 };
 
@@ -192,7 +193,8 @@ fn scene(q_canvas: vec2f, px_canvas: f32) -> vec3f {
         cover = clamp(0.5 - d / px, 0.0, 1.0);
     }
     if (cover > 0.0) {
-        var uv = (q - u.content.xy) / u.content.zw;
+        // Video uv across the whole recording, through the crop.
+        var uv = u.crop.xy + (q - u.content.xy) / u.content.zw * u.crop.zw;
         // Glass Loupe: inside the lens, sample a magnified view of its centre.
         var lens = -1.0; // distance from the lens centre / radius; < 0 when off
         var lens_d = vec2f(0.0);

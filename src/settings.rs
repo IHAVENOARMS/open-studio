@@ -80,6 +80,8 @@ pub struct Settings {
     pub camera_preview: bool,
     /// Network adb addresses of phones used before, reconnected on demand.
     pub known_devices: Vec<String>,
+    /// Editor preview resolution divisor: 1 (Full), 2 (Half), 4 (Quarter).
+    pub preview_quality: u32,
 }
 
 /// scrcpy settings for the Device button.
@@ -160,6 +162,7 @@ impl Default for Settings {
             camera: None,
             camera_preview: true,
             known_devices: vec![],
+            preview_quality: 1,
         }
     }
 }

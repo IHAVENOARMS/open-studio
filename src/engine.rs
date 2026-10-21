@@ -59,15 +59,18 @@ pub struct Layout {
     pub aspect: f64,
     /// The rounded card (screen plus inset frame).
     pub card: Rect,
-    /// Where the video sits.
+    /// Where the (cropped) video sits.
     pub content: Rect,
+    /// Kept part of the recording: x, y, w, h as fractions of it.
+    pub crop: [f64; 4],
     pub video_w: f64,
     pub video_h: f64,
 }
 
 impl Layout {
     pub fn new(rec: &Recording, edit: &EditConfig) -> Self {
-        let vr = rec.width as f64 / rec.height.max(1) as f64;
+        let crop = clamp_crop(edit.crop);
+        let vr = (rec.width as f64 * crop[2]) / (rec.height.max(1) as f64 * crop[3]);
         let aspect = edit.aspect.ratio(vr);
         let pad = edit.padding * aspect.min(1.0);
         let (aw, ah) = ((aspect - 2.0 * pad).max(0.05), (1.0 - 2.0 * pad).max(0.05));
@@ -88,12 +91,31 @@ impl Layout {
                 h: ih,
             };
         }
-        Self { aspect, card, content, video_w: rec.width as f64, video_h: rec.height as f64 }
+        Self { aspect, card, content, crop, video_w: rec.width as f64, video_h: rec.height as f64 }
     }
 
+    /// Recording pixels to canvas units (through the crop).
     pub fn video_to_canvas(&self, x: f64, y: f64) -> (f64, f64) {
-        (self.content.x + x / self.video_w * self.content.w, self.content.y + y / self.video_h * self.content.h)
+        self.uv_to_canvas(x / self.video_w, y / self.video_h)
     }
+
+    /// Recording fractions (0..1 across the whole recording) to canvas units.
+    pub fn uv_to_canvas(&self, u: f64, v: f64) -> (f64, f64) {
+        let [cx, cy, cw, ch] = self.crop;
+        (self.content.x + (u - cx) / cw * self.content.w, self.content.y + (v - cy) / ch * self.content.h)
+    }
+
+    pub fn canvas_to_uv(&self, x: f64, y: f64) -> (f64, f64) {
+        let [cx, cy, cw, ch] = self.crop;
+        (cx + (x - self.content.x) / self.content.w * cw, cy + (y - self.content.y) / self.content.h * ch)
+    }
+}
+
+/// A crop that is inside the recording and not degenerate.
+pub fn clamp_crop(c: [f64; 4]) -> [f64; 4] {
+    let w = c[2].clamp(0.02, 1.0);
+    let h = c[3].clamp(0.02, 1.0);
+    [c[0].clamp(0.0, 1.0 - w), c[1].clamp(0.0, 1.0 - h), w, h]
 }
 
 /// Camera: centre point in canvas units and zoom factor.
@@ -247,7 +269,7 @@ impl Tracks {
                             let (fx, fy) = cursor[ahead.min(n - 1)];
                             layout.video_to_canvas(fx, fy)
                         }
-                        ZoomFocus::Manual { x, y } => layout.video_to_canvas(x * layout.video_w, y * layout.video_h),
+                        ZoomFocus::Manual { x, y } => layout.uv_to_canvas(x, y),
                     };
                     let (vw, vh) = (layout.aspect / scale, 1.0 / scale);
                     if active != Some(si) {
@@ -634,7 +656,7 @@ pub fn placement(
     kind: crate::edit::CameraLayoutKind,
     position: [u8; 2],
     size: Option<f64>,
-    zoom: f64,
+    zoom_progress: f64,
 ) -> Placement {
     use crate::edit::CameraLayoutKind;
     let cam = &edit.camera;
@@ -645,9 +667,9 @@ pub fn placement(
     let identity = [0.0, 0.0, 1.0];
     let overlay = |shrink: f64| {
         let mut h = size.unwrap_or(cam.size);
+        // Shrinks in step with the screen zoom, on the zoom's own curve.
         if cam.shrink_on_zoom && size.is_none() {
-            let f = ((zoom - 1.0) / 0.6).clamp(0.0, 1.0);
-            h += (cam.zoom_size - h) * f * f * (3.0 - 2.0 * f);
+            h += (cam.zoom_size - h) * zoom_progress.clamp(0.0, 1.0);
         }
         let mut w = h * ar;
         if w > a * 0.9 {
@@ -671,7 +693,7 @@ pub fn placement(
             // The person stands on the bottom edge, larger than the bubble,
             // in the camera's own proportions so nothing is cut off.
             let car = (camera_aspect * cam.crop[2] / cam.crop[3].max(0.01)).clamp(0.3, 3.0);
-            let mut h = (size.unwrap_or(cam.size) * 1.8).min(0.95);
+            let mut h = size.unwrap_or(cam.cutout_size).clamp(0.15, 0.98);
             let mut w = h * car;
             if w > a * 0.7 {
                 w = a * 0.7;
@@ -725,10 +747,10 @@ pub fn placement(
 }
 
 /// Placement at `t`, animating for [`LAYOUT_TRANSITION`] after each layout change.
-pub fn placement_at(layout: &Layout, edit: &EditConfig, camera_aspect: f64, t: f64, zoom: f64) -> Placement {
+pub fn placement_at(layout: &Layout, edit: &EditConfig, camera_aspect: f64, t: f64, zoom_progress: f64) -> Placement {
     let at = |t: f64| {
         let (kind, pos, size) = layout_at(edit, t);
-        placement(layout, edit, camera_aspect, kind, pos, size, zoom)
+        placement(layout, edit, camera_aspect, kind, pos, size, zoom_progress)
     };
     let now = at(t);
     let last_change = edit
@@ -748,8 +770,26 @@ pub fn placement_at(layout: &Layout, edit: &EditConfig, camera_aspect: f64, t: f
     now
 }
 
+/// How far the screen zoom is through its animation, 0 (none) to 1 (fully
+/// zoomed in): the zoom's log scale over that of the zoom it is heading to
+/// or coming back from. The zoom curve eases log scale, so this follows the
+/// same curve.
+fn zoom_progress(edit: &EditConfig, scale: f64, t: f64) -> f64 {
+    if scale <= 1.0005 {
+        return 0.0;
+    }
+    let zooms = edit.zoom_segments.iter().filter(|s| s.kind == crate::edit::ZoomKind::Zoom);
+    // The zoom in effect, or else the last one that ended (zooming out).
+    let target = zooms
+        .clone()
+        .find(|s| t >= s.start && t < s.end)
+        .or_else(|| zooms.filter(|s| s.end <= t).max_by(|a, b| a.end.total_cmp(&b.end)))
+        .map_or(scale, |s| s.scale.max(scale));
+    if target <= 1.0005 { 0.0 } else { (scale.ln() / target.ln()).clamp(0.0, 1.0) }
+}
+
 fn apply_camera_layout(fs: &mut FrameState, edit: &EditConfig, layout: &Layout, camera_aspect: f64, t: f64) {
-    let p = placement_at(layout, edit, camera_aspect, t, fs.camera.scale);
+    let p = placement_at(layout, edit, camera_aspect, t, zoom_progress(edit, fs.camera.scale, t));
     // Split and fullscreen show the whole screen card: blend the zoom out.
     let id = Camera::identity(layout);
     fs.camera = Camera::lerp(fs.camera, id, p.no_zoom);
@@ -1006,28 +1046,42 @@ mod tests {
         let layout = Layout::new(&r, &edit);
         let ar = 16.0 / 9.0;
         // Default: bottom-right corner, inside the canvas.
-        let d = placement(&layout, &edit, ar, CameraLayoutKind::Default, [2, 2], None, 1.0);
+        let d = placement(&layout, &edit, ar, CameraLayoutKind::Default, [2, 2], None, 0.0);
         assert!((d.camera.x + d.camera.w - (layout.aspect - 0.04)).abs() < 1e-9);
         assert!((d.camera.y + d.camera.h - 0.96).abs() < 1e-9);
         assert_eq!(d.screen, [0.0, 0.0, 1.0]);
         // Zoomed in, the camera shrinks.
-        let z = placement(&layout, &edit, ar, CameraLayoutKind::Default, [2, 2], None, 2.0);
+        let z = placement(&layout, &edit, ar, CameraLayoutKind::Default, [2, 2], None, 1.0);
         assert!(z.camera.h < d.camera.h);
         // Split: screen shrinks to the left, camera to its right.
-        let s = placement(&layout, &edit, ar, CameraLayoutKind::Split, [2, 2], None, 1.0);
+        let s = placement(&layout, &edit, ar, CameraLayoutKind::Split, [2, 2], None, 0.0);
         assert!(s.screen[2] < 1.0 && s.no_zoom == 1.0);
         let screen_right = s.screen[0] + s.screen[2] * (layout.card.x + layout.card.w);
         assert!(s.camera.x > screen_right);
 
         // A Fullscreen layout from 2s: animates in, then holds.
         edit.camera_layouts.push(CameraLayoutSegment::new(2.0, 4.0, CameraLayoutKind::Fullscreen));
-        let full = placement(&layout, &edit, ar, CameraLayoutKind::Fullscreen, [2, 2], None, 1.0);
-        let mid = placement_at(&layout, &edit, ar, 2.0 + LAYOUT_TRANSITION / 2.0, 1.0);
+        let full = placement(&layout, &edit, ar, CameraLayoutKind::Fullscreen, [2, 2], None, 0.0);
+        let mid = placement_at(&layout, &edit, ar, 2.0 + LAYOUT_TRANSITION / 2.0, 0.0);
         assert!(mid.camera.w > d.camera.w && mid.camera.w < full.camera.w);
-        let done = placement_at(&layout, &edit, ar, 2.0 + LAYOUT_TRANSITION + 0.01, 1.0);
+        let done = placement_at(&layout, &edit, ar, 2.0 + LAYOUT_TRANSITION + 0.01, 0.0);
         assert_eq!(done, full);
         // Disabled layouts are ignored.
         edit.camera_layouts[0].disabled = true;
-        assert_eq!(placement_at(&layout, &edit, ar, 3.0, 1.0), d);
+        assert_eq!(placement_at(&layout, &edit, ar, 3.0, 0.0), d);
+    }
+
+    #[test]
+    fn camera_shrinks_with_zoom_progress() {
+        let mut edit = EditConfig {
+            zoom_segments: vec![ZoomSegment::new(1.0, 5.0, 2.0, crate::edit::ZoomKind::Zoom)],
+            ..Default::default()
+        };
+        edit.zoom_curve = Some(ZoomCurve::SMOOTH);
+        assert_eq!(zoom_progress(&edit, 1.0, 0.5), 0.0);
+        assert!((zoom_progress(&edit, 2.0f64.sqrt(), 1.2) - 0.5).abs() < 1e-9);
+        assert!((zoom_progress(&edit, 2.0, 3.0) - 1.0).abs() < 1e-9);
+        // Zooming back out after the segment: measured against that zoom.
+        assert!((zoom_progress(&edit, 2.0f64.sqrt(), 5.2) - 0.5).abs() < 1e-9);
     }
 }

@@ -18,8 +18,8 @@ impl Mapping<'_> {
     pub fn to_screen(&self, u: f64, v: f64) -> Pos2 {
         let l = self.layout;
         let [ox, oy, s] = self.xf;
-        let qx = ox + (l.content.x + u * l.content.w) * s;
-        let qy = oy + (l.content.y + v * l.content.h) * s;
+        let (cx, cy) = l.uv_to_canvas(u, v);
+        let (qx, qy) = (ox + cx * s, oy + cy * s);
         let h = self.screen.height() as f64;
         pos2(
             self.screen.min.x + (((qx - self.cam.cx) * self.cam.scale + l.aspect * 0.5) * h) as f32,
@@ -35,7 +35,7 @@ impl Mapping<'_> {
         let uy = (p.y - self.screen.min.y) as f64 / h;
         let qx = (self.cam.cx + (ux - l.aspect * 0.5) / self.cam.scale - ox) / s.max(1e-6);
         let qy = (self.cam.cy + (uy - 0.5) / self.cam.scale - oy) / s.max(1e-6);
-        ((qx - l.content.x) / l.content.w, (qy - l.content.y) / l.content.h)
+        l.canvas_to_uv(qx, qy)
     }
 }
 
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn mapping_round_trips_through_layout_placement() {
-        let layout = Layout { aspect: 16.0 / 9.0, card: CRect { x: 0.1, y: 0.1, w: 1.5, h: 0.8 }, content: CRect { x: 0.1, y: 0.1, w: 1.5, h: 0.8 }, video_w: 1920.0, video_h: 1080.0 };
+        let layout = Layout { aspect: 16.0 / 9.0, card: CRect { x: 0.1, y: 0.1, w: 1.5, h: 0.8 }, content: CRect { x: 0.1, y: 0.1, w: 1.5, h: 0.8 }, crop: [0.0, 0.0, 1.0, 1.0], video_w: 1920.0, video_h: 1080.0 };
         let cam = Camera { cx: 0.9, cy: 0.45, scale: 1.4 };
         let m = Mapping { screen: Rect::from_min_size(pos2(10.0, 20.0), egui::vec2(1600.0, 900.0)), layout: &layout, cam, xf: [0.05, 0.1, 0.6] };
         let p = m.to_screen(0.3, 0.7);
