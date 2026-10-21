@@ -761,7 +761,7 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
         && pointer.is_some_and(|p| {
             bar.expand(6.0).contains(p)
                 || ((sh.gear_open || sh.menu.is_some()) && menu_area.contains(p))
-                || (sh.device_options.is_some() && device_options_rect(bar).contains(p))
+                || (sh.device_options.is_some() && device_options_rect(ui.ctx(), bar).contains(p))
         });
     let p = ui.painter().clone();
 
@@ -1060,12 +1060,15 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         gear_menu(ui, sh, gear_menu_rect(bar));
     }
     if sh.device_options.is_some() {
-        device_options_panel(ui, sh, device_options_rect(bar));
+        device_options_panel(ui, sh, device_options_rect(ui.ctx(), bar));
     }
 }
 
-fn device_options_rect(bar: Rect) -> Rect {
-    Rect::from_min_size(pos2(bar.left() + 150.0, bar.top() - 14.0 - 560.0), vec2(440.0, 560.0))
+/// The options panel sits above the bar and grows upwards to fit its
+/// content, measured on the previous frame.
+fn device_options_rect(ctx: &egui::Context, bar: Rect) -> Rect {
+    let h = ctx.data(|d| d.get_temp::<f32>(egui::Id::NULL.with("device-options-height"))).unwrap_or(600.0);
+    Rect::from_min_max(pos2(bar.left() + 150.0, bar.top() - 14.0 - h), pos2(bar.left() + 590.0, bar.top() - 14.0))
 }
 
 /// Row of small chips in the bar's style; returns the clicked index.
@@ -1096,8 +1099,21 @@ fn device_options_panel(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
     p.add(egui::epaint::Shadow { offset: [0, 8], blur: 30, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(r, CornerRadius::same(14)));
     p.rect_filled(r, 14.0, BAR_BG);
     p.rect_stroke(r, 14.0, Stroke::new(1.0, BAR_BORDER), StrokeKind::Inside);
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(18.0)).layout(egui::Layout::top_down(egui::Align::Min)));
-    let ui = &mut child;
+    // Laid out from the top of the panel; its measured height sizes the
+    // panel on the next frame.
+    let content = Rect::from_min_size(r.min + vec2(18.0, 18.0), vec2(r.width() - 36.0, 2000.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::top_down(egui::Align::Min)));
+    device_options_content(&mut child, sh, &device);
+    let needed = child.min_rect().height() + 36.0;
+    let id = egui::Id::NULL.with("device-options-height");
+    if ui.ctx().data(|d| d.get_temp::<f32>(id)).is_none_or(|h| (h - needed).abs() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, needed));
+        ui.ctx().request_repaint();
+    }
+}
+
+fn device_options_content(ui: &mut egui::Ui, sh: &mut Shared, device: &record::device::Device) {
+    let device = device.clone();
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(egui::RichText::new(&device.model).font(theme::semibold(15.0)).color(BAR_TEXT));
     ui.label(egui::RichText::new("Mirrored with scrcpy. The recording is as sharp as the mirror window on screen.").size(12.0).color(BAR_DIM));
@@ -1155,12 +1171,13 @@ fn device_options_panel(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
     let stale = sh.mirror.as_ref().is_some_and(|m| m.device == device && m.options != sh.settings.scrcpy);
     let label = if !connected { "Connect" } else if stale { "Reconnect with these options" } else { "Connected" };
     ui.horizontal(|ui| {
-        let w = ui.available_width();
+        let gap = ui.spacing().item_spacing.x;
+        let close_w = 88.0;
+        let go_w = ui.available_width() - close_w - gap;
         let go = egui::Button::new(egui::RichText::new(label).font(theme::semibold(13.5)).color(Color32::WHITE))
             .fill(if connected && !stale { Color32::from_white_alpha(16) } else { theme::ACCENT })
-            .corner_radius(CornerRadius::same(9))
-            .min_size(vec2(w - 96.0, 34.0));
-        if ui.add_enabled(!connected || stale, go).clicked() {
+            .corner_radius(CornerRadius::same(9));
+        if ui.add_enabled_ui(!connected || stale, |ui| ui.add_sized([go_w, 34.0], go)).inner.clicked() {
             sh.mirror = None;
             sh.mirror_window = None;
             match record::device::Mirror::open(&device, &sh.settings.scrcpy) {
@@ -1172,9 +1189,8 @@ fn device_options_panel(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
         }
         let close = egui::Button::new(egui::RichText::new("Close").size(13.5).color(BAR_TEXT))
             .fill(Color32::from_white_alpha(12))
-            .corner_radius(CornerRadius::same(9))
-            .min_size(vec2(88.0, 34.0));
-        if ui.add(close).clicked() {
+            .corner_radius(CornerRadius::same(9));
+        if ui.add_sized([close_w, 34.0], close).clicked() {
             sh.device_options = None;
         }
     });
@@ -1865,8 +1881,11 @@ mod tests {
         sh.scrcpy = true;
         sh.device_options = Some(record::device::Device { serial: "x".into(), model: "Test Phone".into() });
         h.frame(&mut sh, vec![]);
+        h.frame(&mut sh, vec![]);
+        // The panel fits its content and ends above the bar.
+        let r = device_options_rect(&h.ctx, bar());
+        assert!(r.height() > 300.0 && r.height() < 600.0 && r.bottom() < bar().top(), "{r:?}");
         // A click on the panel background neither closes it nor starts anything.
-        let r = device_options_rect(bar());
         h.click(&mut sh, pos2(r.right() - 30.0, r.top() + 12.0));
         assert!(sh.device_options.is_some() && sh.start.is_none() && !sh.cancel);
         // Escape closes the panel before it would close the bar.
