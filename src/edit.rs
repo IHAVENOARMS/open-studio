@@ -583,6 +583,13 @@ impl CaptionFont {
             Self::Mono => "SF Mono:semibold,JetBrains Mono:semibold,monospace:semibold",
         }
     }
+    /// fontconfig pattern for Arabic words, which the Latin fonts lack.
+    pub fn arabic_pattern(self) -> &'static str {
+        match self {
+            Self::Serif => "Noto Naskh Arabic:semibold,Noto Sans Arabic:semibold,serif:semibold:lang=ar",
+            _ => "Noto Sans Arabic:semibold,Vazirmatn:semibold,sans-serif:semibold:lang=ar",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

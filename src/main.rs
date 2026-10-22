@@ -1,4 +1,5 @@
 mod app;
+mod bidi;
 mod clicks;
 mod control;
 mod cursor_themes;

@@ -3,6 +3,7 @@
 
 use super::sidebar::{heading, help, sub_card, toggle_help};
 use super::widgets;
+use crate::bidi;
 use crate::edit::{CaptionAnimation, CaptionDisplay, CaptionFont, CaptionPosition, EditConfig};
 use crate::icons::Icon;
 use crate::project::Recording;
@@ -350,86 +351,133 @@ pub fn transcript(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Reco
     let shift = ui.input(|i| i.modifiers.shift);
     let mut clicked_word = None;
     ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
-        for (i, w) in t.words.iter().enumerate() {
-            let cut = edit.is_cut(w.start, w.end);
-            let hidden = edit.captions.hidden_words.contains(&i);
-            if (cut || hidden) && !edit.captions.show_deleted {
-                continue;
+    // Arabic transcripts flow right to left: lines are broken in reading
+    // order, then each line's words are set right to left with English runs
+    // inside them left to right.
+    let rtl = bidi::paragraph_rtl(t.words.iter().map(|w| w.text.as_str()));
+    let visible: Vec<usize> = (0..t.words.len())
+        .filter(|&i| edit.captions.show_deleted || !(edit.is_cut(t.words[i].start, t.words[i].end) || edit.captions.hidden_words.contains(&i)))
+        .collect();
+    let st_editing = st.editing.as_ref().map(|(i, _)| *i);
+    let mut draw = |ui: &mut Ui, i: usize| {
+        let w = &t.words[i];
+        let cut = edit.is_cut(w.start, w.end);
+        let hidden = edit.captions.hidden_words.contains(&i);
+        if (cut || hidden) && !edit.captions.show_deleted {
+            return;
+        }
+        if let Some(&(a, b)) = pause_before.get(&i) {
+            let tightened = edit.cut_at((a + b) * 0.5).is_some();
+            let label = format!("··· {:.1}s", if tightened { 2.0 * PAUSE_KEEP } else { b - a });
+            let g = ui.painter().layout_no_wrap(label, egui::FontId::proportional(11.5), Color32::from_rgb(0x9e, 0x91, 0xf3));
+            let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 14.0, 20.0), Sense::click());
+            ui.painter().rect_filled(r.shrink2(vec2(2.0, 0.0)), CornerRadius::same(6), Color32::from_rgb(0x22, 0x20, 0x33));
+            ui.painter().galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
+            let resp = resp.on_hover_text(if tightened { "Restore this pause" } else { "Tighten this pause" });
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                if tightened {
+                    edit.restore(a, b);
+                } else {
+                    edit.add_cut(a + PAUSE_KEEP, b - PAUSE_KEEP);
+                }
             }
-            if let Some(&(a, b)) = pause_before.get(&i) {
-                let tightened = edit.cut_at((a + b) * 0.5).is_some();
-                let label = format!("··· {:.1}s", if tightened { 2.0 * PAUSE_KEEP } else { b - a });
-                let g = ui.painter().layout_no_wrap(label, egui::FontId::proportional(11.5), Color32::from_rgb(0x9e, 0x91, 0xf3));
-                let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 14.0, 20.0), Sense::click());
-                ui.painter().rect_filled(r.shrink2(vec2(2.0, 0.0)), CornerRadius::same(6), Color32::from_rgb(0x22, 0x20, 0x33));
-                ui.painter().galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
-                let resp = resp.on_hover_text(if tightened { "Restore this pause" } else { "Tighten this pause" });
-                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    if tightened {
-                        edit.restore(a, b);
+            ui.add_space(4.0);
+        }
+        if let Some((ei, text)) = &mut st.editing {
+            if *ei == i {
+                let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).font(font.clone()));
+                r.request_focus();
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) || r.lost_focus() {
+                    let new = text.trim().to_string();
+                    if new.is_empty() || new == w.text {
+                        edit.captions.word_edits.remove(&i);
                     } else {
-                        edit.add_cut(a + PAUSE_KEEP, b - PAUSE_KEEP);
+                        edit.captions.word_edits.insert(i, new);
                     }
+                    st.editing = None;
+                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    st.editing = None;
                 }
                 ui.add_space(4.0);
+                return;
             }
-            if let Some((ei, text)) = &mut st.editing {
-                if *ei == i {
-                    let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).font(font.clone()));
-                    r.request_focus();
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) || r.lost_focus() {
-                        let new = text.trim().to_string();
-                        if new.is_empty() || new == w.text {
-                            edit.captions.word_edits.remove(&i);
-                        } else {
-                            edit.captions.word_edits.insert(i, new);
-                        }
-                        st.editing = None;
-                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        st.editing = None;
-                    }
-                    ui.add_space(4.0);
-                    continue;
+        }
+        // The gap goes on the side the next word follows.
+        let word = edit.captions.word_text(i, &w.text);
+        let text = if rtl { format!(" {word}") } else { format!("{word} ") };
+        let filler = transcript::is_filler(&w.text);
+        let color = if cut || hidden {
+            Color32::from_rgb(0x5a, 0x5b, 0x62)
+        } else if filler {
+            Color32::from_rgb(0xb4, 0xa9, 0xf7)
+        } else {
+            theme::TEXT
+        };
+        let g = ui.painter().layout_no_wrap(text, font.clone(), color);
+        let (r, resp) = ui.allocate_exact_size(g.size(), Sense::click());
+        let selected = st.selection.is_some_and(|(a, b)| i >= a && i <= b);
+        let p = ui.painter();
+        if selected {
+            p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_rgb(0x3a, 0x30, 0x7a));
+        } else if current == Some(i) {
+            p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_rgb(0x2a, 0x26, 0x48));
+        } else if resp.hovered() {
+            p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_white_alpha(10));
+        }
+        let gap = ui.fonts_mut(|f| f.glyph_width(&font, ' '));
+        let (x0, x1) = if rtl { (r.left() + gap, r.right()) } else { (r.left(), r.right() - gap) };
+        p.galley(r.min, g, color);
+        if filler && !cut {
+            let y = r.bottom() - 1.0;
+            p.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, Color32::from_rgb(0x8b, 0x7c, 0xf0)));
+        }
+        if cut || hidden {
+            let y = r.center().y;
+            p.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, Color32::from_rgb(0x6a, 0x6b, 0x72)));
+        }
+        if resp.double_clicked() {
+            st.editing = Some((i, edit.captions.word_text(i, &w.text).to_string()));
+        } else if resp.clicked() {
+            clicked_word = Some(i);
+        }
+        resp.on_hover_cursor(egui::CursorIcon::Text);
+    };
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
+        if !rtl {
+            ui.horizontal_wrapped(|ui| {
+                for &i in &visible {
+                    draw(ui, i);
                 }
+            });
+            return;
+        }
+        let pill_font = egui::FontId::proportional(11.5);
+        let item_width = |ui: &Ui, i: usize| {
+            let word = ui.painter().layout_no_wrap(format!(" {}", t.words[i].text), font.clone(), Color32::WHITE).size().x;
+            let pill = pause_before.get(&i).map_or(0.0, |(a, b)| ui.painter().layout_no_wrap(format!("··· {:.1}s", b - a), pill_font.clone(), Color32::WHITE).size().x + 18.0);
+            // A word being corrected is a text box.
+            if st_editing == Some(i) { word.max(94.0) + pill } else { word + pill }
+        };
+        let width = ui.available_width();
+        let mut rows: Vec<Vec<usize>> = vec![];
+        let mut used = f32::INFINITY;
+        for &i in &visible {
+            let w = item_width(ui, i);
+            if used + w > width {
+                rows.push(vec![]);
+                used = 0.0;
             }
-            let text = format!("{} ", edit.captions.word_text(i, &w.text));
-            let filler = transcript::is_filler(&w.text);
-            let color = if cut || hidden {
-                Color32::from_rgb(0x5a, 0x5b, 0x62)
-            } else if filler {
-                Color32::from_rgb(0xb4, 0xa9, 0xf7)
-            } else {
-                theme::TEXT
-            };
-            let g = ui.painter().layout_no_wrap(text, font.clone(), color);
-            let (r, resp) = ui.allocate_exact_size(g.size(), Sense::click());
-            let selected = st.selection.is_some_and(|(a, b)| i >= a && i <= b);
-            let p = ui.painter();
-            if selected {
-                p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_rgb(0x3a, 0x30, 0x7a));
-            } else if current == Some(i) {
-                p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_rgb(0x2a, 0x26, 0x48));
-            } else if resp.hovered() {
-                p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_white_alpha(10));
-            }
-            let text_w = g.size().x - ui.fonts_mut(|f| f.glyph_width(&font, ' '));
-            p.galley(r.min, g, color);
-            if filler && !cut {
-                let y = r.bottom() - 1.0;
-                p.line_segment([pos2(r.left(), y), pos2(r.left() + text_w, y)], Stroke::new(1.0, Color32::from_rgb(0x8b, 0x7c, 0xf0)));
-            }
-            if cut || hidden {
-                let y = r.center().y;
-                p.line_segment([pos2(r.left(), y), pos2(r.left() + text_w, y)], Stroke::new(1.0, Color32::from_rgb(0x6a, 0x6b, 0x72)));
-            }
-            if resp.double_clicked() {
-                st.editing = Some((i, edit.captions.word_text(i, &w.text).to_string()));
-            } else if resp.clicked() {
-                clicked_word = Some(i);
-            }
-            resp.on_hover_cursor(egui::CursorIcon::Text);
+            rows.last_mut().unwrap().push(i);
+            used += w;
+        }
+        for row in rows {
+            let texts: Vec<&str> = row.iter().map(|&i| t.words[i].text.as_str()).collect();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                for k in bidi::visual_order(&texts, true).into_iter().rev() {
+                    draw(ui, row[k]);
+                }
+            });
         }
     });
     if let Some(i) = clicked_word {
@@ -486,7 +534,8 @@ mod tests {
             events,
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |ui| f(ui));
+        // No renderer here to upload the font atlas to.
+        ctx.run_ui(input, |ui| f(ui)).textures_delta.clear();
     }
 
     #[test]

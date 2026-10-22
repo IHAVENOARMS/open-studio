@@ -289,7 +289,10 @@ mod tests {
             events,
             ..Default::default()
         };
-        ctx.run_ui(raw, |ui| show(ui, edit)).platform_output.cursor_icon
+        let mut out = ctx.run_ui(raw, |ui| show(ui, edit));
+        // No renderer here to upload the font atlas to.
+        out.textures_delta.clear();
+        out.platform_output.cursor_icon
     }
 
     #[test]

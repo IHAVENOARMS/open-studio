@@ -2065,7 +2065,9 @@ mod tests {
             };
             let mon = test_monitor();
             let widget = self.widget;
-            let _ = self.ctx.run_ui(raw, |ui| if widget { widget_ui(ui, sh) } else { overlay_ui(ui, sh, &mon) });
+            let mut out = self.ctx.run_ui(raw, |ui| if widget { widget_ui(ui, sh) } else { overlay_ui(ui, sh, &mon) });
+            // No renderer here to upload the font atlas to.
+            out.textures_delta.clear();
         }
         fn click(&mut self, sh: &mut Shared, pos: Pos2) {
             let m = egui::Modifiers::default();

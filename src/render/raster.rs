@@ -1,6 +1,6 @@
 //! Small CPU rasterizer for text overlays (keycaps, captions).
 
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
+use ab_glyph::{Font, FontVec, GlyphId, PxScale, ScaleFont};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
@@ -126,15 +126,8 @@ impl Canvas {
 
     #[allow(clippy::too_many_arguments)]
     pub fn text_alpha(&mut self, font: &FontVec, s: &str, size: f32, x: f32, baseline: f32, color: [f32; 3], alpha: f32) {
-        let sf = font.as_scaled(PxScale::from(size));
-        let mut pen = x;
-        let mut prev = None;
-        for ch in s.chars() {
-            let id = font.glyph_id(ch);
-            if let Some(p) = prev {
-                pen += sf.kern(p, id);
-            }
-            let g = id.with_scale_and_position(PxScale::from(size), ab_glyph::point(pen, baseline));
+        for (id, gx, gy) in shape(font, s, size).0 {
+            let g = id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x + gx, baseline + gy));
             if let Some(o) = font.outline_glyph(g) {
                 let b = o.px_bounds();
                 o.draw(|gx, gy, cov| {
@@ -144,8 +137,6 @@ impl Canvas {
                     }
                 });
             }
-            pen += sf.h_advance(id);
-            prev = Some(id);
         }
     }
 
@@ -164,18 +155,54 @@ impl Canvas {
 }
 
 pub fn text_width(font: &FontVec, s: &str, size: f32) -> f32 {
+    shape(font, s, size).1
+}
+
+/// Shapes `s` with harfrust (Arabic letters joined and set right to left,
+/// ligatures, kerning): glyphs in drawing order with their offsets from the
+/// pen start (y down), and the total advance.
+fn shape(font: &FontVec, s: &str, size: f32) -> (Vec<(GlyphId, f32, f32)>, f32) {
+    static DATA: OnceLock<Mutex<HashMap<usize, &'static harfrust::ShaperData>>> = OnceLock::new();
     let sf = font.as_scaled(PxScale::from(size));
-    let mut w = 0.0;
-    let mut prev = None;
-    for c in s.chars() {
-        let id = font.glyph_id(c);
-        if let Some(p) = prev {
-            w += sf.kern(p, id);
-        }
-        w += sf.h_advance(id);
-        prev = Some(id);
-    }
-    w
+    let Ok(font_ref) = harfrust::FontRef::from_index(font.as_slice(), 0) else {
+        // Unparseable for the shaper: one glyph per character.
+        let mut pen = 0.0;
+        let glyphs = s
+            .chars()
+            .map(|c| {
+                let id = font.glyph_id(c);
+                let at = pen;
+                pen += sf.h_advance(id);
+                (id, at, 0.0)
+            })
+            .collect();
+        return (glyphs, pen);
+    };
+    // Fonts come from `font()` and live forever, so the address is a stable key.
+    let data = *DATA
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(font as *const FontVec as usize)
+        .or_insert_with(|| Box::leak(Box::new(harfrust::ShaperData::new(&font_ref))));
+    let shaper = data.shaper(&font_ref).build();
+    let mut buffer = harfrust::UnicodeBuffer::new();
+    buffer.push_str(s);
+    buffer.guess_segment_properties();
+    let out = shaper.shape(buffer, harfrust::ShapeOptions::new());
+    let k = sf.h_scale_factor();
+    let mut pen = 0.0;
+    let glyphs = out
+        .glyph_infos()
+        .iter()
+        .zip(out.glyph_positions())
+        .map(|(info, pos)| {
+            let g = (GlyphId(info.glyph_id as u16), pen + pos.x_offset as f32 * k, -pos.y_offset as f32 * k);
+            pen += pos.x_advance as f32 * k;
+            g
+        })
+        .collect();
+    (glyphs, pen)
 }
 
 pub fn has_glyph(font: &FontVec, s: &str) -> bool {

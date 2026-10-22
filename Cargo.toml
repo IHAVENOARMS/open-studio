@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 ab_glyph = "0.2.32"
+# Text shaping for captions (joins Arabic letters); the version egui uses.
+harfrust = "0.12"
 anyhow = "1.0.104"
 ashpd = { version = "0.13", features = ["file_chooser", "screencast"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }
