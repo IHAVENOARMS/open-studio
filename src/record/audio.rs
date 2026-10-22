@@ -49,6 +49,17 @@ pub fn list_devices() -> Vec<Device> {
 /// Pulse name for "whatever is playing": the default sink's monitor.
 pub const SYSTEM_AUDIO: &str = "@DEFAULT_MONITOR@";
 pub const DEFAULT_MIC: &str = "@DEFAULT_SOURCE@";
+/// Device names starting with this record one app's playback stream (by
+/// PipeWire node name) instead of a Pulse source.
+pub const STREAM_PREFIX: &str = "stream:";
+
+/// True when a playback stream with this node name exists right now.
+fn stream_exists(name: &str) -> bool {
+    std::process::Command::new("pactl")
+        .args(["list", "sink-inputs"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == format!("node.name = \"{name}\"")))
+}
 
 struct Wav {
     file: std::io::BufWriter<std::fs::File>,
@@ -91,8 +102,19 @@ impl AudioCapture {
     /// (direct capture); otherwise raw monotonic time (portal capture).
     pub fn start(device: &str, out: &Path, clock: Arc<RecClock>, use_clock: bool) -> Result<Self> {
         gst::init()?;
+        let src = match device.strip_prefix(STREAM_PREFIX) {
+            // Tap one app's playback (PipeWire). Without the stream PipeWire
+            // would connect the default source, the microphone, instead.
+            Some(name) => {
+                if !stream_exists(name) {
+                    anyhow::bail!("its audio isn't playing (no \"{name}\" stream)");
+                }
+                format!("pipewiresrc target-object=\"{name}\" do-timestamp=true client-name=\"Open Studio\"")
+            }
+            None => format!("pulsesrc device=\"{device}\" do-timestamp=true client-name=\"Open Studio\""),
+        };
         let desc = format!(
-            "pulsesrc device=\"{device}\" do-timestamp=true client-name=\"Open Studio\" ! audioconvert ! audioresample \
+            "{src} ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate={RATE},channels={CHANNELS},layout=interleaved ! appsink name=sink sync=false"
         );
         let pipeline = gst::parse::launch(&desc)?.downcast::<gst::Pipeline>().map_err(|_| anyhow!("not a pipeline"))?;
@@ -147,5 +169,45 @@ impl AudioCapture {
         }
         let _ = &self.path;
         Ok(w.first_ns.map(|first_ns| AudioResult { first_ns, frames }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Records a single app's playback by node name. Needs PipeWire and
+    /// pw-play, so it's opt-in: `cargo test -- --ignored stream_tap`.
+    #[test]
+    #[ignore]
+    fn stream_tap_records_only_that_app() {
+        let dir = std::env::temp_dir().join("open-studio-tap-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tone = dir.join("tone.wav");
+        assert!(std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=4", "-af", "volume=0.01"])
+            .arg(&tone)
+            .status()
+            .unwrap()
+            .success());
+        let name = "Open Studio tap test";
+        let mut play = std::process::Command::new("pw-play")
+            .args(["-P", &format!("{{ node.name = \"{name}\" }}")])
+            .arg(&tone)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let out = dir.join("tap.wav");
+        let cap = AudioCapture::start(&format!("{STREAM_PREFIX}{name}"), &out, Arc::new(RecClock::new()), false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let res = cap.stop().unwrap().unwrap();
+        let _ = play.wait();
+        assert!(res.frames > RATE as u64, "frames {}", res.frames);
+        let data = std::fs::read(&out).unwrap();
+        let peak = data[44..].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs()).max().unwrap();
+        // 0.01 of a 1/8-amplitude sine is about 41 of 32767.
+        assert!(peak > 20 && peak < 200, "peak {peak}");
+        // A missing stream is refused rather than recording the microphone.
+        assert!(AudioCapture::start(&format!("{STREAM_PREFIX}no such stream"), &dir.join("x.wav"), Arc::new(RecClock::new()), false).is_err());
     }
 }

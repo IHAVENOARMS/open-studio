@@ -192,88 +192,10 @@ fn friendly_name(adb: &std::path::Path, serial: &str) -> Option<String> {
     get(&["settings", "get", "global", "device_name"]).or_else(|| get(&["getprop", "ro.product.marketname"]))
 }
 
-/// Name of the virtual output the phone's sound plays into.
-const DEVICE_SINK: &str = "open_studio_device";
-/// App name scrcpy's audio stream gets, to find it again.
-const APP_NAME: &str = "Open Studio device audio";
-
-/// A virtual audio output for the phone's sound. scrcpy plays into it, a
-/// loopback passes it on to the speakers, and recordings capture its monitor
-/// as their own "device" track. Built from PulseAudio modules through
-/// `pactl`, which PipeWire (pipewire-pulse) provides as well. Removed on drop.
-pub struct DeviceAudio {
-    modules: Vec<u32>,
-}
-
-fn pactl(args: &[&str]) -> Option<String> {
-    let out = Command::new("pactl").args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-impl DeviceAudio {
-    pub fn create() -> Option<Self> {
-        // Modules left over from a crash would make a second sink.
-        if let Some(list) = pactl(&["list", "short", "modules"]) {
-            for line in list.lines().filter(|l| l.contains(DEVICE_SINK)) {
-                if let Some(id) = line.split_whitespace().next() {
-                    let _ = pactl(&["unload-module", id]);
-                }
-            }
-        }
-        let sink: u32 = pactl(&[
-            "load-module",
-            "module-null-sink",
-            &format!("sink_name={DEVICE_SINK}"),
-            "sink_properties=device.description=\"Open Studio device audio\"",
-        ])?
-        .parse()
-        .ok()?;
-        let mut modules = vec![sink];
-        // Forward to the speakers so the phone stays audible.
-        match pactl(&["load-module", "module-loopback", &format!("source={DEVICE_SINK}.monitor"), "latency_msec=40"]).and_then(|s| s.parse().ok()) {
-            Some(id) => modules.push(id),
-            None => eprintln!("open-studio: couldn't forward the phone's sound to the speakers"),
-        }
-        Some(Self { modules })
-    }
-
-    /// The source recordings capture the phone's sound from.
-    pub fn source(&self) -> String {
-        format!("{DEVICE_SINK}.monitor")
-    }
-
-    /// Moves scrcpy's playback stream onto the virtual output, for audio
-    /// backends that ignore PULSE_SINK (SDL on native PipeWire). The stream
-    /// is found by process id or by the app name scrcpy was started with.
-    /// Gives up after 20 s.
-    fn capture_stream_of(pid: u32) {
-        std::thread::spawn(move || {
-            let pid_line = format!("application.process.id = \"{pid}\"");
-            for _ in 0..40 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let Some(list) = pactl(&["list", "sink-inputs"]) else { return };
-                for block in list.split("Sink Input #").skip(1) {
-                    let id = block.split_whitespace().next().unwrap_or("");
-                    let ours = block.lines().map(str::trim).any(|l| {
-                        l == pid_line || l == format!("application.name = \"{APP_NAME}\"") || (l.starts_with("application.name") || l.starts_with("node.name")) && l.to_lowercase().contains("scrcpy")
-                    });
-                    if ours {
-                        let _ = pactl(&["move-sink-input", id, DEVICE_SINK]);
-                        return;
-                    }
-                }
-            }
-        });
-    }
-}
-
-impl Drop for DeviceAudio {
-    fn drop(&mut self) {
-        for id in self.modules.iter().rev() {
-            let _ = pactl(&["unload-module", &id.to_string()]);
-        }
-    }
-}
+/// Name scrcpy's audio stream gets (SDL takes it from the environment), so
+/// recordings can capture the phone's sound on its own while it keeps
+/// playing on the speakers as usual.
+pub const DEVICE_AUDIO_STREAM: &str = "Open Studio device audio";
 
 /// A running scrcpy mirror window. Closed on drop.
 pub struct Mirror {
@@ -281,8 +203,6 @@ pub struct Mirror {
     /// Options it was started with.
     pub options: crate::settings::ScrcpyOptions,
     child: Child,
-    /// The phone's sound, routed through a virtual output when possible.
-    audio: Option<DeviceAudio>,
 }
 
 impl Mirror {
@@ -300,22 +220,16 @@ impl Mirror {
         if let Some(adb) = adb() {
             cmd.env("ADB", adb);
         }
-        let audio = if opts.audio { DeviceAudio::create() } else { None };
-        if audio.is_some() {
-            // PulseAudio clients follow PULSE_SINK; SDL takes the app name
-            // from these, so the stream can be found and moved otherwise.
-            cmd.env("PULSE_SINK", DEVICE_SINK).env("SDL_APP_NAME", APP_NAME).env("SDL_AUDIO_DEVICE_APP_NAME", APP_NAME);
-        }
+        // Name the audio stream (SDL3 and SDL2 read these) so it can be
+        // recorded by itself.
+        cmd.env("SDL_APP_NAME", DEVICE_AUDIO_STREAM).env("SDL_AUDIO_DEVICE_APP_NAME", DEVICE_AUDIO_STREAM);
         let child = cmd.spawn().context("starting scrcpy")?;
-        if audio.is_some() {
-            DeviceAudio::capture_stream_of(child.id());
-        }
-        Ok(Self { device: device.clone(), options: opts.clone(), child, audio })
+        Ok(Self { device: device.clone(), options: opts.clone(), child })
     }
 
-    /// Where to record the phone's sound from, when it has its own output.
+    /// Where to record the phone's sound from (see `audio::AudioCapture`).
     pub fn audio_source(&self) -> Option<String> {
-        self.audio.as_ref().map(DeviceAudio::source)
+        self.options.audio.then(|| format!("{}{DEVICE_AUDIO_STREAM}", super::audio::STREAM_PREFIX))
     }
 
     /// False once scrcpy has quit (phone unplugged, window closed).
@@ -334,6 +248,5 @@ impl Drop for Mirror {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        // `audio` drops after this, removing the virtual output.
     }
 }
