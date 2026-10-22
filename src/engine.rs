@@ -339,7 +339,8 @@ impl Tracks {
             vec![]
         };
         let captions = match &rec.transcript {
-            Some(t) if edit.captions.show => crate::transcript::lines(t, edit, 42),
+            // About 42 characters across 16:9; fewer in narrow (phone) frames.
+            Some(t) if edit.captions.show => crate::transcript::lines(t, edit, caption_chars(layout.aspect)),
             _ => vec![],
         };
         let speech = if edit.camera.hide_during_silence && rec.camera.is_some() { crate::voice::speech_spans(rec) } else { vec![] };
@@ -880,6 +881,11 @@ fn caption_frame(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64) ->
         }
     };
     Some(CaptionFrame { words: texts, rtl: line.rtl, spoken, opacity, slide })
+}
+
+/// Longest caption line, in characters, for a canvas of this aspect ratio.
+fn caption_chars(aspect: f64) -> usize {
+    ((42.0 * aspect / (16.0 / 9.0)).round() as usize).clamp(12, 42)
 }
 
 /// Tilt following horizontal speed, up to about 25 degrees at full setting.

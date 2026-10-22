@@ -913,7 +913,14 @@ impl Compositor {
                 self.caption = Some((id, sp));
             }
             let (_, sp) = self.caption.as_ref().unwrap();
-            let (w, h) = (sp.size.0 as f64, sp.size.1 as f64);
+            let (mut w, mut h) = (sp.size.0 as f64, sp.size.1 as f64);
+            // A line still too wide for the frame (a long word, a large
+            // caption size) is shrunk to fit rather than cut off.
+            let max_w = ow as f64 * 0.92;
+            if w > max_w {
+                h *= max_w / w;
+                w = max_w;
+            }
             let margin = oh as f64 * 0.06;
             let y0 = match st.position {
                 crate::edit::CaptionPosition::Bottom => oh as f64 - margin - h,
