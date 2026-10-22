@@ -302,6 +302,9 @@ pub struct AudioSettings {
     pub mic_mode: MicMode,
     pub mute_microphone: bool,
     pub mute_system: bool,
+    /// A mirrored phone's sound (its own track in device recordings).
+    pub device_volume: f64,
+    pub mute_device: bool,
     /// Background music file (absolute path), looped to the video length.
     pub music: Option<String>,
     pub music_volume: f64,
@@ -319,6 +322,8 @@ impl Default for AudioSettings {
             mic_mode: MicMode::Standard,
             mute_microphone: false,
             mute_system: false,
+            device_volume: 1.0,
+            mute_device: false,
             music: None,
             music_volume: 0.35,
             mute_music: false,
@@ -568,6 +573,8 @@ pub struct SliceProps {
     /// Microphone volume multiplier.
     pub volume: f64,
     pub system_volume: f64,
+    /// External device (phone) audio volume multiplier.
+    pub device_volume: f64,
     pub hide_cursor: bool,
     /// Follow the real cursor exactly (no smoothing), e.g. for dropdowns.
     pub raw_cursor: bool,
@@ -575,7 +582,7 @@ pub struct SliceProps {
 
 impl Default for SliceProps {
     fn default() -> Self {
-        Self { start: 0.0, end: 0.0, speed: 1.0, volume: 1.0, system_volume: 1.0, hide_cursor: false, raw_cursor: false }
+        Self { start: 0.0, end: 0.0, speed: 1.0, volume: 1.0, system_volume: 1.0, device_volume: 1.0, hide_cursor: false, raw_cursor: false }
     }
 }
 
@@ -849,6 +856,11 @@ impl EditConfig {
             cfg.cursor.hidden = true;
             cfg.cursor.click_visual = ClickVisual::Circle;
             cfg.radius = 48.0;
+            // The phone's sound plays through the speakers, so system audio
+            // has it too: keep only the clean device track in the mix.
+            if rec.audio.iter().any(|a| a.kind == "device") {
+                cfg.audio.mute_system = true;
+            }
         }
         cfg
     }

@@ -45,6 +45,8 @@ pub struct RecordOptions {
     pub camera: Option<Arc<camera::CameraFeed>>,
     /// Encode on the GPU when one can (falls back to x264).
     pub gpu_encoding: bool,
+    /// Source with a mirrored phone's sound, recorded as its own track.
+    pub device_audio: Option<String>,
 }
 
 /// Camera frames being encoded to camera.mp4 during a recording.
@@ -68,7 +70,7 @@ pub struct DirectRequest {
 
 impl Default for RecordOptions {
     fn default() -> Self {
-        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false, camera: None, gpu_encoding: crate::settings::Settings::load().gpu_encoding }
+        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false, camera: None, gpu_encoding: crate::settings::Settings::load().gpu_encoding, device_audio: None }
     }
 }
 
@@ -161,6 +163,9 @@ impl Recorder {
             }
             if opts.system_audio {
                 sources.push(("system", audio::SYSTEM_AUDIO.to_string()));
+            }
+            if let Some(d) = &opts.device_audio {
+                sources.push(("device", d.clone()));
             }
             for (kind, dev) in sources {
                 match audio::AudioCapture::start(&dev, &dir.join(format!("{kind}.wav")), clock.clone(), paused_clock) {

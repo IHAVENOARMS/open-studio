@@ -928,7 +928,8 @@ impl Editor {
                     &mut self.selected,
                     self.waveform.lock().unwrap().as_deref(),
                     self.rec.camera.is_some(),
-                    self.rec.audio.iter().any(|a| a.kind != "microphone"),
+                    self.rec.audio.iter().any(|a| a.kind == "system"),
+                    self.rec.audio.iter().any(|a| a.kind == "device"),
                     &shortcuts,
                 );
                 if let Some(t) = out.seek {
@@ -1124,6 +1125,12 @@ impl Editor {
                     }
                     Track::Camera if sel.index < self.edit.camera_layouts.len() => {
                         self.edit.camera_layouts.remove(sel.index);
+                    }
+                    Track::Clip => {
+                        if let Some(&(a, b)) = self.edit.slice_ranges(self.rec.duration).get(sel.index) {
+                            self.edit.add_cut(a, b);
+                            self.hint = Some((format!("Removed {:.1}s — Ctrl+Z to undo", b - a), Instant::now()));
+                        }
                     }
                     _ => {}
                 }

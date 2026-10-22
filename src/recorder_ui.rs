@@ -520,7 +520,7 @@ impl Rt {
         let recorded = req.name.clone().unwrap_or_default();
         self.shared.elapsed = 0.0;
         self.shared.paused = false;
-        match start_recorder(&req, &self.shared.settings, self.shared.camera.clone()) {
+        match start_recorder(&req, &self.shared.settings, self.shared.camera.clone(), self.shared.mirror.as_ref().and_then(|m| m.audio_source())) {
             Ok(r) => {
                 self.shared.can_pause = r.can_pause();
                 self.recording = Some(Recording { recorder: Some(r), request: req });
@@ -594,7 +594,7 @@ impl Rt {
                 if let Some(r) = rec.recorder.take() {
                     r.discard();
                 }
-                match start_recorder(&rec.request, &self.shared.settings, self.shared.camera.clone()) {
+                match start_recorder(&rec.request, &self.shared.settings, self.shared.camera.clone(), self.shared.mirror.as_ref().and_then(|m| m.audio_source())) {
                     Ok(r) => rec.recorder = Some(r),
                     Err(e) => self.error = Some(format!("{e:#}")),
                 }
@@ -730,7 +730,7 @@ impl Rt {
     }
 }
 
-fn start_recorder(req: &DirectRequest, settings: &Settings, camera: Option<Arc<record::camera::CameraFeed>>) -> Result<Recorder> {
+fn start_recorder(req: &DirectRequest, settings: &Settings, camera: Option<Arc<record::camera::CameraFeed>>, device_audio: Option<String>) -> Result<Recorder> {
     Recorder::start(RecordOptions {
         direct: Some(req.clone()),
         show_system_cursor: settings.bake_cursor,
@@ -738,6 +738,8 @@ fn start_recorder(req: &DirectRequest, settings: &Settings, camera: Option<Arc<r
         system_audio: settings.system_audio,
         camera,
         gpu_encoding: settings.gpu_encoding,
+        // Only for the mirrored phone's window.
+        device_audio: device_audio.filter(|_| req.kind == "device"),
         ..Default::default()
     })
 }

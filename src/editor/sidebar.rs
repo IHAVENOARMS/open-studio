@@ -168,6 +168,10 @@ pub fn show(
                                 super::camera_ui::segment_editor(ui, edit, sel.index, selected);
                                 return;
                             }
+                            Track::Clip if sel.index < edit.slice_ranges(rec.duration).len() => {
+                                slice_editor(ui, edit, sel.index, selected, rec);
+                                return;
+                            }
                             _ => *selected = None,
                         }
                     }
@@ -533,6 +537,7 @@ fn audio(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording)
     heading(ui, "Audio");
     let has_mic = rec.audio.iter().any(|a| a.kind == "microphone");
     let has_sys = rec.audio.iter().any(|a| a.kind == "system");
+    let has_device = rec.audio.iter().any(|a| a.kind == "device");
     let a = &mut edit.audio;
     if has_mic {
         theme::section(ui, "Microphone");
@@ -546,15 +551,28 @@ fn audio(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording)
         }
         widgets::divider(ui);
     }
+    if has_device {
+        toggle_help(ui, "Mute external device audio", "Sound from the mirrored phone, recorded on its own.", &mut a.mute_device);
+        if !a.mute_device {
+            theme::section(ui, &format!("External device audio volume  ·  {:.0}%", a.device_volume * 100.0));
+            widgets::slider(ui, &mut a.device_volume, 0.0..=2.0, Some(1.0));
+        }
+        widgets::divider(ui);
+    }
     if has_sys {
-        toggle_help(ui, "Mute system audio", "Sound the computer played while recording.", &mut a.mute_system);
+        let help_text = if has_device {
+            "Sound the computer played while recording. It includes the phone's sound too, so it starts muted to avoid hearing the phone twice."
+        } else {
+            "Sound the computer played while recording."
+        };
+        toggle_help(ui, "Mute system audio", help_text, &mut a.mute_system);
         if !a.mute_system {
             theme::section(ui, &format!("System audio volume  ·  {:.0}%", a.system_volume * 100.0));
             widgets::slider(ui, &mut a.system_volume, 0.0..=2.0, Some(1.0));
         }
         widgets::divider(ui);
     }
-    if !has_mic && !has_sys {
+    if !has_mic && !has_sys && !has_device {
         help(ui, "This recording has no microphone or system audio. Choose a microphone or system audio in the recording bar next time.");
         widgets::divider(ui);
     }
@@ -677,6 +695,60 @@ fn mask_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Opti
         *selected = None;
     }
     seek
+}
+
+/// The Slice editor: speed, cursor and audio for one slice of the clip.
+fn slice_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Option<Selection>, rec: &Recording) {
+    let (a, b) = edit.slice_ranges(rec.duration)[i];
+    if icons::button(ui, Icon::Back, "Close Slice editor", egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), vec2(0.0, 34.0)).clicked() {
+        *selected = None;
+        return;
+    }
+    let props = edit.slice_props((a + b) * 0.5);
+    ui.add_space(8.0);
+    theme::section(ui, "Speed");
+    let mut speed = (props.speed * 10.0).round() as i32;
+    let opts: Vec<(i32, &str)> = vec![(10, "1x"), (12, "1.2x"), (14, "1.4x"), (16, "1.6x"), (18, "1.8x"), (20, "2x")];
+    if widgets::segmented(ui, &mut speed, &opts) {
+        edit.set_slice_props(a, b, |p| p.speed = speed as f64 / 10.0);
+    }
+    widgets::divider(ui);
+    theme::section(ui, "Cursor settings");
+    help(ui, "Change appearance of mouse cursor in this part of the recording.");
+    let mut hide = props.hide_cursor;
+    if widgets::toggle_row(ui, "Hide mouse cursor", &mut hide) {
+        edit.set_slice_props(a, b, |p| p.hide_cursor = hide);
+    }
+    let mut raw = props.raw_cursor;
+    if widgets::toggle_row(ui, "Disable smooth mouse movement", &mut raw) {
+        edit.set_slice_props(a, b, |p| p.raw_cursor = raw);
+    }
+    help(ui, "Follows the real cursor exactly, useful for dropdowns and small targets.");
+    let kinds: Vec<&str> = rec.audio.iter().map(|t| t.kind.as_str()).collect();
+    if !kinds.is_empty() {
+        widgets::divider(ui);
+        theme::section(ui, "Audio");
+        let rows: [(&str, &str, fn(&mut crate::edit::SliceProps) -> &mut f64); 3] = [
+            ("microphone", "Microphone volume", |p| &mut p.volume),
+            ("system", "System audio volume", |p| &mut p.system_volume),
+            ("device", "External device audio volume", |p| &mut p.device_volume),
+        ];
+        for (kind, label, field) in rows {
+            if !kinds.contains(&kind) {
+                continue;
+            }
+            let mut v = *field(&mut props.clone());
+            ui.label(egui::RichText::new(format!("{label}  ·  {:.0}%", v * 100.0)).size(13.0).color(theme::TEXT));
+            if widgets::slider(ui, &mut v, 0.0..=2.0, Some(1.0)) {
+                edit.set_slice_props(a, b, |p| *field(p) = v);
+            }
+        }
+    }
+    ui.add_space(14.0);
+    if widgets::wide_button_icon(ui, Some(Icon::Trash), "Remove slice").clicked() {
+        edit.add_cut(a, b);
+        *selected = None;
+    }
 }
 
 fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Option<Selection>) {

@@ -19,6 +19,8 @@ pub enum Track {
     Mask,
     /// Camera layouts (only with a camera track).
     Camera,
+    /// A slice of the clip (index into `EditConfig::slice_ranges`).
+    Clip,
 }
 
 /// A selected timeline item.
@@ -52,6 +54,7 @@ fn spans(edit: &EditConfig, track: Track) -> Vec<(f64, f64)> {
         Track::Zoom => edit.zoom_segments.iter().map(|z| (z.start, z.end)).collect(),
         Track::Mask => edit.masks.iter().map(|m| (m.start, m.end)).collect(),
         Track::Camera => edit.camera_layouts.iter().map(|l| (l.start, l.end)).collect(),
+        Track::Clip => vec![],
     }
 }
 
@@ -69,6 +72,7 @@ fn set_span(edit: &mut EditConfig, sel: Selection, start: f64, end: f64) {
             let l = &mut edit.camera_layouts[sel.index];
             (l.start, l.end) = (start, end);
         }
+        Track::Clip => {}
     }
 }
 
@@ -82,6 +86,7 @@ fn add_item(edit: &mut EditConfig, track: Track, start: f64, end: f64) -> Select
         }
         Track::Mask => add_mask(edit, Mask::new(start, end)),
         Track::Camera => add_layout(edit, CameraLayoutSegment::new(start, end, CameraLayoutKind::Fullscreen)),
+        Track::Clip => 0,
     };
     Selection { track, index }
 }
@@ -287,6 +292,7 @@ pub fn show(
     waveform: Option<&[f32]>,
     has_camera: bool,
     has_system: bool,
+    has_device: bool,
     shortcuts: &[crate::shortcuts::Shortcut],
 ) -> Output {
     let mut out = Output::default();
@@ -327,6 +333,7 @@ pub fn show(
         Track::Zoom => zoom,
         Track::Mask => mask,
         Track::Camera => cam,
+        Track::Clip => clip,
     };
     let tracks: &[Track] = if has_camera { &[Track::Zoom, Track::Mask, Track::Camera] } else { &[Track::Zoom, Track::Mask] };
     let bottom = if has_camera { cam.bottom() } else { mask.bottom() };
@@ -406,6 +413,14 @@ pub fn show(
                 }
             }
         }
+    }
+    // The selected slice gets a light outline.
+    if let Some(Selection { track: Track::Clip, index }) = *selected
+        && let Some(&(a, b)) = kept.get(index)
+    {
+        let r = Rect::from_x_y_ranges(geo.x(a)..=geo.x(b), clip.y_range());
+        let r = if kept.len() > 1 { r.shrink2(vec2(1.0, 0.0)) } else { r };
+        p.rect_stroke(r, CornerRadius::same(10), Stroke::new(2.0, Color32::from_rgb(0xff, 0xe7, 0xa8)), StrokeKind::Inside);
     }
     // Pins over removed parts: cuts and trimmed ends. Click to bring them back.
     for c in edit.cuts.clone() {
@@ -488,6 +503,7 @@ pub fn show(
                 Track::Zoom => paint_zoom(&p, r, &edit.zoom_segments[i], is_sel),
                 Track::Mask => paint_mask(&p, r, &edit.masks[i], is_sel),
                 Track::Camera => paint_layout(&p, r, &edit.camera_layouts[i], is_sel),
+                Track::Clip => {}
             }
         }
     }
@@ -514,7 +530,7 @@ pub fn show(
                         let (stops, edge, border, label): (&[(f32, Color32)], _, _, _) = match track {
                             Track::Zoom => (&ZOOM_STOPS, ZOOM_EDGE, ZOOM_BORDER, "Zoom"),
                             Track::Mask => (&MASK_STOPS, MASK_EDGE, MASK_BORDER, "Mask"),
-                            Track::Camera => (&LAYOUT_STOPS, LAYOUT_EDGE, LAYOUT_BORDER, "Layout"),
+                            Track::Camera | Track::Clip => (&LAYOUT_STOPS, LAYOUT_EDGE, LAYOUT_BORDER, "Layout"),
                         };
                         gradient_bar(&p, r, 10.0, stops, edge, 0.55, border, 0.35);
                         icons::paint_with_text(&p, r, Some(Icon::Plus), 13.0, label, egui::FontId::proportional(13.0), Color32::from_white_alpha(180));
@@ -545,7 +561,7 @@ pub fn show(
             });
     }
     if let Some(slice) = state.menu_slice {
-        resp.context_menu(|ui| slice_menu(ui, edit, slice, time, duration, has_system, &mut out));
+        resp.context_menu(|ui| slice_menu(ui, edit, slice, time, duration, has_system, has_device, &mut out));
     }
 
     // Interaction.
@@ -615,8 +631,14 @@ pub fn show(
                     }
                 }
                 _ => {
-                    out.seek = Some(geo.t(pos.x));
-                    *selected = None;
+                    let t = geo.t(pos.x);
+                    out.seek = Some(t);
+                    // A click on the clip selects that slice (Slice editor).
+                    *selected = clip
+                        .contains(pos)
+                        .then(|| kept.iter().position(|&(a, b)| t >= a && t <= b))
+                        .flatten()
+                        .map(|index| Selection { track: Track::Clip, index });
                 }
             }
         }
@@ -640,7 +662,8 @@ pub fn show(
 }
 
 /// The clip's right-click menu for slice `a..b`, as in Screen Studio.
-fn slice_menu(ui: &mut Ui, edit: &mut EditConfig, (a, b): (f64, f64), time: f64, duration: f64, has_system: bool, out: &mut Output) {
+#[allow(clippy::too_many_arguments)]
+fn slice_menu(ui: &mut Ui, edit: &mut EditConfig, (a, b): (f64, f64), time: f64, duration: f64, has_system: bool, has_device: bool, out: &mut Output) {
     ui.set_min_width(260.0);
     let props = edit.slice_props((a + b) * 0.5);
     let pct = |v: f64| format!("{:.0}%", v * 100.0);
@@ -666,6 +689,16 @@ fn slice_menu(ui: &mut Ui, edit: &mut EditConfig, (a, b): (f64, f64), time: f64,
             for v in volumes {
                 if ui.selectable_label((props.system_volume - v).abs() < 1e-6, pct(v)).clicked() {
                     edit.set_slice_props(a, b, |p| p.system_volume = v);
+                    ui.close();
+                }
+            }
+        });
+    }
+    if has_device {
+        ui.menu_button("Set external device audio volume", |ui| {
+            for v in volumes {
+                if ui.selectable_label((props.device_volume - v).abs() < 1e-6, pct(v)).clicked() {
+                    edit.set_slice_props(a, b, |p| p.device_volume = v);
                     ui.close();
                 }
             }

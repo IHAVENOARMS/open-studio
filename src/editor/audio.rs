@@ -53,7 +53,7 @@ impl AudioPreview {
     /// What, besides volume, changes the set of tracks.
     pub fn key_for(edit: &crate::edit::EditConfig) -> String {
         let a = &edit.audio;
-        format!("{:?}{}{}{:?}{}{:?}{}", a.music, a.mute_music, a.mute_microphone, a.mic_mode, a.mute_system, edit.cursor.click_sound, edit.cursor.hidden)
+        format!("{:?}{}{}{:?}{}{}{:?}{}", a.music, a.mute_music, a.mute_microphone, a.mic_mode, a.mute_system, a.mute_device, edit.cursor.click_sound, edit.cursor.hidden)
     }
 
     pub fn is_current(&self, edit: &crate::edit::EditConfig) -> bool {
@@ -75,6 +75,7 @@ impl AudioPreview {
             let k = match tr.kind {
                 "microphone" => slice.volume,
                 "system" => slice.system_volume,
+                "device" => slice.device_volume,
                 _ => 1.0,
             };
             tr.volume.set_property("volume", tr.gain * k);

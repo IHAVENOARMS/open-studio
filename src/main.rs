@@ -203,6 +203,7 @@ fn main() -> Result<()> {
                 reuse_selection: reuse,
                 test_source: test,
                 gpu_encoding: settings::Settings::load().gpu_encoding,
+                device_audio: None,
                 camera: match camera.as_deref() {
                     None => None,
                     Some("list") => {

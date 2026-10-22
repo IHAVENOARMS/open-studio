@@ -321,13 +321,17 @@ pub fn audio_tracks(rec: &Recording, edit: &EditConfig, clicks: Option<&Path>) -
     let a = &edit.audio;
     let mut out = vec![];
     for t in &rec.audio {
-        let (muted, gain, filter) = if t.kind == "microphone" {
-            (a.mute_microphone || a.mic_mode == crate::edit::MicMode::Off, a.microphone_volume, a.mic_mode.filter().to_string())
-        } else {
-            (a.mute_system, a.system_volume, String::new())
+        let (muted, gain, filter) = match t.kind.as_str() {
+            "microphone" => (a.mute_microphone || a.mic_mode == crate::edit::MicMode::Off, a.microphone_volume, a.mic_mode.filter().to_string()),
+            "device" => (a.mute_device, a.device_volume, String::new()),
+            _ => (a.mute_system, a.system_volume, String::new()),
         };
         if !muted {
-            let kind = if t.kind == "microphone" { "microphone" } else { "system" };
+            let kind = match t.kind.as_str() {
+                "microphone" => "microphone",
+                "device" => "device",
+                _ => "system",
+            };
             out.push(MixTrack { path: rec.dir.join(&t.file), offset: t.offset, gain, filter, looped: false, kind });
         }
     }
@@ -362,6 +366,7 @@ fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f6
         let slice_volume = |p: &crate::edit::SliceProps| match track.kind {
             "microphone" => p.volume,
             "system" => p.system_volume,
+            "device" => p.device_volume,
             _ => 1.0,
         };
         let mut expr = "1".to_string();
