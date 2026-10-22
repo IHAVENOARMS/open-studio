@@ -65,3 +65,21 @@ impl Preset {
         std::fs::remove_file(&self.path).with_context(|| format!("deleting {}", self.path.display()))
     }
 }
+
+fn last_path() -> PathBuf {
+    crate::util::config_dir().join("last-project-settings.json")
+}
+
+/// Remembers the settings of the project being edited, for new recordings
+/// (Settings: "Use last project settings as default for new recordings").
+pub fn remember_last(settings: &EditConfig) {
+    let _ = std::fs::create_dir_all(crate::util::config_dir());
+    if let Ok(text) = serde_json::to_string(settings) {
+        let _ = std::fs::write(last_path(), text);
+    }
+}
+
+/// The settings of the project edited last, if any.
+pub fn last() -> Option<EditConfig> {
+    serde_json::from_str(&std::fs::read_to_string(last_path()).ok()?).ok()
+}

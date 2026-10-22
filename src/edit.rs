@@ -798,6 +798,12 @@ impl EditConfig {
             }
         }
         let mut cfg = Self::default();
+        // Start from the look of the project edited last, when that's on.
+        if !cfg!(test) && crate::settings::Settings::load().use_last_project_settings
+            && let Some(last) = crate::presets::last()
+        {
+            cfg.apply_preset(&last);
+        }
         cfg.zoom_segments = crate::engine::auto_zoom_segments(rec, cfg.default_zoom);
         if rec.source.kind == "device" {
             // Phone recordings: taps as circles instead of a desktop arrow,

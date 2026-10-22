@@ -139,6 +139,17 @@ impl App {
                             ui.checkbox(&mut self.hide_while_recording, "Hide this window");
                         }
                     });
+                    ui.horizontal(|ui| {
+                        ui.add_space((ui.available_width() - 360.0).max(0.0) / 2.0);
+                        let mut s = crate::settings::Settings::load();
+                        if ui
+                            .checkbox(&mut s.use_last_project_settings, "Use last project settings as default for new recordings")
+                            .on_hover_text("New recordings start with the background, cursor, camera and caption settings of the project you edited last.")
+                            .changed()
+                        {
+                            s.save();
+                        }
+                    });
                     ui.label(
                         RichText::new(format!(
                             "Stop with {} or the recording controls. `open-studio stop` works too.",

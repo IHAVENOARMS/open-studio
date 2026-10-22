@@ -47,6 +47,7 @@ enum Cmd {
     Quality(u32),
     Tab(Tab),
     Preset(usize),
+    ToggleLastSettings,
 }
 
 struct Entry {
@@ -85,6 +86,14 @@ impl Editor {
         for (i, p) in self.presets.iter().enumerate() {
             out.push(Entry { group: "Presets", icon: Icon::Presets, label: format!("Apply preset: {}", p.name), note: "", cmd: Cmd::Preset(i) });
         }
+        let on = Settings::load().use_last_project_settings;
+        out.push(Entry {
+            group: "Settings",
+            icon: Icon::Presets,
+            label: format!("{} last project settings as default for new recordings", if on { "Stop using" } else { "Use" }),
+            note: "",
+            cmd: Cmd::ToggleLastSettings,
+        });
         for (d, name) in [(1, "Full"), (2, "Half"), (4, "Quarter")] {
             out.push(Entry { group: "View", icon: Icon::Quality, label: format!("Preview quality: {name}"), note: "", cmd: Cmd::Quality(d) });
         }
@@ -293,6 +302,16 @@ impl Editor {
                 s.save();
             }
             Cmd::Tab(t) => self.tab = t,
+            Cmd::ToggleLastSettings => {
+                let mut s = Settings::load();
+                s.use_last_project_settings = !s.use_last_project_settings;
+                s.save();
+                self.notify(if s.use_last_project_settings {
+                    "New recordings will use the last project's settings"
+                } else {
+                    "New recordings will start with the default settings"
+                });
+            }
             Cmd::Preset(i) => {
                 if let Some(p) = self.presets.get(i) {
                     self.edit.apply_preset(&p.settings);

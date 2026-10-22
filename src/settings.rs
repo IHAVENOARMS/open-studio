@@ -93,6 +93,8 @@ pub struct Settings {
     pub preview_quality: u32,
     /// Encode recordings and exports on the GPU when it can (see `hwenc`).
     pub gpu_encoding: bool,
+    /// New recordings start with the look of the project edited last.
+    pub use_last_project_settings: bool,
 }
 
 /// scrcpy settings for the Device button.
@@ -175,6 +177,7 @@ impl Default for Settings {
             known_devices: vec![],
             preview_quality: 1,
             gpu_encoding: true,
+            use_last_project_settings: true,
         }
     }
 }
