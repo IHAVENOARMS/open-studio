@@ -8,8 +8,8 @@ use crate::edit::{CaptionDisplay, CaptionSettings};
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 
 /// Renders `words` with the first `spoken` highlighted, at `font_px` text size.
-/// Arabic words use an Arabic font, and a mostly Arabic line runs right to left.
-pub fn render(words: &[String], spoken: usize, style: &CaptionSettings, font_px: u32) -> Image {
+/// Arabic words use an Arabic font; `rtl` lines run right to left.
+pub fn render(words: &[String], rtl: bool, spoken: usize, style: &CaptionSettings, font_px: u32) -> Image {
     let size = font_px as f32;
     let Some(font) = raster::font(style.font.pattern()) else { return Canvas::new(1, 1).into_image() };
     let shown = match style.display {
@@ -38,7 +38,7 @@ pub fn render(words: &[String], spoken: usize, style: &CaptionSettings, font_px:
     let baseline = pad_y + sf.ascent();
     let strs: Vec<&str> = words[..shown].iter().map(String::as_str).collect();
     let mut x = pad_x;
-    for i in bidi::visual_order(&strs, bidi::paragraph_rtl(strs.iter().copied())) {
+    for i in bidi::visual_order(&strs, rtl) {
         let (color, alpha) = if i < spoken { (style.color, 1.0) } else { ([1.0, 1.0, 1.0], 0.5) };
         let (f, s) = faces[i];
         cv.text_alpha(f, strs[i], s, x, baseline, color, alpha);
@@ -53,7 +53,8 @@ mod tests {
     fn renders_line() {
         let line = std::env::var("CAPTION_WORDS").unwrap_or_else(|_| "Welcome to Open Studio.".into());
         let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
-        let img = super::render(&words, 2, &Default::default(), 48);
+        let rtl = crate::bidi::paragraph_rtl(words.iter().map(String::as_str));
+        let img = super::render(&words, rtl, 2, &Default::default(), 48);
         assert!(img.width > 200 && img.height > 48);
         if let Ok(out) = std::env::var("CAPTION_PNG") {
             image::RgbaImage::from_raw(img.width, img.height, img.rgba).unwrap().save(out).unwrap();

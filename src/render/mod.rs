@@ -881,9 +881,9 @@ impl Compositor {
         if let Some(cf) = caption {
             let st = &edit.captions;
             let font_px = (oh as f64 * 0.042 * st.size).round().max(10.0) as u32;
-            let id = format!("{:?}|{}|{font_px}|{:?}|{:?}|{:?}", cf.words, cf.spoken, st.font, st.color, st.display);
+            let id = format!("{:?}|{}|{}|{font_px}|{:?}|{:?}|{:?}", cf.words, cf.rtl, cf.spoken, st.font, st.color, st.display);
             if self.caption.as_ref().map(|(k, _)| k) != Some(&id) {
-                let img = captions::render(&cf.words, cf.spoken, st, font_px);
+                let img = captions::render(&cf.words, cf.rtl, cf.spoken, st, font_px);
                 let sp = self.make_sprite(&img.rgba, img.width, img.height, (img.width as f32, img.height as f32), (0.0, 0.0));
                 self.caption = Some((id, sp));
             }

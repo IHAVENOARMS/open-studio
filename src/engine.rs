@@ -448,6 +448,8 @@ pub struct LoupeFrame {
 #[derive(Clone, Debug)]
 pub struct CaptionFrame {
     pub words: Vec<String>,
+    /// Right to left (the sentence begins with Arabic).
+    pub rtl: bool,
     /// How many words have been spoken.
     pub spoken: usize,
     pub opacity: f64,
@@ -870,7 +872,7 @@ fn caption_frame(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64) ->
             (p.min(fade_out), (1.0 - p).powi(3) * 0.6)
         }
     };
-    Some(CaptionFrame { words: texts, spoken, opacity, slide })
+    Some(CaptionFrame { words: texts, rtl: line.rtl, spoken, opacity, slide })
 }
 
 /// Tilt following horizontal speed, up to about 25 degrees at full setting.

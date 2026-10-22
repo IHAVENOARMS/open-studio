@@ -27,18 +27,11 @@ pub fn is_rtl(word: &str) -> bool {
     class(word) == Class::Rtl
 }
 
-/// True when most words are right-to-left. A transcript of mixed speech
-/// keeps one direction even when a sentence starts with an English word.
+/// The direction of the first letter or digit, as in the Unicode bidi
+/// algorithm: a sentence starting in Arabic runs right to left, one starting
+/// in English left to right.
 pub fn paragraph_rtl<'a>(words: impl IntoIterator<Item = &'a str>) -> bool {
-    let (mut rtl, mut ltr) = (0, 0);
-    for w in words {
-        match class(w) {
-            Class::Rtl => rtl += 1,
-            Class::Ltr => ltr += 1,
-            Class::Neutral => {}
-        }
-    }
-    rtl > ltr
+    words.into_iter().map(class).find(|c| *c != Class::Neutral) == Some(Class::Rtl)
 }
 
 /// Word indices in left-to-right display order. In a right-to-left
@@ -104,5 +97,8 @@ mod tests {
         assert_eq!(visual("الساعة 10 الصبح"), "الصبح 10 الساعة");
         // A short Arabic phrase in an English sentence.
         assert_eq!(visual("I said يلا بينا then left"), "I said بينا يلا then left");
+        // The first word decides, even when most words are the other script.
+        assert_eq!(visual("يعني the new feature"), "the new feature يعني");
+        assert_eq!(visual("OK يلا بينا"), "OK بينا يلا");
     }
 }

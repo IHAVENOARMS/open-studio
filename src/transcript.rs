@@ -363,33 +363,55 @@ pub struct Line {
     pub end: f64,
     /// Indices into the transcript's words.
     pub words: Vec<usize>,
+    /// Right to left: the sentence the line starts in begins with Arabic.
+    pub rtl: bool,
 }
 
 /// Groups the visible words into caption lines: break at long pauses, after
-/// sentence ends, and at about `max_chars` characters.
+/// sentence ends, and at about `max_chars` characters. A line's direction
+/// is its sentence's, set by the sentence's first letter, so a line inside an
+/// Arabic sentence that happens to start with an English word stays right to
+/// left; a sentence in the other direction always starts a new line.
 pub fn lines(t: &Transcript, edit: &EditConfig, max_chars: usize) -> Vec<Line> {
-    let mut out: Vec<Line> = vec![];
-    let mut cur: Option<Line> = None;
-    let mut chars = 0;
-    let mut prev_end = f64::NEG_INFINITY;
-    let mut prev_text = String::new();
+    // Visible words, split into sentences at sentence ends and long pauses.
+    let mut sentences: Vec<Vec<(usize, &str)>> = vec![];
+    let mut prev: Option<(f64, &str)> = None;
     for (i, w) in t.words.iter().enumerate() {
         if edit.captions.hidden_words.contains(&i) || edit.is_cut(w.start, w.end) {
             continue;
         }
         let text = edit.captions.word_text(i, &w.text);
-        let sentence_end = prev_text.ends_with(['.', '?', '!']);
-        let brk = cur.is_some() && (w.start - prev_end > 0.8 || chars + text.len() + 1 > max_chars || (sentence_end && chars > 12));
-        if brk {
+        let new = prev.is_none_or(|(end, p)| w.start - end > 0.8 || p.ends_with(['.', '?', '!', '؟']));
+        if new {
+            sentences.push(vec![]);
+        }
+        sentences.last_mut().unwrap().push((i, text));
+        prev = Some((w.end, text));
+    }
+    let mut out: Vec<Line> = vec![];
+    let mut cur: Option<Line> = None;
+    let mut chars = 0;
+    for sentence in sentences {
+        let rtl = crate::bidi::paragraph_rtl(sentence.iter().map(|(_, s)| *s));
+        let (start, _) = sentence[0];
+        let gap = cur.as_ref().map_or(0.0, |l| t.words[start].start - l.end);
+        // Short sentences share a line, unless they run in different directions.
+        if cur.as_ref().is_some_and(|l| gap > 0.8 || chars > 12 || l.rtl != rtl) {
             out.extend(cur.take());
             chars = 0;
         }
-        let line = cur.get_or_insert(Line { start: w.start, end: w.end, words: vec![] });
-        line.words.push(i);
-        line.end = w.end;
-        chars += text.len() + 1;
-        prev_end = w.end;
-        prev_text = text.to_string();
+        for (i, text) in sentence {
+            let len = text.chars().count();
+            if cur.is_some() && chars + len + 1 > max_chars {
+                out.extend(cur.take());
+                chars = 0;
+            }
+            let w = &t.words[i];
+            let line = cur.get_or_insert(Line { start: w.start, end: w.end, words: vec![], rtl });
+            line.words.push(i);
+            line.end = w.end;
+            chars += len + 1;
+        }
     }
     out.extend(cur);
     out
@@ -416,6 +438,21 @@ mod tests {
 
     fn w(start: f64, end: f64, text: &str) -> Word {
         Word { start, end, text: text.into() }
+    }
+
+    #[test]
+    fn line_direction_follows_the_sentence_start() {
+        let text = "يعني the new feature is really useful for recording tutorials and demos. OK this one is English.";
+        let words = text.split(' ').enumerate().map(|(i, t)| w(i as f64 * 0.3, i as f64 * 0.3 + 0.25, t)).collect();
+        let t = Transcript { language: "ar".into(), model: "base".into(), words };
+        let lines = lines(&t, &EditConfig::default(), 24);
+        assert!(lines.len() >= 3);
+        // The Arabic sentence's later lines start with English but stay right to left.
+        let has = |l: &Line, word: &str| l.words.iter().any(|i| t.words[*i].text == word);
+        let end = lines.iter().position(|l| has(l, "demos.")).unwrap();
+        assert!(lines[..=end].iter().all(|l| l.rtl));
+        assert!(lines[1..=end].iter().any(|l| !crate::bidi::is_rtl(&t.words[l.words[0]].text)));
+        assert!(!lines.last().unwrap().rtl);
     }
 
     #[test]
