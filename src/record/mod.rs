@@ -43,6 +43,8 @@ pub struct RecordOptions {
     pub system_audio: bool,
     /// Camera to record alongside (already open for the live preview).
     pub camera: Option<Arc<camera::CameraFeed>>,
+    /// Encode on the GPU when one can (falls back to x264).
+    pub gpu_encoding: bool,
 }
 
 /// Camera frames being encoded to camera.mp4 during a recording.
@@ -66,7 +68,7 @@ pub struct DirectRequest {
 
 impl Default for RecordOptions {
     fn default() -> Self {
-        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false, camera: None }
+        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false, camera: None, gpu_encoding: crate::settings::Settings::load().gpu_encoding }
     }
 }
 
@@ -125,7 +127,8 @@ impl Recorder {
             (cs, Some((rt, stream)))
         };
 
-        let capture = Capture::start(capture_source, &dir.join(VIDEO_FILE), opts.fps)?;
+        let gpu = if opts.gpu_encoding { crate::hwenc::detect() } else { None };
+        let capture = Capture::start(capture_source, &dir.join(VIDEO_FILE), opts.fps, gpu)?;
         let paused_clock = direct_capture.is_some();
         if let Some(d) = direct_capture {
             let push = capture.pusher().expect("direct capture has an appsrc");
@@ -181,7 +184,7 @@ impl Recorder {
                 let mut slot = r.lock().unwrap();
                 if slot.is_none() {
                     let info = direct::FrameInfo { width: f.width, height: f.height, gst_format: "RGBA" };
-                    *slot = Some(Capture::start(CaptureSource::Direct(info), &path, CAMERA_FPS).map_err(|e| format!("{e:#}")));
+                    *slot = Some(Capture::start(CaptureSource::Direct(info), &path, CAMERA_FPS, gpu).map_err(|e| format!("{e:#}")));
                 }
                 if let Some(Ok(cap)) = slot.as_ref() {
                     if let Some(push) = cap.pusher() {

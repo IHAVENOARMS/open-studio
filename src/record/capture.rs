@@ -4,8 +4,10 @@
 //!
 //! Quality matters more than usual here: the editor zooms in 2x or more, so
 //! chroma subsampling and block artifacts that are invisible at 1:1 become
-//! obvious. We keep full chroma (4:4:4) and use x264 `veryfast` (which, unlike
-//! `ultrafast`, keeps the deblocking filter) at a low CRF.
+//! obvious. On the CPU we keep full chroma (4:4:4) and use x264 `veryfast`
+//! (which, unlike `ultrafast`, keeps the deblocking filter) at a low CRF.
+//! With a GPU encoder (`hwenc`), frames stay RGB until the GPU converts them
+//! to 4:2:0, which costs some colour detail but almost no CPU.
 
 use crate::util::monotonic_ns;
 use anyhow::{Context, Result, anyhow};
@@ -39,6 +41,7 @@ struct Writer {
     scratch: Vec<u8>,
     /// Buffer timestamps are already recording time (direct capture).
     pts_is_rec_time: bool,
+    gpu: Option<&'static crate::hwenc::Gpu>,
 }
 
 pub struct Capture {
@@ -56,7 +59,7 @@ pub struct CaptureResult {
 }
 
 impl Capture {
-    pub fn start(source: CaptureSource, out: &Path, fps: u32) -> Result<Self> {
+    pub fn start(source: CaptureSource, out: &Path, fps: u32, gpu: Option<&'static crate::hwenc::Gpu>) -> Result<Self> {
         gst::init()?;
         let direct = matches!(source, CaptureSource::Direct(_));
         let src = match source {
@@ -72,9 +75,11 @@ impl Capture {
                 "videotestsrc is-live=true pattern=ball ! video/x-raw,width={width},height={height},framerate=60/1"
             ),
         };
+        // For the GPU, any packed RGB format passes through untouched.
+        let format = if gpu.is_some() { "format={BGRx,BGRA,RGBx,RGBA}" } else { "format=Y444,colorimetry=bt709" };
         let desc = format!(
             "{src} ! videorate ! video/x-raw,framerate={fps}/1 ! videoconvert n-threads=0 \
-             ! video/x-raw,format=Y444,colorimetry=bt709 ! appsink name=sink sync=false max-buffers=16"
+             ! video/x-raw,{format} ! appsink name=sink sync=false max-buffers=16"
         );
         let pipeline = gst::parse::launch(&desc)
             .context("building GStreamer pipeline")?
@@ -86,7 +91,7 @@ impl Capture {
         clock.set_property("clock-type", gst::ClockType::Monotonic);
         pipeline.use_clock(Some(&clock));
 
-        let writer = Arc::new(Mutex::new(Writer { pts_is_rec_time: direct, ..Default::default() }));
+        let writer = Arc::new(Mutex::new(Writer { pts_is_rec_time: direct, gpu, ..Default::default() }));
         let appsrc = pipeline.by_name("src").and_then(|e| e.downcast::<gst_app::AppSrc>().ok());
         let sink = pipeline
             .by_name("sink")
@@ -168,15 +173,30 @@ impl Capture {
     }
 }
 
-fn spawn_encoder(out: &PathBuf, w: u32, h: u32, fps: u32) -> Result<Child> {
+fn spawn_encoder(out: &PathBuf, w: u32, h: u32, fps: u32, format: gst_video::VideoFormat, gpu: Option<&crate::hwenc::Gpu>) -> Result<Child> {
+    use gst_video::VideoFormat as F;
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
     // Short GOP keeps seeking in the editor cheap.
-    let child = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "rawvideo", "-pix_fmt", "yuv444p"])
-        .args(["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
-        .args(["-s", &format!("{w}x{h}"), "-r", &fps.to_string(), "-i", "-"])
-        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-g", &fps.to_string()])
-        .args(["-pix_fmt", "yuv444p", "-movflags", "+faststart"])
+    if let Some(gpu) = gpu {
+        let pix_fmt = match format {
+            F::Bgrx => "bgr0",
+            F::Bgra => "bgra",
+            F::Rgbx => "rgb0",
+            _ => "rgba",
+        };
+        cmd.args(gpu.input_args())
+            .args(["-f", "rawvideo", "-pix_fmt", pix_fmt, "-s", &format!("{w}x{h}"), "-r", &fps.to_string(), "-i", "-"])
+            .args(gpu.output_args(16, fps));
+    } else {
+        cmd.args(["-f", "rawvideo", "-pix_fmt", "yuv444p"])
+            .args(["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
+            .args(["-s", &format!("{w}x{h}"), "-r", &fps.to_string(), "-i", "-"])
+            .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-g", &fps.to_string()])
+            .args(["-pix_fmt", "yuv444p"]);
+    }
+    let child = cmd
+        .args(["-movflags", "+faststart"])
         .arg(out)
         .stdin(Stdio::piped())
         .spawn()
@@ -190,7 +210,7 @@ fn write_sample(w: &mut Writer, sample: &gst::Sample, out: &PathBuf, fps: u32, b
     let buffer = sample.buffer().ok_or_else(|| anyhow!("sample without buffer"))?;
     let (width, height) = (info.width(), info.height());
     if w.child.is_none() {
-        let mut child = spawn_encoder(out, width, height, fps)?;
+        let mut child = spawn_encoder(out, width, height, fps, info.format(), w.gpu)?;
         w.stdin = child.stdin.take();
         w.child = Some(child);
         w.size = (width, height);
@@ -209,13 +229,14 @@ fn write_sample(w: &mut Writer, sample: &gst::Sample, out: &PathBuf, fps: u32, b
         .map_err(|_| anyhow!("mapping frame"))?;
     // Repack planes tightly; GStreamer pads strides, ffmpeg's rawvideo expects none.
     w.scratch.clear();
-    for plane in 0..3u32 {
-        let (pw, ph) = (width, height);
+    // Y444 has three full-size planes, packed RGB one; neither is subsampled.
+    for plane in 0..info.n_planes() {
+        let row_bytes = width as usize * info.format_info().pixel_stride()[plane as usize] as usize;
         let stride = frame.plane_stride()[plane as usize] as usize;
         let data = frame.plane_data(plane).map_err(|_| anyhow!("plane data"))?;
-        for row in 0..ph as usize {
+        for row in 0..height as usize {
             let start = row * stride;
-            w.scratch.extend_from_slice(&data[start..start + pw as usize]);
+            w.scratch.extend_from_slice(&data[start..start + row_bytes]);
         }
     }
     let Writer { stdin, scratch, .. } = w;

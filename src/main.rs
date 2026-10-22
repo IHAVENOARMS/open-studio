@@ -17,6 +17,7 @@ mod edit;
 mod engine;
 mod export;
 mod gpu;
+mod hwenc;
 mod icons;
 mod project;
 mod record;
@@ -161,6 +162,8 @@ extern "C" fn on_sigint(_: libc::c_int) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Recording and export ask for it later; find the GPU encoder meanwhile.
+    hwenc::detect_in_background();
     match cli.cmd {
         Some(Cmd::Record { out, fps, system_cursor, reuse, duration, test, display, area, window, mic, system_audio, camera }) => {
             let direct = match (display, window) {
@@ -187,6 +190,7 @@ fn main() -> Result<()> {
                 show_system_cursor: system_cursor,
                 reuse_selection: reuse,
                 test_source: test,
+                gpu_encoding: settings::Settings::load().gpu_encoding,
                 camera: match camera.as_deref() {
                     None => None,
                     Some("list") => {

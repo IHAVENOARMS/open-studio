@@ -737,6 +737,7 @@ fn start_recorder(req: &DirectRequest, settings: &Settings, camera: Option<Arc<r
         microphone: settings.microphone.clone(),
         system_audio: settings.system_audio,
         camera,
+        gpu_encoding: settings.gpu_encoding,
         ..Default::default()
     })
 }
@@ -1041,7 +1042,7 @@ fn bar_rect(screen: Rect) -> Rect {
 }
 
 fn gear_menu_rect(bar: Rect) -> Rect {
-    Rect::from_min_size(pos2(bar.right() - 330.0, bar.top() - 196.0), vec2(330.0, 184.0))
+    Rect::from_min_size(pos2(bar.right() - 330.0, bar.top() - 264.0), vec2(330.0, 252.0))
 }
 
 /// Title, subtitle and a "Start recording" button centred on `c`, drawn at
@@ -1551,6 +1552,19 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
             sh.capturing_shortcut = false;
         }
     }
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Encode on the GPU").size(13.5).color(BAR_TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            changed |= crate::editor::toggle(ui, &mut sh.settings.gpu_encoding).changed();
+        });
+    });
+    // Detection runs in the background from startup; it's done long before anyone opens this.
+    let note = match crate::hwenc::detected() {
+        Some(Some(gpu)) => format!("Uses {} for far less CPU. Off keeps full colour detail for sharper zoomed-in text.", gpu.label()),
+        Some(None) => "No GPU encoder was found, so recordings are encoded on the CPU.".to_string(),
+        None => "Checking for a GPU encoder…".to_string(),
+    };
+    ui.label(egui::RichText::new(note).size(12.0).color(BAR_DIM));
     if changed {
         sh.settings.save();
     }

@@ -35,6 +35,15 @@ impl Quality {
             Self::WebLow => "Smallest file. Compression is visible on detailed content.",
         }
     }
+    /// Constant quantizer for GPU encoders, close to `x264`'s CRF in quality.
+    pub fn gpu_qp(self) -> u32 {
+        match self {
+            Self::Studio => 16,
+            Self::Social => 20,
+            Self::Web => 25,
+            Self::WebLow => 30,
+        }
+    }
     /// x264 CRF and preset.
     pub fn x264(self) -> (u32, &'static str) {
         match self {
@@ -82,6 +91,8 @@ pub struct Settings {
     pub known_devices: Vec<String>,
     /// Editor preview resolution divisor: 1 (Full), 2 (Half), 4 (Quarter).
     pub preview_quality: u32,
+    /// Encode recordings and exports on the GPU when it can (see `hwenc`).
+    pub gpu_encoding: bool,
 }
 
 /// scrcpy settings for the Device button.
@@ -163,6 +174,7 @@ impl Default for Settings {
             camera_preview: true,
             known_devices: vec![],
             preview_quality: 1,
+            gpu_encoding: true,
         }
     }
 }

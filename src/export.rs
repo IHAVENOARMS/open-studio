@@ -88,12 +88,20 @@ pub fn export(
     let gif = opts.format == crate::settings::Format::Gif;
     let video_out = if gif { opts.out.with_extension("tmp.mp4") } else { opts.out.clone() };
     let (crf, preset) = if gif { (12, "veryfast") } else { opts.quality.x264() };
-    let mut ffmpeg = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y"])
-        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &opts.fps.to_string(), "-i", "-"])
-        .args(["-vf", "scale=out_color_matrix=bt709:out_range=tv"])
-        .args(["-c:v", "libx264", "-preset", preset, "-crf", &crf.to_string(), "-pix_fmt", "yuv420p"])
-        .args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
+    // GIFs go through a throwaway intermediate; keep that on x264.
+    let gpu = if gif || !crate::settings::Settings::load().gpu_encoding { None } else { crate::hwenc::detect() };
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+    let input = ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &opts.fps.to_string(), "-i", "-"].map(String::from);
+    if let Some(gpu) = gpu {
+        cmd.args(gpu.input_args()).args(input).args(gpu.output_args(opts.quality.gpu_qp(), opts.fps * 2));
+    } else {
+        cmd.args(input)
+            .args(["-vf", "scale=out_color_matrix=bt709:out_range=tv"])
+            .args(["-c:v", "libx264", "-preset", preset, "-crf", &crf.to_string(), "-pix_fmt", "yuv420p"])
+            .args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]);
+    }
+    let mut ffmpeg = cmd
         .args(["-movflags", "+faststart"])
         .arg(&video_out)
         .stdin(Stdio::piped())
