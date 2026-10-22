@@ -126,16 +126,41 @@ impl Canvas {
 
     #[allow(clippy::too_many_arguments)]
     pub fn text_alpha(&mut self, font: &FontVec, s: &str, size: f32, x: f32, baseline: f32, color: [f32; 3], alpha: f32) {
-        for (id, gx, gy) in shape(font, s, size).0 {
-            let g = id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x + gx, baseline + gy));
-            if let Some(o) = font.outline_glyph(g) {
-                let b = o.px_bounds();
-                o.draw(|gx, gy, cov| {
-                    let (px, py) = (b.min.x as i32 + gx as i32, b.min.y as i32 + gy as i32);
-                    if px >= 0 && py >= 0 {
-                        self.blend(px as usize, py as usize, color, cov.min(1.0) * alpha);
-                    }
-                });
+        let outlines: Vec<_> = shape(font, s, size)
+            .0
+            .into_iter()
+            .filter_map(|(id, gx, gy)| font.outline_glyph(id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x + gx, baseline + gy))))
+            .collect();
+        let Some(first) = outlines.first() else { return };
+        // Joined scripts (Arabic) overlap neighbouring glyphs at the joins.
+        // Merge coverage first so the overlap isn't painted twice, which
+        // shows as brighter joints in translucent text.
+        let mut bounds = first.px_bounds();
+        for o in &outlines[1..] {
+            let b = o.px_bounds();
+            bounds.min.x = bounds.min.x.min(b.min.x);
+            bounds.min.y = bounds.min.y.min(b.min.y);
+            bounds.max.x = bounds.max.x.max(b.max.x);
+            bounds.max.y = bounds.max.y.max(b.max.y);
+        }
+        let (x0, y0) = (bounds.min.x as i32, bounds.min.y as i32);
+        let (w, h) = ((bounds.max.x as i32 - x0 + 1) as usize, (bounds.max.y as i32 - y0 + 1) as usize);
+        let mut cov = vec![0f32; w * h];
+        for o in &outlines {
+            let b = o.px_bounds();
+            let (ox, oy) = (b.min.x as i32 - x0, b.min.y as i32 - y0);
+            o.draw(|gx, gy, c| {
+                let (cx, cy) = (ox + gx as i32, oy + gy as i32);
+                if cx >= 0 && cy >= 0 && (cx as usize) < w && (cy as usize) < h {
+                    let i = cy as usize * w + cx as usize;
+                    cov[i] = cov[i].max(c.min(1.0));
+                }
+            });
+        }
+        for (i, c) in cov.iter().enumerate().filter(|(_, c)| **c > 0.0) {
+            let (px, py) = (x0 + (i % w) as i32, y0 + (i / w) as i32);
+            if px >= 0 && py >= 0 {
+                self.blend(px as usize, py as usize, color, c * alpha);
             }
         }
     }

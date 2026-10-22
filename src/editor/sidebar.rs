@@ -181,8 +181,12 @@ pub fn show(
                             }
                         }
                         Tab::Transcript => {
-                            if let Some(t) = super::captions_ui::transcript(ui, &mut state.captions, edit, rec, time) {
-                                seek = Some(t);
+                            let act = super::captions_ui::transcript(ui, &mut state.captions, edit, rec, time);
+                            if act.seek.is_some() {
+                                seek = act.seek;
+                            }
+                            if act.close {
+                                *tab = Tab::Captions;
                             }
                         }
                         Tab::Audio => audio(ui, state, edit, rec),

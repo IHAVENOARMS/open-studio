@@ -7,7 +7,6 @@ use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
 pub enum Icon {
     Folder,
     Export,
-    Aspect,
     Sparkle,
     Image,
     Zoom,
@@ -72,6 +71,10 @@ pub enum Icon {
     RailAudio,
     RailShortcuts,
     RailAnimation,
+    // Transcript editor.
+    FillerWords,
+    TightenPauses,
+    TranscriptLines,
 }
 
 struct Pen<'a> {
@@ -120,10 +123,6 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(7.0, 8.0), (4.5, 8.0), (4.5, 17.0), (15.5, 17.0), (15.5, 8.0), (13.0, 8.0)]);
             pen.line(&[(10.0, 12.0), (10.0, 2.5)]);
             pen.line(&[(6.8, 5.5), (10.0, 2.5), (13.2, 5.5)]);
-        }
-        Icon::Aspect => {
-            pen.rrect(2.5, 5.0, 17.5, 15.0, 2.0);
-            pen.line(&[(7.0, 5.0), (7.0, 15.0)]);
         }
         Icon::Sparkle => {
             pen.closed(&[(10.0, 2.5), (11.6, 8.4), (17.5, 10.0), (11.6, 11.6), (10.0, 17.5), (8.4, 11.6), (2.5, 10.0), (8.4, 8.4)]);
@@ -215,6 +214,28 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&[(5.0, 5.5), (15.0, 5.5), (14.0, 17.0), (6.0, 17.0)]);
             pen.line(&[(8.5, 8.5), (8.5, 14.0)]);
             pen.line(&[(11.5, 8.5), (11.5, 14.0)]);
+        }
+        Icon::FillerWords => {
+            // Waveform bars with a minus badge.
+            for (x, h) in [(2.8, 2.0), (5.4, 5.0), (8.0, 7.0), (10.6, 3.5)] {
+                pen.line(&[(x, 10.0 - h), (x, 10.0 + h)]);
+            }
+            p.circle_filled(pen.pt(14.8, 13.8), 3.9 * k, color);
+            p.line_segment([pen.pt(13.0, 13.8), pen.pt(16.6, 13.8)], Stroke::new(1.4 * k, Color32::BLACK));
+        }
+        Icon::TightenPauses => {
+            // A frame squeezed from both sides.
+            pen.rrect(5.6, 4.5, 14.4, 15.5, 1.6);
+            pen.line(&[(8.4, 4.5), (8.4, 15.5)]);
+            pen.line(&[(11.6, 4.5), (11.6, 15.5)]);
+            pen.fill(&[(1.2, 7.4), (1.2, 12.6), (3.8, 10.0)]);
+            pen.fill(&[(18.8, 7.4), (18.8, 12.6), (16.2, 10.0)]);
+        }
+        Icon::TranscriptLines => {
+            p.circle_filled(pen.pt(4.6, 5.2), 2.1 * k, color);
+            pen.line(&[(8.6, 5.2), (17.0, 5.2)]);
+            pen.line(&[(3.0, 10.2), (17.0, 10.2)]);
+            pen.line(&[(3.0, 14.8), (17.0, 14.8)]);
         }
         Icon::Scissors => {
             pen.circle(5.5, 14.5, 2.6);

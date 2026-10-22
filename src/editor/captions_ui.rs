@@ -1,15 +1,14 @@
 //! Captions and Transcript panels: generating a transcript with Whisper,
 //! caption styling, and editing the video by editing its transcript.
 
-use super::sidebar::{heading, help, sub_card, toggle_help};
+use super::sidebar::{heading, help, toggle_help};
 use super::widgets;
-use crate::bidi;
 use crate::edit::{CaptionAnimation, CaptionDisplay, CaptionFont, CaptionPosition, EditConfig};
 use crate::icons::Icon;
 use crate::project::Recording;
 use crate::theme;
-use crate::transcript::{self, PAUSE_KEEP, Transcript};
-use egui::{Color32, CornerRadius, RichText, Sense, Stroke, Ui, pos2, vec2};
+use crate::transcript::{self, Transcript};
+use egui::{Color32, CornerRadius, RichText, Sense, Stroke, Ui, vec2};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -27,11 +26,10 @@ pub struct State {
     pub finished: Option<Transcript>,
     /// Show the generate form even though a transcript exists.
     regenerate: bool,
-    /// Selected words, inclusive, in transcript order.
-    selection: Option<(usize, usize)>,
-    anchor: Option<usize>,
-    /// Word being retyped.
-    editing: Option<(usize, String)>,
+    /// The transcript editor's caret and selection.
+    pub(super) doc: super::transcript_ui::Doc,
+    /// A message for the editor's bottom toast ("Removed 6.0s …").
+    pub toast: Option<String>,
     /// Set by "Play": the editor starts playback from the seek point.
     pub play_request: bool,
     saving_srt: Option<Receiver<Vec<PathBuf>>>,
@@ -63,7 +61,7 @@ fn poll_job(ui: &Ui, st: &mut State) {
             st.finished = Some(t);
             st.job = None;
             st.regenerate = false;
-            st.selection = None;
+            st.doc = Default::default();
         }
         Ok(Err(e)) => {
             st.error = Some(e);
@@ -251,253 +249,17 @@ fn generate_form(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recor
 
 /// Range to cut for words `a..=b`: from their start to their end, plus a
 /// little of the silence around them so no fragment of a word is left.
-fn word_span(t: &Transcript, a: usize, b: usize) -> (f64, f64) {
+pub(super) fn word_span(t: &Transcript, a: usize, b: usize) -> (f64, f64) {
     let w = &t.words;
     let lo = if a > 0 { w[a].start - ((w[a].start - w[a - 1].end) * 0.5).min(0.08) } else { (w[a].start - 0.08).max(0.0) };
     let hi = if b + 1 < w.len() { w[b].end + ((w[b + 1].start - w[b].end) * 0.5).min(0.08) } else { w[b].end + 0.08 };
     (lo, hi)
 }
 
-/// The Transcript panel. Returns a time to seek to.
-pub fn transcript(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recording, time: f64) -> Option<f64> {
+/// The Transcript panel.
+pub fn transcript(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recording, time: f64) -> super::transcript_ui::Action {
     poll_job(ui, st);
-    heading(ui, "Edit by transcript");
-    let Some(t) = &rec.transcript else {
-        help(ui, "Generate a transcript in the Captions tab first.");
-        return None;
-    };
-    let mut seek = None;
-
-    // Bulk actions.
-    let fillers: Vec<usize> = t.fillers().into_iter().filter(|i| !edit.is_cut(t.words[*i].start, t.words[*i].end)).collect();
-    let pauses: Vec<(f64, f64)> = t
-        .pauses()
-        .into_iter()
-        .map(|(_, a, b)| (a + PAUSE_KEEP, b - PAUSE_KEEP))
-        .filter(|(a, b)| b > a && edit.cut_at((a + b) * 0.5).is_none())
-        .collect();
-    let r = widgets::wide_button_icon(ui, Some(Icon::RailAudio), &format!("Remove {} filler words", fillers.len()))
-        .on_hover_text("Cut every detected filled pause (\"um\", \"uh\"…) out of the video");
-    if r.clicked() {
-        for i in &fillers {
-            let (a, b) = word_span(t, *i, *i);
-            edit.add_cut(a, b);
-        }
-    }
-    let r = widgets::wide_button_icon(ui, Some(Icon::Aspect), &format!("Tighten {} pauses", pauses.len()))
-        .on_hover_text("Shorten every long pause, keeping a natural breath on each side");
-    if r.clicked() {
-        for (a, b) in &pauses {
-            edit.add_cut(*a, *b);
-        }
-    }
-    ui.add_space(6.0);
-
-    // Selection actions.
-    if let Some((a, b)) = st.selection.filter(|(_, b)| *b < t.words.len()) {
-        let (lo, hi) = word_span(t, a, b);
-        let all_cut = (a..=b).all(|i| edit.is_cut(t.words[i].start, t.words[i].end) || edit.captions.hidden_words.contains(&i));
-        sub_card(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if all_cut {
-                    if widgets::chip(ui, "Restore", false).clicked() {
-                        edit.restore(lo, hi);
-                        edit.captions.hidden_words.retain(|i| *i < a || *i > b);
-                        st.selection = None;
-                    }
-                } else {
-                    if widgets::chip(ui, "Cut video", false).on_hover_text("Cut this part out of the video  (Backspace)").clicked() {
-                        edit.add_cut(lo, hi);
-                        st.selection = None;
-                    }
-                    if widgets::chip(ui, "Cut transcript", false).on_hover_text("Remove these words from the captions only  (Ctrl+Backspace)").clicked() {
-                        edit.captions.hidden_words.extend(a..=b);
-                        edit.captions.hidden_words.sort_unstable();
-                        edit.captions.hidden_words.dedup();
-                        st.selection = None;
-                    }
-                }
-                if widgets::chip(ui, "Play", false).clicked() {
-                    seek = Some(t.words[a].start);
-                    st.play_request = true;
-                }
-                if a == b && widgets::chip(ui, "Edit text", false).clicked() {
-                    st.editing = Some((a, edit.captions.word_text(a, &t.words[a].text).to_string()));
-                }
-            });
-        });
-        // Keyboard: Backspace cuts the video, Ctrl+Backspace the transcript only.
-        if !all_cut && st.editing.is_none() && ui.memory(|m| m.focused().is_none()) {
-            let ctrl = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Backspace));
-            let plain = ui.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace) || i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
-            });
-            if ctrl {
-                edit.captions.hidden_words.extend(a..=b);
-                edit.captions.hidden_words.sort_unstable();
-                edit.captions.hidden_words.dedup();
-                st.selection = None;
-            } else if plain {
-                edit.add_cut(lo, hi);
-                st.selection = None;
-            }
-        }
-        ui.add_space(4.0);
-    }
-
-    // Transcript body: words flow as text; fillers underlined, long pauses
-    // as pills, cut words struck through.
-    let current = t.words.iter().rposition(|w| w.start <= time && time < w.end + 0.15);
-    let pause_before: std::collections::HashMap<usize, (f64, f64)> = t.pauses().into_iter().map(|(i, a, b)| (i, (a, b))).collect();
-    let font = egui::FontId::proportional(14.0);
-    let shift = ui.input(|i| i.modifiers.shift);
-    let mut clicked_word = None;
-    ui.add_space(4.0);
-    // Arabic transcripts flow right to left: lines are broken in reading
-    // order, then each line's words are set right to left with English runs
-    // inside them left to right.
-    let rtl = bidi::paragraph_rtl(t.words.iter().map(|w| w.text.as_str()));
-    let visible: Vec<usize> = (0..t.words.len())
-        .filter(|&i| edit.captions.show_deleted || !(edit.is_cut(t.words[i].start, t.words[i].end) || edit.captions.hidden_words.contains(&i)))
-        .collect();
-    let st_editing = st.editing.as_ref().map(|(i, _)| *i);
-    let mut draw = |ui: &mut Ui, i: usize| {
-        let w = &t.words[i];
-        let cut = edit.is_cut(w.start, w.end);
-        let hidden = edit.captions.hidden_words.contains(&i);
-        if (cut || hidden) && !edit.captions.show_deleted {
-            return;
-        }
-        if let Some(&(a, b)) = pause_before.get(&i) {
-            let tightened = edit.cut_at((a + b) * 0.5).is_some();
-            let label = format!("··· {:.1}s", if tightened { 2.0 * PAUSE_KEEP } else { b - a });
-            let g = ui.painter().layout_no_wrap(label, egui::FontId::proportional(11.5), Color32::from_rgb(0x9e, 0x91, 0xf3));
-            let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 14.0, 20.0), Sense::click());
-            ui.painter().rect_filled(r.shrink2(vec2(2.0, 0.0)), CornerRadius::same(6), Color32::from_rgb(0x22, 0x20, 0x33));
-            ui.painter().galley(r.center() - g.size() / 2.0, g, Color32::WHITE);
-            let resp = resp.on_hover_text(if tightened { "Restore this pause" } else { "Tighten this pause" });
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                if tightened {
-                    edit.restore(a, b);
-                } else {
-                    edit.add_cut(a + PAUSE_KEEP, b - PAUSE_KEEP);
-                }
-            }
-            ui.add_space(4.0);
-        }
-        if let Some((ei, text)) = &mut st.editing {
-            if *ei == i {
-                let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).font(font.clone()));
-                r.request_focus();
-                if ui.input(|i| i.key_pressed(egui::Key::Enter)) || r.lost_focus() {
-                    let new = text.trim().to_string();
-                    if new.is_empty() || new == w.text {
-                        edit.captions.word_edits.remove(&i);
-                    } else {
-                        edit.captions.word_edits.insert(i, new);
-                    }
-                    st.editing = None;
-                } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                    st.editing = None;
-                }
-                ui.add_space(4.0);
-                return;
-            }
-        }
-        // The gap goes on the side the next word follows.
-        let word = edit.captions.word_text(i, &w.text);
-        let text = if rtl { format!(" {word}") } else { format!("{word} ") };
-        let filler = transcript::is_filler(&w.text);
-        let color = if cut || hidden {
-            Color32::from_rgb(0x5a, 0x5b, 0x62)
-        } else if filler {
-            Color32::from_rgb(0xb4, 0xa9, 0xf7)
-        } else {
-            theme::TEXT
-        };
-        let g = ui.painter().layout_no_wrap(text, font.clone(), color);
-        let (r, resp) = ui.allocate_exact_size(g.size(), Sense::click());
-        let selected = st.selection.is_some_and(|(a, b)| i >= a && i <= b);
-        let p = ui.painter();
-        if selected {
-            p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_rgb(0x3a, 0x30, 0x7a));
-        } else if current == Some(i) {
-            p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_rgb(0x2a, 0x26, 0x48));
-        } else if resp.hovered() {
-            p.rect_filled(r.expand2(vec2(1.0, 1.0)), CornerRadius::same(3), Color32::from_white_alpha(10));
-        }
-        let gap = ui.fonts_mut(|f| f.glyph_width(&font, ' '));
-        let (x0, x1) = if rtl { (r.left() + gap, r.right()) } else { (r.left(), r.right() - gap) };
-        p.galley(r.min, g, color);
-        if filler && !cut {
-            let y = r.bottom() - 1.0;
-            p.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, Color32::from_rgb(0x8b, 0x7c, 0xf0)));
-        }
-        if cut || hidden {
-            let y = r.center().y;
-            p.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, Color32::from_rgb(0x6a, 0x6b, 0x72)));
-        }
-        if resp.double_clicked() {
-            st.editing = Some((i, edit.captions.word_text(i, &w.text).to_string()));
-        } else if resp.clicked() {
-            clicked_word = Some(i);
-        }
-        resp.on_hover_cursor(egui::CursorIcon::Text);
-    };
-    ui.scope(|ui| {
-        ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
-        if !rtl {
-            ui.horizontal_wrapped(|ui| {
-                for &i in &visible {
-                    draw(ui, i);
-                }
-            });
-            return;
-        }
-        let pill_font = egui::FontId::proportional(11.5);
-        let item_width = |ui: &Ui, i: usize| {
-            let word = ui.painter().layout_no_wrap(format!(" {}", t.words[i].text), font.clone(), Color32::WHITE).size().x;
-            let pill = pause_before.get(&i).map_or(0.0, |(a, b)| ui.painter().layout_no_wrap(format!("··· {:.1}s", b - a), pill_font.clone(), Color32::WHITE).size().x + 18.0);
-            // A word being corrected is a text box.
-            if st_editing == Some(i) { word.max(94.0) + pill } else { word + pill }
-        };
-        let width = ui.available_width();
-        let mut rows: Vec<Vec<usize>> = vec![];
-        let mut used = f32::INFINITY;
-        for &i in &visible {
-            let w = item_width(ui, i);
-            if used + w > width {
-                rows.push(vec![]);
-                used = 0.0;
-            }
-            rows.last_mut().unwrap().push(i);
-            used += w;
-        }
-        for row in rows {
-            let texts: Vec<&str> = row.iter().map(|&i| t.words[i].text.as_str()).collect();
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                for k in bidi::visual_order(&texts, true).into_iter().rev() {
-                    draw(ui, row[k]);
-                }
-            });
-        }
-    });
-    if let Some(i) = clicked_word {
-        match (shift, st.anchor) {
-            (true, Some(a)) => st.selection = Some((a.min(i), a.max(i))),
-            _ => {
-                st.anchor = Some(i);
-                st.selection = Some((i, i));
-                seek = Some(t.words[i].start);
-            }
-        }
-    }
-    ui.add_space(12.0);
-    help(ui, "Click a word to jump to it, Shift+click to select a range. Backspace cuts the words out of the video, Ctrl+Backspace cuts them from the transcript only. Double-click a word to correct it.");
-    widgets::divider(ui);
-    toggle_help(ui, "Show deleted text", "Keep cut words visible as strikethrough so they can be restored.", &mut edit.captions.show_deleted);
-    seek
+    super::transcript_ui::show(ui, st, edit, rec, time)
 }
 
 #[cfg(test)]
@@ -533,7 +295,7 @@ mod tests {
 
     fn frame(ctx: &egui::Context, events: Vec<egui::Event>, f: &mut dyn FnMut(&mut Ui)) {
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(380.0, 900.0))),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(380.0, 900.0))),
             events,
             ..Default::default()
         };
@@ -561,13 +323,24 @@ mod tests {
         }
         assert_eq!(edit.cuts.len(), 1);
         assert!(edit.is_cut(0.4, 0.7));
-        // Select "this" via the selection state and cut it with Backspace.
-        st.selection = Some((2, 2));
-        frame(&ctx, vec![egui::Event::Key { key: egui::Key::Backspace, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }], &mut |ui| {
+        // Select "this" and cut it with Backspace.
+        st.doc.select_for_test(2, 2);
+        ctx.memory_mut(|m| m.request_focus(super::super::transcript_ui::doc_id()));
+        let backspace = || egui::Event::Key { key: egui::Key::Backspace, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        for events in [vec![], vec![backspace()]] {
+            frame(&ctx, events, &mut |ui| {
+                transcript(ui, &mut st, &mut edit, &rec, 0.0);
+            });
+        }
+        assert!(edit.is_cut(0.8, 1.1), "cuts: {:?}", edit.cuts);
+        assert!(st.toast.as_deref().is_some_and(|m| m.starts_with("Removed")));
+        // Typing at a caret corrects the word.
+        st.doc.caret_for_test(5, 4);
+        frame(&ctx, vec![egui::Event::Text("ed".into())], &mut |ui| {
             transcript(ui, &mut st, &mut edit, &rec, 0.0);
         });
-        assert!(edit.is_cut(0.8, 1.1), "cuts: {:?}", edit.cuts);
-        // Restore it.
+        assert_eq!(edit.captions.word_text(5, "test."), "tested.");
+        // Restore the cut.
         edit.restore(0.75, 1.15);
         assert!(!edit.is_cut(0.8, 1.1));
     }

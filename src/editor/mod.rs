@@ -10,6 +10,7 @@ pub mod player;
 pub use widgets::toggle;
 mod sidebar;
 mod timeline;
+mod transcript_ui;
 mod widgets;
 
 use crate::edit::{EditConfig, ZoomFocus};
@@ -93,6 +94,8 @@ pub struct Editor {
     shortcuts_cache: Option<(bool, Vec<crate::shortcuts::Shortcut>)>,
     /// Short message under the title ("Saved", errors).
     status: Option<Toast>,
+    /// Short note at the bottom ("Removed 6.0s — Ctrl+Z to undo").
+    hint: Option<(String, Instant)>,
     player: Player,
     /// For reopening players when the project folder moves.
     ctx: egui::Context,
@@ -157,6 +160,7 @@ impl Editor {
             saving_as: None,
             shortcuts_cache: None,
             status: None,
+            hint: None,
             edit,
             player,
             ctx: ctx.clone(),
@@ -473,6 +477,32 @@ impl Editor {
 
     /// The toast: slides down from under the top bar, stays a few seconds,
     /// fades out. Click to dismiss.
+    /// The bottom hint: fades in and out over 2.5 s.
+    fn hint_toast(&mut self, ctx: &egui::Context) {
+        const SHOW: f32 = 2.5;
+        let Some((msg, at)) = &self.hint else { return };
+        let age = at.elapsed().as_secs_f32();
+        if age > SHOW {
+            self.hint = None;
+            return;
+        }
+        let a = (age / 0.15).min((SHOW - age) / 0.25).clamp(0.0, 1.0);
+        egui::Area::new(egui::Id::NULL.with("hint-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -26.0))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(a);
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(0x1c, 0x1d, 0x22))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(26)))
+                    .corner_radius(egui::CornerRadius::same(7))
+                    .inner_margin(egui::Margin { left: 14, right: 14, top: 7, bottom: 7 })
+                    .show(ui, |ui| ui.label(egui::RichText::new(msg).size(13.5).color(theme::TEXT)));
+            });
+        ctx.request_repaint();
+    }
+
     fn toast(&mut self, ctx: &egui::Context) {
         const SHOW: f32 = 3.5;
         const ANIM: f32 = 0.22;
@@ -906,6 +936,9 @@ impl Editor {
                         self.set_playing(true);
                     }
                     // A transcript just finished generating.
+                    if let Some(m) = self.sidebar.captions.toast.take() {
+                        self.hint = Some((m, Instant::now()));
+                    }
                     if let Some(t) = self.sidebar.captions.finished.take() {
                         self.rec.transcript = Some(t);
                         self.tracks = Tracks::build(&self.rec, &self.edit);
@@ -980,6 +1013,7 @@ impl Editor {
             action = self.leave_prompt(&ctx);
         }
         self.toast(&ctx);
+        self.hint_toast(&ctx);
         action
     }
 
@@ -992,7 +1026,10 @@ impl Editor {
         } else if save {
             self.save_with_feedback();
         }
-        if ctx.egui_wants_keyboard_input() {
+        // Text fields keep their own undo, except the transcript, whose edits
+        // are project edits.
+        let in_transcript = ctx.memory(|m| m.focused()) == Some(transcript_ui::doc_id());
+        if ctx.egui_wants_keyboard_input() && !in_transcript {
             return;
         }
         // Ctrl+Z undoes; Ctrl+Shift+Z or Ctrl+Y redoes.
@@ -1002,6 +1039,9 @@ impl Editor {
             self.redo();
         } else if undo {
             self.undo();
+        }
+        if in_transcript {
+            return;
         }
         if self.crop_tool.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
             self.open_crop_tool();

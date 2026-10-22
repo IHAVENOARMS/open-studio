@@ -64,6 +64,15 @@ impl Transcript {
 pub fn is_filler(word: &str) -> bool {
     let w: String = word.chars().filter(|c| c.is_alphabetic()).collect::<String>().to_lowercase();
     matches!(w.as_str(), "um" | "umm" | "uh" | "uhh" | "uhm" | "erm" | "er" | "ah" | "hmm" | "hm" | "mm" | "mhm")
+        // Arabic hesitations.
+        || matches!(w.as_str(), "امم" | "اممم" | "ام" | "ممم" | "اه" | "آه" | "إمم" | "ااه")
+}
+
+/// Words that are often padding ("so", "like", Egyptian "يعني") but just as
+/// often meaningful: marked in the transcript, never removed automatically.
+pub fn is_soft_filler(word: &str) -> bool {
+    let w: String = word.chars().filter(|c| c.is_alphabetic()).collect::<String>().to_lowercase();
+    matches!(w.as_str(), "so" | "like" | "basically" | "actually" | "literally" | "okay" | "يعني" | "طيب" | "بقى")
 }
 
 /// Whisper models offered in the Captions tab, with the help text shown
