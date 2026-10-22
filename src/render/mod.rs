@@ -359,6 +359,31 @@ impl Compositor {
     /// one, otherwise the theme's largest image, or the captured image.
     fn load_sprite(&self, shape: &CursorShape) -> Option<Sprite> {
         match shape {
+            CursorShape::Circle => {
+                // Translucent grey disc with a light rim, like a touch
+                // indicator; about as wide as the arrow is tall.
+                let n = 128u32;
+                let mut rgba = vec![0u8; (n * n * 4) as usize];
+                let c = n as f32 / 2.0;
+                let (r_out, rim) = (c - 2.0, 3.5);
+                for y in 0..n {
+                    for x in 0..n {
+                        let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+                        let cover = (r_out - d + 0.5).clamp(0.0, 1.0);
+                        if cover <= 0.0 {
+                            continue;
+                        }
+                        let on_rim = d > r_out - rim;
+                        let (v, a) = if on_rim { (1.0, 0.9) } else { (0.82, 0.5) };
+                        let a = a * cover;
+                        let i = ((y * n + x) * 4) as usize;
+                        let px = (v * a * 255.0) as u8;
+                        rgba[i..i + 4].copy_from_slice(&[px, px, px, (a * 255.0) as u8]);
+                    }
+                }
+                let size = cursor_image::CANVAS as f32 / cursor_image::PX_PER_UNIT * 1.05;
+                Some(self.make_sprite(&rgba, n, n, (size, size), (size / 2.0, size / 2.0)))
+            }
             CursorShape::Named { name, theme } => {
                 if let Some(dir) = theme {
                     if let Some(img) = crate::xcursor::load_from_dir(std::path::Path::new(dir), name, 96) {

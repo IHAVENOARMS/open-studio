@@ -44,6 +44,9 @@ impl AudioPreview {
                 let pipeline = gst::parse::launch(&desc).ok()?.downcast::<gst::Pipeline>().ok()?;
                 let volume = pipeline.by_name("v")?;
                 pipeline.set_state(gst::State::Paused).ok()?;
+                // Wait for preroll: a seek before it is ignored, which left
+                // tracks rebuilt during playback silent until the next play.
+                let _ = pipeline.state(gst::ClockTime::from_mseconds(1500));
                 Some(Track { pipeline, volume, offset: t.offset, gain: t.gain, kind: t.kind })
             })
             .collect();
@@ -72,14 +75,25 @@ impl AudioPreview {
                 gst::SeekType::None,
                 gst::ClockTime::NONE,
             );
-            let k = match tr.kind {
-                "microphone" => slice.volume,
-                "system" => slice.system_volume,
-                "device" => slice.device_volume,
-                _ => 1.0,
-            };
-            tr.volume.set_property("volume", tr.gain * k);
             let _ = tr.pipeline.set_state(gst::State::Playing);
+        }
+    }
+
+    /// Applies the Audio tab's volumes and the current slice's, live.
+    pub fn set_levels(&mut self, edit: &crate::edit::EditConfig, slice: &crate::edit::SliceProps) {
+        let a = &edit.audio;
+        for tr in &mut self.tracks {
+            let v = match tr.kind {
+                "microphone" => a.microphone_volume * slice.volume,
+                "system" => a.system_volume * slice.system_volume,
+                "device" => a.device_volume * slice.device_volume,
+                "music" => a.music_volume,
+                _ => edit.cursor.click_volume,
+            };
+            if (v - tr.gain).abs() > 1e-4 {
+                tr.gain = v;
+                tr.volume.set_property("volume", v);
+            }
         }
     }
 

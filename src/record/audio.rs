@@ -73,6 +73,44 @@ pub struct AudioCapture {
     pipeline: gst::Pipeline,
     wav: Arc<Mutex<Wav>>,
     path: PathBuf,
+    _monitor: Option<MonitorLevel>,
+}
+
+/// While recording system audio, the speakers' monitor at full volume.
+/// A monitor turned down (seen at 8%, -66 dB) records music as near
+/// silence; the previous level is put back when the recording ends.
+struct MonitorLevel {
+    source: String,
+    /// Raw per-channel volumes to restore.
+    previous: Vec<String>,
+}
+
+impl MonitorLevel {
+    fn raise() -> Option<Self> {
+        let pactl = |args: &[&str]| -> Option<String> {
+            let o = std::process::Command::new("pactl").args(args).output().ok()?;
+            o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let source = format!("{}.monitor", pactl(&["get-default-sink"])?);
+        // "Volume: front-left: 5140 /   8% / -66.33 dB,   front-right: 5140 / ..."
+        let text = pactl(&["get-source-volume", &source])?;
+        let previous: Vec<String> = text.split(',').filter_map(|ch| ch.split(':').nth(ch.split(':').count() - 1)?.split('/').next().map(|v| v.trim().to_string())).filter(|v| v.parse::<u32>().is_ok()).collect();
+        let full = 65536;
+        if previous.is_empty() || previous.iter().all(|v| v.parse::<u32>().unwrap_or(full) >= full) {
+            return None;
+        }
+        pactl(&["set-source-volume", &source, "100%"])?;
+        eprintln!("open-studio: raised {source} from {} to 100% while recording system audio", previous.join("/"));
+        Some(Self { source, previous })
+    }
+}
+
+impl Drop for MonitorLevel {
+    fn drop(&mut self) {
+        let mut args = vec!["set-source-volume".to_string(), self.source.clone()];
+        args.extend(self.previous.iter().cloned());
+        let _ = std::process::Command::new("pactl").args(&args).status();
+    }
 }
 
 pub struct AudioResult {
@@ -113,6 +151,7 @@ impl AudioCapture {
             }
             None => format!("pulsesrc device=\"{device}\" do-timestamp=true client-name=\"Open Studio\""),
         };
+        let monitor = if device == SYSTEM_AUDIO { MonitorLevel::raise() } else { None };
         let desc = format!(
             "{src} ! audioconvert ! audioresample \
              ! audio/x-raw,format=S16LE,rate={RATE},channels={CHANNELS},layout=interleaved ! appsink name=sink sync=false"
@@ -148,7 +187,7 @@ impl AudioCapture {
                 .build(),
         );
         pipeline.set_state(gst::State::Playing).context("starting audio capture")?;
-        Ok(Self { pipeline, wav, path: out.to_path_buf() })
+        Ok(Self { pipeline, wav, path: out.to_path_buf(), _monitor: monitor })
     }
 
     pub fn stop(self) -> Result<Option<AudioResult>> {
@@ -209,5 +248,45 @@ mod tests {
         assert!(peak > 20 && peak < 200, "peak {peak}");
         // A missing stream is refused rather than recording the microphone.
         assert!(AudioCapture::start(&format!("{STREAM_PREFIX}no such stream"), &dir.join("x.wav"), Arc::new(RecClock::new()), false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod system_tests {
+    use super::*;
+
+    /// System audio is recorded at full level even when the monitor is
+    /// turned down, and the monitor's level is put back afterwards.
+    /// Opt-in (needs a running sound server): `cargo test -- --ignored system_audio`.
+    #[test]
+    #[ignore]
+    fn system_audio_full_level_and_restored() {
+        let monitor = || {
+            let sink = std::process::Command::new("pactl").arg("get-default-sink").output().unwrap();
+            let src = format!("{}.monitor", String::from_utf8_lossy(&sink.stdout).trim());
+            let v = std::process::Command::new("pactl").args(["get-source-volume", &src]).output().unwrap();
+            String::from_utf8_lossy(&v.stdout).lines().next().unwrap_or("").to_string()
+        };
+        let before = monitor();
+        let dir = std::env::temp_dir().join("open-studio-tap-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tone = dir.join("tone.wav");
+        assert!(std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=4", "-af", "volume=0.01"])
+            .arg(&tone)
+            .status()
+            .unwrap()
+            .success());
+        let mut play = std::process::Command::new("pw-play").arg(&tone).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let out = dir.join("system.wav");
+        let cap = AudioCapture::start(SYSTEM_AUDIO, &out, Arc::new(RecClock::new()), false).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        cap.stop().unwrap();
+        let _ = play.wait();
+        assert_eq!(monitor(), before, "monitor level restored");
+        let data = std::fs::read(&out).unwrap();
+        let peak = data[44..].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs()).max().unwrap();
+        assert!(peak > 20, "peak {peak}");
     }
 }

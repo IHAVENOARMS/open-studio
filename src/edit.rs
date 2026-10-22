@@ -217,6 +217,8 @@ pub struct CursorStyle {
     pub theme: Option<String>,
     /// Remove the cursor completely.
     pub hidden: bool,
+    /// Draw a soft touch circle instead of the pointer (phone recordings).
+    pub circle: bool,
     /// Near the end, move the cursor back to where it started.
     pub loop_position: bool,
     /// Seconds before the end at which the loop starts.
@@ -238,6 +240,7 @@ impl Default for CursorStyle {
             always_default: false,
             theme: None,
             hidden: false,
+            circle: false,
             loop_position: false,
             loop_duration: 1.0,
             click_visual: ClickVisual::None,
@@ -851,9 +854,9 @@ impl EditConfig {
         }
         cfg.zoom_segments = crate::engine::auto_zoom_segments(rec, cfg.default_zoom);
         if rec.source.kind == "device" {
-            // Phone recordings: taps as circles instead of a desktop arrow,
+            // Phone recordings: a touch circle instead of a desktop arrow,
             // and rounder corners like a phone screen.
-            cfg.cursor.hidden = true;
+            cfg.cursor.circle = true;
             cfg.cursor.click_visual = ClickVisual::Circle;
             cfg.radius = 48.0;
             // The phone's sound plays through the speakers, so system audio

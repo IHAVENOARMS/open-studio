@@ -414,6 +414,7 @@ fn cursor(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording
             widgets::slider(ui, &mut c.loop_duration, 0.3..=4.0, Some(1.0));
         });
     }
+    toggle_help(ui, "Touch circle", "Show a soft circle instead of the pointer, like a finger on a phone screen.", &mut c.circle);
     toggle_help(ui, "Hide cursor", "", &mut c.hidden);
     widgets::divider(ui);
     theme::section(ui, "Click effect");

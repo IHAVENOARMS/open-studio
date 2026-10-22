@@ -1287,6 +1287,36 @@ fn device_options_panel(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
     }
 }
 
+fn help_dim(ui: &mut egui::Ui, text: &str) {
+    ui.label(egui::RichText::new(text).size(12.0).color(BAR_DIM));
+}
+
+/// Preset chips plus "Custom", which shows a number field (type or drag).
+/// Custom stays open while the value isn't one of the presets.
+#[allow(clippy::too_many_arguments)]
+fn custom_chips(ui: &mut egui::Ui, key: &str, value: &mut u32, presets: &[u32], label: impl Fn(u32) -> String, range: std::ops::RangeInclusive<u32>, suffix: &str) {
+    let id = egui::Id::NULL.with(("device-custom", key));
+    let mut custom = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false) || !presets.contains(value);
+    let mut labels: Vec<String> = presets.iter().map(|v| label(*v)).collect();
+    labels.push("Custom".into());
+    let selected = if custom { presets.len() } else { presets.iter().position(|v| v == value).unwrap_or(0) };
+    if let Some(i) = bar_chips(ui, &labels, selected) {
+        custom = i == presets.len();
+        if !custom {
+            *value = presets[i];
+        } else if *value == 0 {
+            *value = (*range.start()).max(60);
+        }
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(id, custom));
+    if custom {
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(value).range(range).suffix(suffix).speed(1.0));
+            help_dim(ui, "Type a value or drag.");
+        });
+    }
+}
+
 fn device_options_content(ui: &mut egui::Ui, sh: &mut Shared, device: &record::device::Device) {
     let device = device.clone();
     ui.spacing_mut().item_spacing.y = 6.0;
@@ -1300,23 +1330,12 @@ fn device_options_content(ui: &mut egui::Ui, sh: &mut Shared, device: &record::d
     };
 
     section(ui, "Resolution");
-    let sizes = [0u32, 2560, 1920, 1600, 1280, 1024];
-    let labels: Vec<String> = sizes.iter().map(|s| if *s == 0 { "Native".into() } else { s.to_string() }).collect();
-    if let Some(i) = bar_chips(ui, &labels, sizes.iter().position(|s| *s == o.max_size).unwrap_or(0)) {
-        o.max_size = sizes[i];
-    }
+    help_dim(ui, "Longest side of the mirrored picture.");
+    custom_chips(ui, "res", &mut o.max_size, &[0, 2560, 1920, 1440, 1280, 1024], |s| if s == 0 { "Native".into() } else { s.to_string() }, 240..=4096, " px");
     section(ui, "Bitrate");
-    let rates = [4u32, 8, 16, 24, 40];
-    let labels: Vec<String> = rates.iter().map(|r| format!("{r} Mbps")).collect();
-    if let Some(i) = bar_chips(ui, &labels, rates.iter().position(|r| *r == o.video_bitrate_mbps).unwrap_or(2)) {
-        o.video_bitrate_mbps = rates[i];
-    }
+    custom_chips(ui, "rate", &mut o.video_bitrate_mbps, &[8, 16, 40, 80, 150], |r| format!("{r} Mbps"), 1..=500, " Mbps");
     section(ui, "Frame rate");
-    let fps = [0u32, 30, 60, 90, 120];
-    let labels: Vec<String> = fps.iter().map(|f| if *f == 0 { "Phone".into() } else { format!("{f} fps") }).collect();
-    if let Some(i) = bar_chips(ui, &labels, fps.iter().position(|f| *f == o.max_fps).unwrap_or(2)) {
-        o.max_fps = fps[i];
-    }
+    custom_chips(ui, "fps", &mut o.max_fps, &[0, 30, 60, 90, 120], |f| if f == 0 { "Phone".into() } else { format!("{f} fps") }, 1..=240, " fps");
     section(ui, "Codec");
     let codecs = ["h264", "h265", "av1"];
     let labels: Vec<String> = ["H.264", "H.265", "AV1"].iter().map(|s| s.to_string()).collect();

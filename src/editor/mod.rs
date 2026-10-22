@@ -848,6 +848,7 @@ impl Editor {
             }
         }
         self.audio.set_muted(self.edit.audio.mute);
+        self.audio.set_levels(&self.edit, &self.edit.slice_props(self.time));
 
         egui::Panel::top("topbar")
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::symmetric(16, 10)))

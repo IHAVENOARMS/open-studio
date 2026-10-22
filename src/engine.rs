@@ -531,10 +531,15 @@ pub enum CursorShape {
     Named { name: String, theme: Option<String> },
     /// Captured image: path, hotspot in pixels, capture scale.
     Custom { path: std::path::PathBuf, hotspot: (f64, f64), scale: f64 },
+    /// Soft touch circle (phone recordings).
+    Circle,
 }
 
 fn cursor_shape(rec: &Recording, edit: &EditConfig, t: f64) -> Option<CursorShape> {
     let named = |name: &str| CursorShape::Named { name: name.to_string(), theme: edit.cursor.theme.clone() };
+    if edit.cursor.circle {
+        return Some(CursorShape::Circle);
+    }
     if edit.cursor.always_default {
         return Some(named("default"));
     }
