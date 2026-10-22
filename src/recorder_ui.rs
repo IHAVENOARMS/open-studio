@@ -942,6 +942,7 @@ fn overlay_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
                         kind: "monitor".into(),
                         name: Some(mon.name.clone()),
                         logical_rect: mon.rect,
+                        window: None,
                     });
                 }
             }
@@ -1765,6 +1766,7 @@ fn area_request(mon: &Monitor, area: Rect) -> DirectRequest {
         kind: "area".into(),
         name: Some(mon.name.clone()),
         logical_rect: [x0, y0, cw, ch],
+        window: None,
     }
 }
 

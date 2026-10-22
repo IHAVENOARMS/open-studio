@@ -66,6 +66,9 @@ pub struct DirectRequest {
     pub name: Option<String>,
     /// Captured area in compositor logical coordinates.
     pub logical_rect: [f64; 4],
+    /// Hyprland address of the captured window: it is followed while
+    /// recording, so a window moved mid-recording keeps the cursor aligned.
+    pub window: Option<String>,
 }
 
 impl Default for RecordOptions {
@@ -79,6 +82,8 @@ pub struct Recorder {
     capture: Capture,
     stop: Arc<AtomicBool>,
     moves: Arc<Mutex<Vec<(i64, f64, f64)>>>,
+    /// Where the captured window's top-left was, over time (window capture).
+    window_track: Arc<Mutex<Vec<(i64, [f64; 2])>>>,
     shapes: Arc<Mutex<Vec<ShapeChange>>>,
     input_rx: Receiver<InputEvent>,
     source: Source,
@@ -142,6 +147,10 @@ impl Recorder {
             });
         }
         let moves = Arc::new(Mutex::new(Vec::new()));
+        let window_track = Arc::new(Mutex::new(Vec::new()));
+        if let Some(addr) = opts.direct.as_ref().and_then(|r| r.window.clone()).filter(|_| hyprland::available()) {
+            spawn_window_tracker(stop.clone(), addr, window_track.clone());
+        }
         if opts.test_source {
             spawn_fake_cursor(stop.clone(), moves.clone());
         } else if hyprland::available() {
@@ -208,6 +217,7 @@ impl Recorder {
             capture,
             stop,
             moves,
+            window_track,
             shapes,
             input_rx,
             source,
@@ -298,12 +308,16 @@ impl Recorder {
         if source.logical_rect.is_none() {
             source.logical_rect = guess_monitor_rect(result.width, result.height, &self.moves.lock().unwrap());
         }
-        let map = |x: f64, y: f64| -> (f64, f64) {
+        // A followed window may have moved: use its position at each moment
+        // (the size stays the first one's, like the video).
+        let track = self.window_track.lock().unwrap().clone();
+        let map = |t: i64, x: f64, y: f64| -> (f64, f64) {
             match source.logical_rect {
-                Some(r) => (
-                    (x - r[0]) * result.width as f64 / r[2],
-                    (y - r[1]) * result.height as f64 / r[3],
-                ),
+                Some(r) => {
+                    let i = track.partition_point(|(tt, _)| *tt <= t);
+                    let (ox, oy) = if i > 0 { (track[i - 1].1[0], track[i - 1].1[1]) } else { (r[0], r[1]) };
+                    ((x - ox) * result.width as f64 / r[2], (y - oy) * result.height as f64 / r[3])
+                }
                 None => (x, y),
             }
         };
@@ -312,7 +326,7 @@ impl Recorder {
         let moves: Vec<[f64; 3]> = raw_moves
             .iter()
             .filter_map(|&(t, x, y)| {
-                let (vx, vy) = map(x, y);
+                let (vx, vy) = map(t, x, y);
                 Some([secs(t)?, vx, vy])
             })
             .collect();
@@ -432,6 +446,23 @@ fn guess_monitor_rect(w: u32, h: u32, moves: &[(i64, f64, f64)]) -> Option<[f64;
     pick.map(|m| m.logical_rect())
 }
 
+/// Records where window `addr` is, 30 times a second, while it moves.
+fn spawn_window_tracker(stop: Arc<AtomicBool>, addr: String, track: Arc<Mutex<Vec<(i64, [f64; 2])>>>) {
+    std::thread::spawn(move || {
+        let mut last = [f64::NAN, f64::NAN];
+        while !stop.load(Ordering::Relaxed) {
+            let t = monotonic_ns();
+            if let Some(c) = hyprland::clients().ok().and_then(|cs| cs.into_iter().find(|c| c.address == addr)) {
+                if c.at != last {
+                    track.lock().unwrap().push((t, c.at));
+                    last = c.at;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(33));
+        }
+    });
+}
+
 fn spawn_cursor_poller(stop: Arc<AtomicBool>, moves: Arc<Mutex<Vec<(i64, f64, f64)>>>) {
     std::thread::spawn(move || {
         let period = std::time::Duration::from_micros(1_000_000 / 120);
@@ -477,6 +508,7 @@ pub fn direct_monitor(name: &str, area: Option<[f64; 4]>) -> Result<DirectReques
             kind: "monitor".into(),
             name: Some(name.into()),
             logical_rect: r,
+            window: None,
         }),
         Some(a) => {
             // Clip to the monitor, convert to buffer pixels.
@@ -493,6 +525,7 @@ pub fn direct_monitor(name: &str, area: Option<[f64; 4]>) -> Result<DirectReques
                 kind: "area".into(),
                 name: Some(name.into()),
                 logical_rect: [x0, y0, cw, ch],
+                window: None,
             })
         }
     }
@@ -506,5 +539,6 @@ pub fn direct_window(address: &str) -> Result<DirectRequest> {
         kind: "window".into(),
         name: Some(c.title.clone()),
         logical_rect: [c.at[0], c.at[1], c.size[0], c.size[1]],
+        window: Some(c.address.clone()),
     })
 }
