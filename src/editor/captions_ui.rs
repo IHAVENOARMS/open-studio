@@ -198,6 +198,9 @@ fn generate_form(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recor
     if let Some((_, _, h)) = transcript::MODELS.iter().find(|m| m.0 == model) {
         help(ui, h);
     }
+    if c.language == "ar" && model != "large-v3-turbo" {
+        help(ui, "For Arabic, especially dialects like Egyptian, use Large: smaller models often write dialect as formal Arabic or miss words.");
+    }
 
     theme::section(ui, "Prompt");
     help(ui, "Prompt will help generating accurate transcript for your recording. It is especially useful if you talk using custom names, such as your product name.");

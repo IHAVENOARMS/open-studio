@@ -68,10 +68,11 @@ pub fn is_filler(word: &str) -> bool {
 
 /// Whisper models offered in the Captions tab, with the help text shown
 /// under the chips.
-pub const MODELS: [(&str, &str, &str); 3] = [
+pub const MODELS: [(&str, &str, &str); 4] = [
     ("base", "Base", "Will download 148MB on first use. Fastest, good for clear English."),
     ("small", "Small", "Will download 488MB on first use. 2.5 times slower than Base, but more accurate. Produces good results in most cases."),
-    ("medium", "Medium", "Will download 1.5GB on first use. 8 times slower than Base, but more accurate. Best for other languages and accents."),
+    ("medium", "Medium", "Will download 1.5GB on first use. 8 times slower than Base, but more accurate. Good for other languages and accents."),
+    ("large-v3-turbo", "Large", "Will download 1.6GB on first use. The most accurate, and faster than Medium. Best for Arabic dialects, mixed languages and strong accents."),
 ];
 
 /// Languages offered (Whisper code, label). "" lets Whisper detect it.
