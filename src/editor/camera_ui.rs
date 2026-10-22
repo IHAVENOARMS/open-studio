@@ -24,9 +24,22 @@ pub struct State {
     picking_lut: Option<std::sync::mpsc::Receiver<Vec<std::path::PathBuf>>>,
     cutout_job: Option<(std::sync::Arc<crate::cutout::Progress>, std::sync::mpsc::Receiver<Result<(), String>>)>,
     cutout_error: Option<String>,
+    /// When the cutout came into use; removal starts once it has stayed in
+    /// use for `CUTOUT_DELAY`, so a stray click costs nothing.
+    cutout_pending: Option<std::time::Instant>,
     /// Set when the background-removal matte was written; the editor
     /// reloads the recording and opens the matte.
     pub cutout_ready: bool,
+    /// The running job was dropped because the cutout was left; don't show
+    /// its "cancelled" error.
+    cutout_silent_cancel: bool,
+}
+
+const CUTOUT_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// True when the default layout or any timeline layout is the cutout.
+pub fn cutout_in_use(edit: &EditConfig) -> bool {
+    edit.camera.layout == CameraDefaultLayout::Cutout || edit.camera_layouts.iter().any(|l| l.kind == CameraLayoutKind::Cutout)
 }
 
 impl State {
@@ -45,6 +58,34 @@ impl State {
         });
         self.cutout_job = Some((progress, rx));
         self.cutout_error = None;
+    }
+
+    /// Called every frame: starts background removal once the cutout has
+    /// been in use for a moment, and drops it if the cutout is left before
+    /// it got going.
+    pub fn tick_cutout(&mut self, rec: &Recording, ctx: &egui::Context, in_use: bool) {
+        let done = rec.camera.as_ref().is_none_or(|c| c.matte.is_some());
+        if !in_use || done {
+            self.cutout_pending = None;
+            if let Some((p, _)) = &self.cutout_job
+                && !in_use
+                && p.permille.load(std::sync::atomic::Ordering::Relaxed) < 50
+            {
+                p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.cutout_silent_cancel = true;
+            }
+            return;
+        }
+        if self.cutout_job.is_some() || self.cutout_error.is_some() {
+            return;
+        }
+        let since = *self.cutout_pending.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= CUTOUT_DELAY {
+            self.cutout_pending = None;
+            self.start_cutout(rec, ctx);
+        } else {
+            ctx.request_repaint_after(CUTOUT_DELAY - since.elapsed());
+        }
     }
 
     /// Names of camera tasks still running.
@@ -69,7 +110,9 @@ impl State {
                 None
             }
             Ok(Err(e)) => {
-                self.cutout_error = Some(e);
+                if !std::mem::take(&mut self.cutout_silent_cancel) {
+                    self.cutout_error = Some(e);
+                }
                 self.cutout_job = None;
                 None
             }
@@ -82,7 +125,7 @@ impl State {
 }
 
 /// Progress or error line for background removal.
-fn cutout_status(ui: &mut Ui, st: &mut State) {
+fn cutout_status(ui: &mut Ui, st: &mut State, rec: &Recording) {
     if let Some(p) = st.poll_cutout(ui.ctx()) {
         let w = ui.available_width();
         let (r, _) = ui.allocate_exact_size(vec2(w, 6.0), Sense::hover());
@@ -95,8 +138,16 @@ fn cutout_status(ui: &mut Ui, st: &mut State) {
             }
         }
     }
-    if let Some(e) = &st.cutout_error {
-        ui.label(RichText::new(e).size(12.0).color(theme::RECORD));
+    if st.cutout_pending.is_some() {
+        help(ui, "Background removal starts in a moment…");
+    }
+    if let Some(e) = st.cutout_error.clone() {
+        let text = if e.contains("cancelled") { "Background removal was cancelled.".to_string() } else { e };
+        ui.label(RichText::new(text).size(12.0).color(theme::RECORD));
+        if widgets::wide_button(ui, "Remove background").clicked() {
+            st.cutout_error = None;
+            st.start_cutout(rec, ui.ctx());
+        }
     }
 }
 
@@ -147,9 +198,6 @@ fn camera_layout(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recor
                 };
                 if let (true, Some(v)) = (resp.clicked(), value) {
                     c.layout = v;
-                    if v == CameraDefaultLayout::Cutout {
-                        st.start_cutout(rec, ui.ctx());
-                    }
                 }
                 let col = if !enabled { Color32::from_rgb(0x53, 0x53, 0x55) } else if selected { theme::TEXT } else { theme::TEXT_DIM };
                 ui.label(RichText::new(label).size(12.5).color(col));
@@ -157,7 +205,7 @@ fn camera_layout(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recor
         }
     });
     if c.layout == CameraDefaultLayout::Cutout {
-        cutout_status(ui, st);
+        cutout_status(ui, st, rec);
         theme::section(ui, "Cutout size");
         widgets::slider(ui, &mut c.cutout_size, 0.25..=0.95, Some(0.54));
     }
@@ -211,12 +259,9 @@ fn camera_style(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Record
         let mut on = c.layout == CameraDefaultLayout::Cutout;
         if toggle_help(ui, "Camera cutout", "Remove your background and place you in front of your screen. Processed on this computer.", &mut on) {
             c.layout = if on { CameraDefaultLayout::Cutout } else { CameraDefaultLayout::Overlay };
-            if on {
-                st.start_cutout(rec, ui.ctx());
-            }
         }
         if on {
-            cutout_status(ui, st);
+            cutout_status(ui, st, rec);
         }
     }
     widgets::divider(ui);
@@ -447,7 +492,7 @@ fn color_grading(ui: &mut Ui, st: &mut State, edit: &mut EditConfig) {
 }
 
 /// Editor for a selected Layouts-track pill ("Close Camera Layout editor").
-pub fn segment_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Option<Selection>) {
+pub fn segment_editor(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &Recording, i: usize, selected: &mut Option<Selection>) {
     if icons::button(ui, Icon::Back, "Close Camera Layout editor", egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), vec2(0.0, 34.0))
         .clicked()
     {
@@ -490,6 +535,9 @@ pub fn segment_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &m
             CameraLayoutKind::Cutout => "Show only you, without your background, in front of the screen",
         },
     );
+    if seg.kind == CameraLayoutKind::Cutout {
+        cutout_status(ui, st, rec);
+    }
     if matches!(seg.kind, CameraLayoutKind::Default | CameraLayoutKind::Cutout) {
         theme::section(ui, "Camera position");
         let mut pos = seg.position.unwrap_or(default_pos);

@@ -165,7 +165,7 @@ pub fn show(
                                 return;
                             }
                             Track::Camera if sel.index < edit.camera_layouts.len() => {
-                                super::camera_ui::segment_editor(ui, edit, sel.index, selected);
+                                super::camera_ui::segment_editor(ui, &mut state.camera, edit, rec, sel.index, selected);
                                 return;
                             }
                             Track::Clip if sel.index < edit.slice_ranges(rec.duration).len() => {

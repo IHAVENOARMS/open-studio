@@ -361,10 +361,7 @@ impl Editor {
             Some(11) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Split),
             Some(12) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Fullscreen),
             Some(13) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Hide),
-            Some(14) => {
-                self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Cutout);
-                self.sidebar.camera.start_cutout(&self.rec, ui.ctx());
-            }
+            Some(14) => self.add_layout_at_playhead(crate::edit::CameraLayoutKind::Cutout),
             _ => {}
         }
     }
@@ -952,6 +949,9 @@ impl Editor {
                     if std::mem::take(&mut self.sidebar.camera.face_ready) {
                         self.tracks = Tracks::build(&self.rec, &self.edit);
                     }
+                    // Background removal: starts after the cutout stays in use a moment.
+                    let in_use = camera_ui::cutout_in_use(&self.edit);
+                    self.sidebar.camera.tick_cutout(&self.rec, ui.ctx(), in_use);
                     // Background removal finished: pick up the matte.
                     if std::mem::take(&mut self.sidebar.camera.cutout_ready) {
                         if let Ok(fresh) = Recording::load(&self.dir) {
