@@ -1793,10 +1793,14 @@ fn widget_ui(ui: &mut egui::Ui, sh: &mut Shared) {
     let secs = sh.elapsed as u64;
     p.text(pos2(finish.left() + 46.0, cy), Align2::LEFT_CENTER, format!("{}:{:02}", secs / 60, secs % 60), FontId::proportional(22.0), RED);
     p.line_segment([pos2(finish.right() + 8.0, r.top() + 16.0), pos2(finish.right() + 8.0, r.bottom() - 16.0)], Stroke::new(1.0, Color32::from_white_alpha(30)));
-    let mut x = finish.right() + 20.0;
+    // Three buttons sharing the space right of the divider, inset from the
+    // widget's edge so the last one's hover fill stays inside the border.
+    let mut x = finish.right() + 18.0;
+    let gap = 4.0;
+    let bw = ((r.right() - 10.0 - x - gap * 2.0) / 3.0).min(48.0);
     let mut button = |icon: Icon, tip: &str, enabled: bool| {
-        let b = Rect::from_min_size(pos2(x, r.top() + 10.0), vec2(48.0, r.height() - 20.0));
-        x += 52.0;
+        let b = Rect::from_min_size(pos2(x, r.top() + 10.0), vec2(bw, r.height() - 20.0));
+        x += bw + gap;
         let resp = ui.interact(b, ui.scope_id().with(("w", tip)), Sense::click()).on_hover_text(tip);
         if resp.hovered() && enabled {
             p.rect_filled(b, 10.0, Color32::from_white_alpha(14));
