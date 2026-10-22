@@ -19,6 +19,7 @@ mod export;
 mod gpu;
 mod hwenc;
 mod icons;
+mod presets;
 mod project;
 mod record;
 mod recorder_ui;
@@ -134,6 +135,17 @@ enum Cmd {
         srt: Option<PathBuf>,
     },
     /// Render a project to MP4 without opening the editor.
+    /// Save one frame of the edited video as a PNG image.
+    Frame {
+        project: PathBuf,
+        /// Recording time in seconds.
+        #[arg(long, default_value_t = 0.0)]
+        time: f64,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+    },
     Export {
         project: PathBuf,
         #[arg(short, long)]
@@ -262,6 +274,15 @@ fn main() -> Result<()> {
                 let edit = edit::EditConfig::load_or_create(&project, &rec);
                 std::fs::write(&path, transcript::srt(&t, &edit, rec.duration))?;
             }
+        }
+        Some(Cmd::Frame { project, time, out, height }) => {
+            let rec = project::Recording::load(&project)?;
+            let edit = edit::EditConfig::load_or_create(&project, &rec);
+            let out = out.unwrap_or_else(|| project.join("frame.png"));
+            let (device, queue) = gpu::headless()?;
+            let mut comp = render::Compositor::new(device, queue);
+            export::export_frame(&mut comp, &project, &rec, &edit, time, height, &out)?;
+            println!("{}", out.display());
         }
         Some(Cmd::Export { project, out, height, fps, format, quality, clipboard }) => {
             let format = match format.as_str() {

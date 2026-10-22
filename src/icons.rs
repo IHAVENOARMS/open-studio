@@ -75,6 +75,14 @@ pub enum Icon {
     FillerWords,
     TightenPauses,
     TranscriptLines,
+    // Top bar and command menu.
+    Command,
+    Presets,
+    PresetGear,
+    ExportFilled,
+    ArrowRight,
+    ExtractFile,
+    ClipboardVideo,
 }
 
 struct Pen<'a> {
@@ -214,6 +222,68 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&[(5.0, 5.5), (15.0, 5.5), (14.0, 17.0), (6.0, 17.0)]);
             pen.line(&[(8.5, 8.5), (8.5, 14.0)]);
             pen.line(&[(11.5, 8.5), (11.5, 14.0)]);
+        }
+        Icon::Command => {
+            // The command key glyph inside a circle.
+            pen.circle(10.0, 10.0, 8.2);
+            let q = |x: f32, y: f32| (10.0 + (x - 10.0) * 0.58, 10.0 + (y - 10.0) * 0.58);
+            let small = Pen { s: Stroke::new(pen.s.width * 0.9, color), ..pen };
+            for (cx, cy) in [(6.3, 6.3), (13.7, 6.3), (6.3, 13.7), (13.7, 13.7)] {
+                let (x, y) = q(cx, cy);
+                small.circle(x, y, 1.75 * 0.58);
+            }
+            for (a, b) in [((8.0, 6.3), (8.0, 13.7)), ((12.0, 6.3), (12.0, 13.7)), ((6.3, 8.0), (13.7, 8.0)), ((6.3, 12.0), (13.7, 12.0))] {
+                small.line(&[q(a.0, a.1), q(b.0, b.1)]);
+            }
+        }
+        Icon::Presets => {
+            // A wand with seven rays around its tip (the eighth is the wand).
+            let (cx, cy) = (8.2, 8.2);
+            for deg in [-90.0f32, -45.0, 0.0, 90.0, 135.0, 180.0, -135.0] {
+                let (s, c) = deg.to_radians().sin_cos();
+                pen.line(&[(cx + c * 3.6, cy + s * 3.6), (cx + c * 6.0, cy + s * 6.0)]);
+            }
+            let d = std::f32::consts::FRAC_1_SQRT_2 * 1.05;
+            pen.closed(&[(cx + 1.2 - d, cy + 1.2 + d), (cx + 1.2 + d, cy + 1.2 - d), (17.2 + d, 17.2 - d), (17.2 - d, 17.2 + d)]);
+        }
+        Icon::PresetGear => {
+            // Toothed ring with a three-spoke hub.
+            let teeth = 18;
+            let pts: Vec<(f32, f32)> = (0..teeth * 2)
+                .map(|i| {
+                    let a = i as f32 / (teeth * 2) as f32 * std::f32::consts::TAU;
+                    let r = if i % 2 == 0 { 8.0 } else { 6.6 };
+                    (10.0 + a.cos() * r, 10.0 + a.sin() * r)
+                })
+                .collect();
+            pen.closed(&pts);
+            pen.circle(10.0, 10.0, 5.2);
+            pen.circle(10.0, 10.0, 1.3);
+            for deg in [0.0f32, 120.0, 240.0] {
+                let (s, c) = deg.to_radians().sin_cos();
+                pen.line(&[(10.0 + c * 1.3, 10.0 + s * 1.3), (10.0 + c * 5.2, 10.0 + s * 5.2)]);
+            }
+        }
+        Icon::ExportFilled => {
+            pen.fill(&[(4.5, 8.0), (15.5, 8.0), (15.5, 17.0), (4.5, 17.0)]);
+            p.line_segment([pen.pt(10.0, 12.5), pen.pt(10.0, 2.5)], Stroke::new(1.8 * k, color));
+            pen.line(&[(6.8, 5.5), (10.0, 2.5), (13.2, 5.5)]);
+            p.line_segment([pen.pt(10.0, 8.0), pen.pt(10.0, 12.5)], Stroke::new(1.8 * k, Color32::BLACK));
+        }
+        Icon::ArrowRight => {
+            pen.line(&[(3.5, 10.0), (16.0, 10.0)]);
+            pen.line(&[(11.5, 5.5), (16.0, 10.0), (11.5, 14.5)]);
+        }
+        Icon::ExtractFile => {
+            pen.line(&[(7.0, 7.0), (4.5, 7.0), (4.5, 17.0), (15.5, 17.0), (15.5, 7.0), (13.0, 7.0)]);
+            pen.line(&[(10.0, 2.5), (10.0, 12.5)]);
+            pen.line(&[(6.8, 9.5), (10.0, 12.7), (13.2, 9.5)]);
+        }
+        Icon::ClipboardVideo => {
+            // Speech bubble holding a camera: "send as a message".
+            pen.closed(&[(5.0, 3.5), (15.0, 3.5), (17.0, 5.5), (17.0, 12.5), (15.0, 14.5), (8.5, 14.5), (5.0, 17.5), (5.0, 14.5), (3.0, 12.5), (3.0, 5.5)]);
+            pen.fill(&[(6.3, 6.8), (11.3, 6.8), (11.3, 11.2), (6.3, 11.2)]);
+            pen.fill(&[(11.6, 9.0), (14.2, 7.2), (14.2, 10.8)]);
         }
         Icon::FillerWords => {
             // Waveform bars with a minus badge.

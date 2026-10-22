@@ -64,25 +64,7 @@ pub fn export(
     }
     let total = times.len() as u64;
 
-    let device = comp.device().clone();
-    let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("export target"),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = target.create_view(&Default::default());
-    let padded_row = (w * 4).div_ceil(256) * 256;
-    let readback = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: (padded_row * h) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
+    let target = Target::new(comp, w, h);
 
     // GIFs are encoded from an intermediate MP4 with a generated palette.
     let gif = opts.format == crate::settings::Format::Gif;
@@ -186,34 +168,9 @@ pub fn export(
             }
         }
         let fs = frame_state(rec, edit, &tracks, t, opts.fps as f64);
-        comp.render(&view, (w, h), &tracks.layout, edit, &fs);
+        comp.render(&target.view, (w, h), &tracks.layout, edit, &fs);
 
-        let mut enc = device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_row), rows_per_image: Some(h) },
-            },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        );
-        comp.queue().submit([enc.finish()]);
-        let slice = readback.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("gpu poll: {e:?}"))?;
-        {
-            let data = slice.get_mapped_range().map_err(|e| anyhow!("map readback: {e:?}"))?;
-            for y in 0..h as usize {
-                let src = &data[y * padded_row as usize..][..(w * 4) as usize];
-                row[y * (w * 4) as usize..][..(w * 4) as usize].copy_from_slice(src);
-            }
-        }
-        readback.unmap();
+        target.read(comp, &mut row)?;
         stdin.write_all(&row).context("writing to ffmpeg")?;
         progress.permille.store(((i + 1) * 1000 / total) as u32, Ordering::Relaxed);
     }
@@ -250,6 +207,102 @@ pub fn export(
             bail!("GIF conversion failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
     }
+    Ok(())
+}
+
+/// An offscreen render target with a buffer to read it back.
+struct Target {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    readback: wgpu::Buffer,
+    w: u32,
+    h: u32,
+    padded_row: u32,
+}
+
+impl Target {
+    fn new(comp: &Compositor, w: u32, h: u32) -> Self {
+        let device = comp.device();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("export target"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let padded_row = (w * 4).div_ceil(256) * 256;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (padded_row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Self { texture, view, readback, w, h, padded_row }
+    }
+
+    /// Copies the rendered frame into `out` as tightly packed RGBA.
+    fn read(&self, comp: &Compositor, out: &mut [u8]) -> Result<()> {
+        let (w, h, padded_row) = (self.w, self.h, self.padded_row);
+        let mut enc = comp.device().create_command_encoder(&Default::default());
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &self.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.readback,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded_row), rows_per_image: Some(h) },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        comp.queue().submit([enc.finish()]);
+        let slice = self.readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        comp.device().poll(wgpu::PollType::wait_indefinitely()).map_err(|e| anyhow!("gpu poll: {e:?}"))?;
+        {
+            let data = slice.get_mapped_range().map_err(|e| anyhow!("map readback: {e:?}"))?;
+            for y in 0..h as usize {
+                let src = &data[y * padded_row as usize..][..(w * 4) as usize];
+                out[y * (w * 4) as usize..][..(w * 4) as usize].copy_from_slice(src);
+            }
+        }
+        self.readback.unmap();
+        Ok(())
+    }
+}
+
+/// Renders the edited frame at recording time `t` to a PNG `height` pixels tall.
+pub fn export_frame(comp: &mut Compositor, dir: &Path, rec: &Recording, edit: &EditConfig, t: f64, height: u32, out: &Path) -> Result<()> {
+    let paths = ProjectPaths::new(dir);
+    let tracks = Tracks::build(rec, edit);
+    let (w, h) = output_size(tracks.layout.aspect, height);
+    let target = Target::new(comp, w, h);
+    let mut frame = Vec::new();
+    let mut decoder = Decoder::open(&paths.video(), t, (rec.width, rec.height), None)?;
+    if !decoder.read(&mut frame)? {
+        bail!("no video frame at {t:.2}s");
+    }
+    comp.upload_frame(&frame, decoder.width, decoder.height);
+    if let Some(c) = &rec.camera {
+        let ct = (t - c.offset - edit.camera.delay).max(0.0);
+        let mut buf = Vec::new();
+        let mut d = Decoder::open(&dir.join(&c.file), ct, (c.width, c.height), Some(1920))?;
+        if d.read(&mut buf)? {
+            comp.upload_camera_frame(&buf, d.width, d.height);
+        }
+        if let Some(m) = &c.matte {
+            let mut d = Decoder::open(&dir.join(m), ct, crate::cutout::matte_size(c.width, c.height), None)?;
+            if d.read(&mut buf)? {
+                comp.upload_matte_frame(&buf, d.width, d.height);
+            }
+        }
+    }
+    let fs = frame_state(rec, edit, &tracks, t, 60.0);
+    comp.render(&target.view, (w, h), &tracks.layout, edit, &fs);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    target.read(comp, &mut rgba)?;
+    image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| anyhow!("frame buffer size"))?.save(out).context("writing the image")?;
     Ok(())
 }
 

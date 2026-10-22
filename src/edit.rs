@@ -710,6 +710,31 @@ pub struct EditConfig {
     pub pan_blur: f64,
 }
 
+impl EditConfig {
+    /// Copies the look from `preset` (background, cursor, camera, captions
+    /// style, audio, animations…), keeping what belongs to this recording:
+    /// zooms, masks, cuts, trim, crop, the layouts track and transcript fixes.
+    pub fn apply_preset(&mut self, preset: &EditConfig) {
+        let keep = std::mem::replace(self, preset.clone());
+        self.zoom_segments = keep.zoom_segments;
+        self.masks = keep.masks;
+        self.cuts = keep.cuts;
+        self.trim_start = keep.trim_start;
+        self.trim_end = keep.trim_end;
+        self.crop = keep.crop;
+        self.camera_layouts = keep.camera_layouts;
+        self.captions.hidden_words = keep.captions.hidden_words;
+        self.captions.word_edits = keep.captions.word_edits;
+    }
+
+    /// True when applying `preset` would change nothing.
+    pub fn matches_preset(&self, preset: &EditConfig) -> bool {
+        let mut applied = self.clone();
+        applied.apply_preset(preset);
+        applied == *self
+    }
+}
+
 impl Default for EditConfig {
     fn default() -> Self {
         Self {
@@ -874,5 +899,29 @@ impl EditConfig {
             }
         }
         self.cuts = out;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_carry_the_look_not_the_timeline() {
+        let mut look = EditConfig::default();
+        look.padding = 0.2;
+        look.camera.size = 0.5;
+        look.zoom_segments.clear();
+        let mut project = EditConfig::default();
+        project.cuts.push(Cut { start: 1.0, end: 2.0 });
+        project.crop = [0.1, 0.1, 0.8, 0.8];
+        assert!(!project.matches_preset(&look));
+        project.apply_preset(&look);
+        assert_eq!(project.padding, 0.2);
+        assert_eq!(project.camera.size, 0.5);
+        // The recording's own edits stay.
+        assert_eq!(project.cuts.len(), 1);
+        assert_eq!(project.crop, [0.1, 0.1, 0.8, 0.8]);
+        assert!(project.matches_preset(&look));
     }
 }

@@ -42,7 +42,7 @@ pub const TABS: [(Tab, Icon, &str); 9] = [
 ];
 
 /// Tabs with nothing to edit for this recording are shown disabled.
-fn tab_enabled(t: Tab, rec: &Recording) -> bool {
+pub(super) fn tab_enabled(t: Tab, rec: &Recording) -> bool {
     match t {
         Tab::CameraLayout | Tab::CameraStyle => rec.camera.is_some(),
         Tab::Captions | Tab::Transcript => rec.audio.iter().any(|a| a.kind == "microphone"),

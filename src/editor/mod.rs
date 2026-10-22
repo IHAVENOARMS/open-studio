@@ -3,6 +3,7 @@
 mod audio;
 mod camera_ui;
 mod captions_ui;
+mod commands;
 mod cursors;
 mod curve;
 mod mask_overlay;
@@ -128,6 +129,17 @@ pub struct Editor {
     sidebar: sidebar::State,
     timeline: timeline::State,
     export: Option<ExportDialog>,
+    /// Ctrl+K command menu, while open.
+    command: Option<commands::CommandMenu>,
+    presets: Vec<crate::presets::Preset>,
+    /// "New preset name..." field.
+    preset_name: String,
+    /// Preset whose settings row is unfolded in the dropdown.
+    preset_menu: Option<usize>,
+    /// A file dialog for a command, and what to do with its answer.
+    file_task: Option<(Receiver<Vec<PathBuf>>, commands::FileTask)>,
+    /// Message when a command's file job finishes.
+    file_done: Option<Receiver<String>>,
 }
 
 impl Editor {
@@ -185,6 +197,12 @@ impl Editor {
             sidebar: sidebar::State::default(),
             timeline: timeline::State::default(),
             export: None,
+            command: None,
+            presets: vec![],
+            preset_name: String::new(),
+            preset_menu: None,
+            file_task: None,
+            file_done: None,
             rec,
         })
     }
@@ -856,7 +874,9 @@ impl Editor {
                         {
                             self.export = Some(ExportDialog { settings: Settings::load(), job: None, picking_dir: None, saving: None });
                         }
-                        ui.add_space(10.0);
+                        ui.add_space(8.0);
+                        self.presets_button(ui);
+                        bar_separator(ui);
                         // Redo and undo, dim when there is nothing to do.
                         let (can_undo, can_redo) = (!self.history.is_empty(), !self.future.is_empty());
                         if toolbar_button(ui, Icon::Redo, "", "", false, can_redo).on_hover_text("Redo  (Ctrl+Shift+Z)").clicked() {
@@ -864,6 +884,10 @@ impl Editor {
                         }
                         if toolbar_button(ui, Icon::Undo, "", "", false, can_undo).on_hover_text("Undo  (Ctrl+Z)").clicked() {
                             self.undo();
+                        }
+                        bar_separator(ui);
+                        if toolbar_button(ui, Icon::Command, "", "", false, true).on_hover_text("Command menu  (Ctrl+K)").clicked() {
+                            self.open_command_menu();
                         }
 
                         ui.centered_and_justified(|ui| self.title(ui));
@@ -969,6 +993,8 @@ impl Editor {
             });
 
         self.export_dialog(&ctx);
+        self.command_menu(&ctx);
+        self.poll_file_tasks(&ctx);
 
         // Undo history: a change settles once no mouse button is held, so a
         // whole drag or slider move is one step.
@@ -1030,6 +1056,10 @@ impl Editor {
         // are project edits.
         let in_transcript = ctx.memory(|m| m.focused()) == Some(transcript_ui::doc_id());
         if ctx.egui_wants_keyboard_input() && !in_transcript {
+            return;
+        }
+        if self.command.is_none() && !in_transcript && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::K)) {
+            self.open_command_menu();
             return;
         }
         // Ctrl+Z undoes; Ctrl+Shift+Z or Ctrl+Y redoes.
@@ -1750,31 +1780,38 @@ impl Editor {
         });
         if let Some(out) = start {
             dlg.settings.save();
-            let progress = Arc::new(Progress::default());
-            let result = Arc::new(Mutex::new(None));
-            let (p, r) = (progress.clone(), result.clone());
-            let (dir, rec, edit) = (self.dir.clone(), self.rec.clone(), self.edit.clone());
-            let s = &dlg.settings;
-            let opts = ExportOptions { out: out.clone(), height, fps: s.fps, format: s.format, quality: s.quality };
-            let destination = s.destination;
-            let (device, queue) = (self.comp.device().clone(), self.comp.queue().clone());
-            let ctx2 = ctx.clone();
-            std::thread::spawn(move || {
-                let mut comp = Compositor::new(device, queue);
-                let mut res = export::export(&mut comp, &dir, &rec, &edit, &opts, &p).map_err(|e| format!("{e:#}"));
-                if res.is_ok() && destination == Destination::Clipboard {
-                    res = copy_file_to_clipboard(&opts.out);
-                }
-                *r.lock().unwrap() = Some(res);
-                ctx2.request_repaint();
-            });
-            dlg.job = Some(ExportJob { out, destination, progress, result });
+            spawn_export(dlg, out, height, &self.dir, &self.rec, &self.edit, &self.comp, ctx);
         }
         if close {
             dlg.settings.save();
             self.export = None;
         }
     }
+}
+
+/// Starts rendering to `out` with the dialog's settings on a worker thread;
+/// the dialog shows its progress.
+#[allow(clippy::too_many_arguments)]
+fn spawn_export(dlg: &mut ExportDialog, out: PathBuf, height: u32, dir: &std::path::Path, rec: &Recording, edit: &EditConfig, comp: &Compositor, ctx: &egui::Context) {
+    let progress = Arc::new(Progress::default());
+    let result = Arc::new(Mutex::new(None));
+    let (p, r) = (progress.clone(), result.clone());
+    let (dir, rec, edit) = (dir.to_path_buf(), rec.clone(), edit.clone());
+    let s = &dlg.settings;
+    let opts = ExportOptions { out: out.clone(), height, fps: s.fps, format: s.format, quality: s.quality };
+    let destination = s.destination;
+    let (device, queue) = (comp.device().clone(), comp.queue().clone());
+    let ctx2 = ctx.clone();
+    std::thread::spawn(move || {
+        let mut comp = Compositor::new(device, queue);
+        let mut res = export::export(&mut comp, &dir, &rec, &edit, &opts, &p).map_err(|e| format!("{e:#}"));
+        if res.is_ok() && destination == Destination::Clipboard {
+            res = copy_file_to_clipboard(&opts.out);
+        }
+        *r.lock().unwrap() = Some(res);
+        ctx2.request_repaint();
+    });
+    dlg.job = Some(ExportJob { out, destination, progress, result });
 }
 
 /// Moves a project to the desktop trash (recoverable), or deletes it when
@@ -1786,6 +1823,22 @@ fn open_matte(dir: &std::path::Path, rec: &Recording, edit: &EditConfig, start: 
     let p = Player::new(dir.join(file), crate::cutout::matte_size(c.width, c.height), c.fps, ctx.clone());
     p.seek((start - c.offset - edit.camera.delay).max(0.0));
     Some((p, -1))
+}
+
+/// Thin vertical divider between top bar groups.
+fn bar_separator(ui: &mut egui::Ui) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(17.0, 22.0), Sense::hover());
+    ui.painter().rect_filled(egui::Rect::from_center_size(r.center(), egui::vec2(1.0, 22.0)), 0.0, Color32::from_white_alpha(22));
+}
+
+/// Small text button for an unfolded settings row.
+fn menu_item_small(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    let g = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(12.5), theme::TEXT);
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(g.size().x + 18.0, 28.0), Sense::click());
+    let fill = if resp.hovered() { Color32::from_white_alpha(22) } else { Color32::from_white_alpha(10) };
+    ui.painter().rect_filled(r, egui::CornerRadius::same(7), fill);
+    ui.painter().galley(r.center() - g.size() / 2.0, g, theme::TEXT);
+    resp
 }
 
 /// Dropdown row: roomy padding, a check on the selected item, a soft
