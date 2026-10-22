@@ -228,11 +228,13 @@ impl Tracks {
                 let e = f * f * (3.0 - 2.0 * f);
                 (tx, ty) = (tx + (start.0 - tx) * e, ty + (start.1 - ty) * e);
             }
-            if edit.cursor.smooth {
+            // Slices set to "Disable smooth mouse movement" follow the real cursor.
+            if edit.cursor.smooth && !edit.slice_props(t).raw_cursor {
                 cs.step(&mut x, &mut vx, tx, DT);
                 cs.step(&mut y, &mut vy, ty, DT);
             } else {
                 (x, y) = (tx, ty);
+                (vx, vy) = (0.0, 0.0);
             }
             cursor.push((x, y));
         }
@@ -568,7 +570,7 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
     } else {
         (camera, camera)
     };
-    let cursor = if rec.cursor_embedded || rec.events.moves.is_empty() || edit.cursor.hidden {
+    let cursor = if rec.cursor_embedded || rec.events.moves.is_empty() || edit.cursor.hidden || edit.slice_props(t).hide_cursor {
         None
     } else {
         cursor_shape(rec, edit, t).map(|shape| {

@@ -20,7 +20,7 @@ pub struct Frame {
 
 enum Cmd {
     Seek(f64),
-    Play { from: f64, at: Instant },
+    Play { from: f64, at: Instant, speed: f64 },
     Pause,
 }
 
@@ -42,8 +42,9 @@ impl Player {
         let _ = self.tx.send(Cmd::Seek(t));
     }
 
-    pub fn play(&self, from: f64, at: Instant) {
-        let _ = self.tx.send(Cmd::Play { from, at });
+    /// Plays from `from` (video time) as of `at`, `speed` video seconds per second.
+    pub fn play(&self, from: f64, at: Instant, speed: f64) {
+        let _ = self.tx.send(Cmd::Play { from, at, speed });
     }
 
     pub fn pause(&self) {
@@ -103,7 +104,7 @@ impl State {
 
 fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Arc<Mutex<Option<Arc<Frame>>>>, ctx: egui::Context) {
     let mut st = State { video, size, fps, decoder: None, index: -1, buf: Vec::new() };
-    let mut playing: Option<(f64, Instant)> = None;
+    let mut playing: Option<(f64, Instant, f64)> = None;
     // Consecutive decode failures while playing; a few are retried (the
     // decoder is reopened) before playback stops.
     let mut failures = 0;
@@ -144,12 +145,12 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
                     publish(&st);
                 }
             }
-            Some(Cmd::Play { from, at }) => playing = Some((from, at)),
+            Some(Cmd::Play { from, at, speed }) => playing = Some((from, at, speed)),
             Some(Cmd::Pause) => playing = None,
             None => {}
         }
-        if let Some((from, at)) = playing {
-            let t = from + at.elapsed().as_secs_f64();
+        if let Some((from, at, speed)) = playing {
+            let t = from + at.elapsed().as_secs_f64() * speed;
             let want = (t * fps).floor() as i64;
             if want > st.index || st.decoder.is_none() {
                 if st.advance_to(want) {
@@ -168,7 +169,7 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
                 }
             }
             // Sleep until the next frame is due.
-            let next = (st.index + 1) as f64 / fps - from;
+            let next = ((st.index + 1) as f64 / fps - from) / speed;
             let wait = next - at.elapsed().as_secs_f64();
             if wait > 0.0 {
                 std::thread::sleep(std::time::Duration::from_secs_f64(wait.min(0.02)));

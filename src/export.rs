@@ -50,14 +50,15 @@ pub fn export(
     // Recording time of every output frame, skipping cuts.
     let mut times = vec![];
     let mut acc = 0.0;
-    for (a, b) in edit.kept_ranges(rec.duration) {
+    for (a, b, speed) in edit.segments(rec.duration) {
+        let len = (b - a) / speed;
         let n0 = (acc * opts.fps as f64).ceil() as u64;
-        acc += b - a;
-        let n1 = (acc * opts.fps as f64).ceil() as u64;
+        let n1 = ((acc + len) * opts.fps as f64).ceil() as u64;
         for n in n0..n1 {
             let out_t = n as f64 / opts.fps as f64;
-            times.push(a + (out_t - (acc - (b - a))));
+            times.push(a + (out_t - acc) * speed);
         }
+        acc += len;
     }
     if times.is_empty() {
         bail!("nothing to export: everything is trimmed or cut");
@@ -183,14 +184,7 @@ pub fn export(
         let clicks = crate::clicks::render_track(rec, edit);
         let tracks = audio_tracks(rec, edit, clicks.as_deref());
         if !tracks.is_empty() {
-            // Cuts relative to the trimmed start.
-            let gaps: Vec<(f64, f64)> = edit
-                .cuts
-                .iter()
-                .filter(|c| c.end > start && c.start < end)
-                .map(|c| (c.start.max(start) - start, c.end.min(end) - start))
-                .collect();
-            mux_audio(dir, &tracks, &video_out, start, end, &gaps)?;
+            mux_audio(dir, &tracks, &video_out, start, end, &edit.segments(rec.duration), &edit.slices)?;
         }
     }
     if gif {
@@ -316,6 +310,9 @@ pub struct MixTrack {
     pub filter: String,
     /// Repeat to fill the video (background music).
     pub looped: bool,
+    /// "microphone", "system", "music" or "clicks": slices can change the
+    /// first two's volume.
+    pub kind: &'static str,
 }
 
 /// Audio sources after applying the Audio tab: microphone (with its mode),
@@ -330,21 +327,23 @@ pub fn audio_tracks(rec: &Recording, edit: &EditConfig, clicks: Option<&Path>) -
             (a.mute_system, a.system_volume, String::new())
         };
         if !muted {
-            out.push(MixTrack { path: rec.dir.join(&t.file), offset: t.offset, gain, filter, looped: false });
+            let kind = if t.kind == "microphone" { "microphone" } else { "system" };
+            out.push(MixTrack { path: rec.dir.join(&t.file), offset: t.offset, gain, filter, looped: false, kind });
         }
     }
     if let (Some(m), false) = (&a.music, a.mute_music) {
-        out.push(MixTrack { path: m.into(), offset: 0.0, gain: a.music_volume, filter: String::new(), looped: true });
+        out.push(MixTrack { path: m.into(), offset: 0.0, gain: a.music_volume, filter: String::new(), looped: true, kind: "music" });
     }
     if let Some(c) = clicks {
-        out.push(MixTrack { path: c.to_path_buf(), offset: 0.0, gain: edit.cursor.click_volume, filter: String::new(), looped: false });
+        out.push(MixTrack { path: c.to_path_buf(), offset: 0.0, gain: edit.cursor.click_volume, filter: String::new(), looped: false, kind: "clicks" });
     }
     out
 }
 
 /// Mixes audio into the exported MP4: each track is shifted by its offset,
 /// trimmed to the edited range, filtered and gain-adjusted.
-fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f64, gaps: &[(f64, f64)]) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f64, segments: &[(f64, f64, f64)], slices: &[crate::edit::SliceProps]) -> Result<()> {
     let tmp = video.with_extension("audio.mp4");
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video);
@@ -359,22 +358,46 @@ fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f6
         let (a0, a1) = ((start - track.offset).max(0.0), (end - track.offset).max(0.0));
         let lead_ms = ((track.offset - start).max(0.0) * 1000.0).round() as i64;
         let extra = if track.filter.is_empty() { String::new() } else { format!("{},", track.filter) };
+        // Slice volumes, as a piecewise expression of time since `start`.
+        let slice_volume = |p: &crate::edit::SliceProps| match track.kind {
+            "microphone" => p.volume,
+            "system" => p.system_volume,
+            _ => 1.0,
+        };
+        let mut expr = "1".to_string();
+        for p in slices.iter().rev().filter(|p| (slice_volume(p) - 1.0).abs() > 1e-6) {
+            expr = format!("if(between(t,{:.4},{:.4}),{:.3},{expr})", p.start - start, p.end - start, slice_volume(p));
+        }
+        let per_slice = if expr == "1" { String::new() } else { format!(",volume='{expr}':eval=frame") };
         filters.push(format!(
-            "[{}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=start={a0:.4}:end={a1:.4},asetpts=PTS-STARTPTS,{extra}adelay={lead_ms}:all=1,volume={:.3}[a{i}]",
+            "[{}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=start={a0:.4}:end={a1:.4},asetpts=PTS-STARTPTS,{extra}adelay={lead_ms}:all=1,volume={:.3}{per_slice}[a{i}]",
             i + 1,
             track.gain
         ));
         labels.push_str(&format!("[a{i}]"));
     }
     let n = tracks.len();
-    // Drop the cut stretches and close the gaps.
-    let select = if gaps.is_empty() {
-        String::new()
+    // Keep the video's stretches (dropping cuts) at their speeds, end to end.
+    let segs: Vec<(f64, f64, f64)> = segments.iter().map(|&(a, b, s)| (a - start, b - start, s)).filter(|(a, b, _)| b > a).collect();
+    filters.push(format!("{labels}amix=inputs={n}:normalize=0:duration=longest,apad,atrim=end={:.4},asplit={}{}", end - start, segs.len().max(1), (0..segs.len().max(1)).map(|k| format!("[s{k}]")).collect::<String>()));
+    let mut joined = String::new();
+    for (k, (a, b, speed)) in segs.iter().enumerate() {
+        // atempo takes 0.5..100 per instance; chain one for slower speeds.
+        let tempo = if (speed - 1.0).abs() < 1e-6 {
+            String::new()
+        } else if *speed < 0.5 {
+            format!(",atempo=0.5,atempo={:.4}", speed / 0.5)
+        } else {
+            format!(",atempo={speed:.4}")
+        };
+        filters.push(format!("[s{k}]atrim=start={a:.4}:end={b:.4},asetpts=PTS-STARTPTS{tempo}[c{k}]"));
+        joined.push_str(&format!("[c{k}]"));
+    }
+    if segs.is_empty() {
+        filters.push("[s0]anull[aout]".into());
     } else {
-        let expr: Vec<String> = gaps.iter().map(|(a, b)| format!("between(t,{a:.4},{b:.4})")).collect();
-        format!(",aselect='not({})',asetpts=N/SR/TB", expr.join("+"))
-    };
-    filters.push(format!("{labels}amix=inputs={n}:normalize=0:duration=longest,atrim=end={:.4}{select},apad[aout]", end - start));
+        filters.push(format!("{joined}concat=n={}:v=0:a=1,apad[aout]", segs.len()));
+    }
     cmd.args(["-filter_complex", &filters.join(";")]);
     cmd.args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"]);
     cmd.arg(&tmp);

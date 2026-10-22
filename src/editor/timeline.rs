@@ -112,21 +112,60 @@ pub fn free_span_on(edit: &EditConfig, track: Track, t: f64, len: f64, duration:
     (end - start >= MIN_SEG).then_some((start, end))
 }
 
-#[derive(Default)]
 pub struct State {
     drag: Option<Drag>,
+    /// Scissors tool: a click on the clip splits it there.
+    pub split_mode: bool,
+    /// Timeline magnification; 1 fits the whole recording.
+    pub zoom: f32,
+    /// Recording seconds scrolled off the left edge while zoomed in.
+    scroll: f64,
+    /// Slice the clip's right-click menu is for.
+    menu_slice: Option<(f64, f64)>,
+    /// Audio waveform on the clip track.
+    pub waveform: bool,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self { drag: None, split_mode: false, zoom: 1.0, scroll: 0.0, menu_slice: None, waveform: crate::settings::Settings::load().timeline_waveform }
+    }
 }
 
 #[derive(Default)]
 pub struct Output {
     pub seek: Option<f64>,
     pub toggle_play: bool,
+    /// Message for the bottom toast ("Removed 2.0s — Ctrl+Z to undo").
+    pub toast: Option<String>,
 }
 
 struct Geo {
     left: f32,
     width: f32,
     duration: f64,
+}
+
+/// Seconds as Screen Studio labels cut lengths: "0.4s", "1.0s", "2s".
+fn short_secs(s: f64) -> String {
+    if s < 1.95 { format!("{s:.1}s") } else { format!("{s:.0}s") }
+}
+
+/// Yellow teardrop pin above the clip at `x`, with the removed length and
+/// scissors. Returns the click response.
+fn cut_pin(ui: &Ui, p: &egui::Painter, x: f32, clip_top: f32, label: &str, id: egui::Id) -> egui::Response {
+    let c = pos2(x, clip_top - 15.0);
+    let r = ui.interact(Rect::from_center_size(c, vec2(26.0, 30.0)), id, Sense::click());
+    let fill = if r.hovered() { Color32::from_rgb(0xff, 0xcf, 0x4d) } else { Color32::from_rgb(0xf4, 0xb5, 0x2a) };
+    let edge = Color32::from_rgb(0xc8, 0x88, 0x10);
+    let tip = pos2(x, clip_top - 0.5);
+    p.add(egui::Shape::convex_polygon(vec![c + vec2(-7.6, 5.5), tip, c + vec2(7.6, 5.5)], fill, Stroke::NONE));
+    p.circle(c, 11.5, fill, Stroke::new(1.0, edge));
+    p.add(egui::Shape::convex_polygon(vec![c + vec2(-7.0, 6.2), tip + vec2(0.0, -1.2), c + vec2(7.0, 6.2)], fill, Stroke::NONE));
+    let ink = Color32::from_rgb(0x3d, 0x28, 0x04);
+    p.text(c + vec2(0.0, -4.0), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(9.5), ink);
+    icons::paint(p, Rect::from_center_size(c + vec2(0.0, 4.5), vec2(11.0, 11.0)), Icon::Scissors, ink);
+    r.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 impl Geo {
@@ -146,8 +185,10 @@ enum Hit {
     Other,
 }
 
-/// Transport controls under the preview.
-pub fn playback_bar(ui: &mut Ui, time: f64, duration: f64, playing: bool) -> Output {
+/// Transport controls under the preview: the scissors (split tool) on the
+/// left, time and play controls in the middle, and the waveform toggle with
+/// the timeline zoom on the right.
+pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, playing: bool) -> Output {
     let mut out = Output::default();
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
     let c = rect.center();
@@ -178,6 +219,53 @@ pub fn playback_bar(ui: &mut Ui, time: f64, duration: f64, playing: bool) -> Out
     if icon_button(ui, pos2(c.x + 64.0, c.y), "next", Icon::SkipForward, 18.0).clicked() {
         out.seek = Some(duration);
     }
+
+    // Scissors: the split tool.
+    let sc = pos2(rect.left() + 20.0, c.y);
+    if state.split_mode {
+        p.rect_filled(Rect::from_center_size(sc, vec2(34.0, 30.0)), CornerRadius::same(8), Color32::from_rgba_unmultiplied(0x5b, 0x45, 0xf0, 90));
+    }
+    let r = icon_button(ui, sc, "split", Icon::Scissors, 22.0).on_hover_text(if state.split_mode {
+        "Split tool on: click the clip to split it  (C splits at the playhead)"
+    } else {
+        "Split tool: click the clip to split it, or hold Alt  (C splits at the playhead)"
+    });
+    if r.clicked() {
+        state.split_mode = !state.split_mode;
+    }
+
+    // Right: waveform toggle | zoom level and slider.
+    let slider = Rect::from_min_max(pos2(rect.right() - 118.0, c.y - 9.0), pos2(rect.right() - 6.0, c.y + 9.0));
+    let label_x = slider.left() - 12.0;
+    let zoom_label = if state.zoom < 1.05 { "1×".to_string() } else { format!("{:.1}×", state.zoom) };
+    p.text(pos2(label_x, c.y), egui::Align2::RIGHT_CENTER, &zoom_label, egui::FontId::proportional(14.0), theme::TEXT);
+    let sep_x = label_x - 34.0;
+    p.line_segment([pos2(sep_x, c.y - 11.0), pos2(sep_x, c.y + 11.0)], Stroke::new(1.0, Color32::from_white_alpha(24)));
+    let wave = icon_button(ui, pos2(sep_x - 24.0, c.y), "waveform", Icon::WaveformZoom, 20.0)
+        .on_hover_text(if state.waveform { "Hide audio waveform" } else { "Show audio waveform" });
+    if !state.waveform {
+        // Dim when off.
+        p.rect_filled(Rect::from_center_size(pos2(sep_x - 24.0, c.y), vec2(22.0, 22.0)), 0.0, theme::BG.gamma_multiply(0.55));
+    }
+    if wave.clicked() {
+        state.waveform = !state.waveform;
+        let mut s = crate::settings::Settings::load();
+        s.timeline_waveform = state.waveform;
+        s.save();
+    }
+    // Zoom slider: log scale from fitting everything to about 3 s across.
+    let max_zoom = (duration / 3.0).max(1.0) as f32;
+    let resp = ui.interact(slider, ui.scope_id().with("tl-zoom"), Sense::click_and_drag()).on_hover_text("Zoom the timeline");
+    let frac = if max_zoom > 1.0 { state.zoom.ln() / max_zoom.ln() } else { 0.0 };
+    if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+        let f = ((pos.x - slider.left() - 9.0) / (slider.width() - 18.0)).clamp(0.0, 1.0);
+        state.zoom = max_zoom.powf(f).max(1.0);
+    }
+    let track_y = c.y;
+    p.line_segment([pos2(slider.left() + 9.0, track_y), pos2(slider.right() - 9.0, track_y)], Stroke::new(2.0, Color32::from_rgb(0x2b, 0x2d, 0x32)));
+    let kx = slider.left() + 9.0 + frac.clamp(0.0, 1.0) * (slider.width() - 18.0);
+    let knob = if resp.hovered() || resp.dragged() { Color32::from_rgb(0x7a, 0x7b, 0x80) } else { Color32::from_rgb(0x5d, 0x5e, 0x63) };
+    p.circle_filled(pos2(kx, track_y), 9.0, knob);
     out
 }
 
@@ -194,15 +282,42 @@ pub fn show(
     duration: f64,
     edit: &mut EditConfig,
     time: f64,
-    _playing: bool,
+    playing: bool,
     selected: &mut Option<Selection>,
     waveform: Option<&[f32]>,
     has_camera: bool,
+    has_system: bool,
     shortcuts: &[crate::shortcuts::Shortcut],
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
-    let geo = Geo { left: full.left() + 10.0, width: full.width() - 20.0, duration: duration.max(0.01) };
+    let waveform = waveform.filter(|_| state.waveform);
+    // Zoom and scroll: Ctrl+wheel zooms around the pointer, the wheel scrolls.
+    let dur = duration.max(0.01);
+    let base_w = full.width() - 20.0;
+    let max_zoom = (dur / 3.0).max(1.0) as f32;
+    if ui.rect_contains_pointer(full) {
+        let (delta, ctrl, pointer) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers.command, i.pointer.hover_pos()));
+        if ctrl && delta.y != 0.0 {
+            let px = pointer.map_or(full.center().x, |p| p.x);
+            let width = base_w * state.zoom;
+            let t_at = state.scroll + ((px - full.left() - 10.0) / width) as f64 * dur;
+            state.zoom = (state.zoom * (delta.y / 200.0).exp()).clamp(1.0, max_zoom);
+            state.scroll = t_at - ((px - full.left() - 10.0) / (base_w * state.zoom)) as f64 * dur;
+        } else if state.zoom > 1.0 && (delta.x != 0.0 || delta.y != 0.0) {
+            let d = if delta.x != 0.0 { delta.x } else { delta.y };
+            state.scroll -= (d / (base_w * state.zoom)) as f64 * dur;
+        }
+    }
+    state.zoom = state.zoom.clamp(1.0, max_zoom);
+    let width = base_w * state.zoom;
+    let visible = dur / state.zoom as f64;
+    // Keep the playhead in view while playing.
+    if playing && (time < state.scroll || time > state.scroll + visible * 0.95) {
+        state.scroll = time - visible * 0.1;
+    }
+    state.scroll = state.scroll.clamp(0.0, (dur - visible).max(0.0));
+    let geo = Geo { left: full.left() + 10.0 - (state.scroll / dur) as f32 * width, width, duration: dur };
     let ruler = Rect::from_min_size(full.min, vec2(full.width(), 30.0));
     let clip = Rect::from_min_max(pos2(full.left(), ruler.bottom() + 6.0), pos2(full.right(), ruler.bottom() + 66.0));
     let zoom = Rect::from_min_max(pos2(full.left(), clip.bottom() + 10.0), pos2(full.right(), clip.bottom() + 70.0));
@@ -243,11 +358,11 @@ pub fn show(
     // Clip track (trimmed region bright, the rest dimmed).
     let full_clip = Rect::from_x_y_ranges(geo.x(0.0)..=geo.x(duration), clip.y_range());
     gradient_bar(&p, full_clip, 10.0, &CLIP_STOPS, CLIP_EDGE, 0.5, CLIP_BORDER, 0.3);
-    // Kept parts of the clip: the trim range split at the cuts.
-    let kept = edit.kept_ranges(duration);
+    // Slices: the trim range split at cuts and split points.
+    let kept = edit.slice_ranges(duration);
     for &(a, b) in &kept {
         let r = Rect::from_x_y_ranges(geo.x(a)..=geo.x(b), clip.y_range());
-        // Neighbouring parts sit 2px apart so a cut reads as a split.
+        // Neighbouring slices sit 2px apart so a cut or split reads as a gap.
         let r = if kept.len() > 1 { r.shrink2(vec2(1.0, 0.0)) } else { r };
         gradient_bar(&p, r, 10.0, &CLIP_STOPS, CLIP_EDGE, 0.5, CLIP_BORDER, 1.0);
         if let Some(env) = waveform {
@@ -265,31 +380,51 @@ pub fn show(
             t += grid_step;
         }
         if r.width() > 60.0 {
+            // "Clip", then "3s ⏱ 1×" (output length and speed), and "Hide"
+            // when the slice hides the cursor.
+            let props = edit.slice_props((a + b) * 0.5);
             p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Clip", egui::FontId::proportional(12.5), Color32::from_rgb(0xe8, 0xc6, 0x86));
-            p.text(r.center() + vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, format!("{:.0}s  ·  1×", b - a), egui::FontId::proportional(13.5), Color32::WHITE);
+            let font = egui::FontId::proportional(13.5);
+            let speed = if (props.speed - props.speed.round()).abs() < 0.05 { format!("{:.0}×", props.speed) } else { format!("{:.1}×", props.speed) };
+            let g_len = p.layout_no_wrap(short_secs((b - a) / props.speed).replace(".0s", "s"), font.clone(), Color32::WHITE);
+            let g_speed = p.layout_no_wrap(speed, font.clone(), Color32::WHITE);
+            let g_hide = props.hide_cursor.then(|| p.layout_no_wrap("Hide".into(), font.clone(), Color32::WHITE));
+            let total = g_len.size().x + 8.0 + 15.0 + 3.0 + g_speed.size().x + g_hide.as_ref().map_or(0.0, |g| 8.0 + 13.0 + g.size().x);
+            if total < r.width() - 12.0 {
+                let y = r.center().y + 9.0;
+                let mut x = r.center().x - total / 2.0;
+                let h = g_len.size().y;
+                p.galley(pos2(x, y - h / 2.0), g_len.clone(), Color32::WHITE);
+                x += g_len.size().x + 8.0;
+                icons::paint(&p, Rect::from_center_size(pos2(x + 7.5, y), vec2(14.0, 14.0)), Icon::Speedometer, Color32::WHITE);
+                x += 18.0;
+                p.galley(pos2(x, y - h / 2.0), g_speed.clone(), Color32::WHITE);
+                x += g_speed.size().x + 8.0;
+                if let Some(g) = g_hide {
+                    icons::paint(&p, Rect::from_center_size(pos2(x + 6.0, y), vec2(13.0, 13.0)), Icon::RailCursor, Color32::WHITE);
+                    p.galley(pos2(x + 13.0, y - h / 2.0), g, Color32::WHITE);
+                }
+            }
         }
     }
-    // Cut markers: a yellow pin with scissors; click to restore the cut.
+    // Pins over removed parts: cuts and trimmed ends. Click to bring them back.
     for c in edit.cuts.clone() {
         if c.end <= trim_s || c.start >= trim_e {
             continue;
         }
         let x = geo.x((c.start + c.end) * 0.5);
-        let pin = Rect::from_center_size(pos2(x, clip.top() - 3.0), vec2(18.0, 18.0));
-        let id = ui.scope_id().with(("cut", (c.start * 1000.0) as i64));
-        let r = ui.interact(pin.expand(2.0), id, Sense::click());
-        let fill = if r.hovered() { Color32::from_rgb(0xff, 0xd5, 0x5c) } else { Color32::from_rgb(0xf2, 0xb8, 0x2c) };
-        p.circle_filled(pin.center(), 9.0, fill);
-        p.add(egui::Shape::convex_polygon(
-            vec![pin.center() + vec2(-5.0, 6.0), pin.center() + vec2(5.0, 6.0), pin.center() + vec2(0.0, 12.0)],
-            fill,
-            Stroke::NONE,
-        ));
-        crate::icons::paint(&p, pin.shrink(4.0), crate::icons::Icon::Scissors, Color32::from_rgb(0x3a, 0x26, 0x05));
-        let r = r.on_hover_text(format!("{:.1}s cut. Click to restore.", c.end - c.start)).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if r.clicked() {
+        let r = cut_pin(ui, &p, x, clip.top(), &short_secs(c.end - c.start), ui.scope_id().with(("cut", (c.start * 1000.0) as i64)));
+        if r.on_hover_text("Click to restore this part").clicked() {
             edit.restore(c.start, c.end);
         }
+    }
+    if trim_s > 0.05 && cut_pin(ui, &p, geo.x(trim_s), clip.top(), &short_secs(trim_s), ui.scope_id().with("trim-start")).on_hover_text("Click to undo the trim").clicked() {
+        edit.trim_start = 0.0;
+    }
+    if duration - trim_e > 0.05
+        && cut_pin(ui, &p, geo.x(trim_e), clip.top(), &short_secs(duration - trim_e), ui.scope_id().with("trim-end")).on_hover_text("Click to undo the trim").clicked()
+    {
+        edit.trim_end = None;
     }
 
     // Zoom and mask tracks.
@@ -393,6 +528,26 @@ pub fn show(
         }
     }
 
+    // Scissors: with the split tool (or Alt held) a click on the clip splits it.
+    let splitting = state.split_mode || ui.input(|i| i.modifiers.alt);
+    if splitting && let Some(h) = hover.filter(|h| clip.contains(*h)) {
+        p.line_segment([pos2(h.x, clip.top() - 2.0), pos2(h.x, clip.bottom() + 2.0)], Stroke::new(2.0, Color32::WHITE));
+        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    }
+    // Right-click on a slice opens its menu.
+    if resp.secondary_clicked() {
+        state.menu_slice = resp
+            .interact_pointer_pos()
+            .filter(|p| clip.contains(*p))
+            .and_then(|p| {
+                let t = geo.t(p.x);
+                kept.iter().copied().find(|&(a, b)| t >= a && t <= b)
+            });
+    }
+    if let Some(slice) = state.menu_slice {
+        resp.context_menu(|ui| slice_menu(ui, edit, slice, time, duration, has_system, &mut out));
+    }
+
     // Interaction.
     let press = ui.input(|i| i.pointer.press_origin());
     if resp.drag_started() {
@@ -448,7 +603,9 @@ pub fn show(
         state.drag = None;
     }
     if resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
+        if let Some(pos) = resp.interact_pointer_pos().filter(|p| splitting && clip.contains(*p)) {
+            edit.split_at(geo.t(pos.x), duration);
+        } else if let Some(pos) = resp.interact_pointer_pos() {
             match hit(pos, edit) {
                 Hit::Item(sel, _) => *selected = Some(sel),
                 Hit::Empty(track) => {
@@ -476,10 +633,89 @@ pub fn show(
 
     // Playhead.
     let x = geo.x(time);
-    let p = ui.painter();
+    let p = ui.painter().with_clip_rect(Rect::from_x_y_ranges(full.x_range(), (ruler.top() - 4.0)..=(line_bottom + 2.0)));
     p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, line_bottom)], Stroke::new(1.5, theme::PLAYHEAD));
     p.circle_filled(pos2(x, ruler.top() + 4.0), 6.0, theme::PLAYHEAD);
     out
+}
+
+/// The clip's right-click menu for slice `a..b`, as in Screen Studio.
+fn slice_menu(ui: &mut Ui, edit: &mut EditConfig, (a, b): (f64, f64), time: f64, duration: f64, has_system: bool, out: &mut Output) {
+    ui.set_min_width(260.0);
+    let props = edit.slice_props((a + b) * 0.5);
+    let pct = |v: f64| format!("{:.0}%", v * 100.0);
+    ui.menu_button("Set speed", |ui| {
+        for s in [1.0, 1.2, 1.4, 1.6, 1.8, 2.0] {
+            if ui.selectable_label((props.speed - s).abs() < 1e-6, format!("{s}×")).clicked() {
+                edit.set_slice_props(a, b, |p| p.speed = s);
+                ui.close();
+            }
+        }
+    });
+    let volumes = [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0];
+    ui.menu_button("Set volume", |ui| {
+        for v in volumes {
+            if ui.selectable_label((props.volume - v).abs() < 1e-6, pct(v)).clicked() {
+                edit.set_slice_props(a, b, |p| p.volume = v);
+                ui.close();
+            }
+        }
+    });
+    if has_system {
+        ui.menu_button("Set system audio volume", |ui| {
+            for v in volumes {
+                if ui.selectable_label((props.system_volume - v).abs() < 1e-6, pct(v)).clicked() {
+                    edit.set_slice_props(a, b, |p| p.system_volume = v);
+                    ui.close();
+                }
+            }
+        });
+    }
+    ui.separator();
+    if ui.add(egui::Button::new("Remove").shortcut_text("Del")).clicked() {
+        edit.add_cut(a, b);
+        out.toast = Some(format!("Removed {} — Ctrl+Z to undo", short_secs(b - a)));
+        ui.close();
+    }
+    if ui.add(egui::Button::new("Split at current time").shortcut_text("C")).clicked() {
+        edit.split_at(time, duration);
+        ui.close();
+    }
+    ui.separator();
+    let (ts, te) = edit.trim_range(duration);
+    let trimmed = ((a - ts).abs() < 1e-3 && ts > 0.0) || ((b - te).abs() < 1e-3 && te < duration);
+    if trimmed && ui.button("Reset trim").clicked() {
+        if (a - ts).abs() < 1e-3 {
+            edit.trim_start = 0.0;
+        }
+        if (b - te).abs() < 1e-3 {
+            edit.trim_end = None;
+        }
+        ui.close();
+    }
+    if edit.splits.iter().any(|s| (s - b).abs() < 1e-3) && ui.button("Merge with next").clicked() {
+        edit.merge_at(b, (a + b) * 0.5, duration);
+        ui.close();
+    }
+    if edit.splits.iter().any(|s| (s - a).abs() < 1e-3) && ui.button("Merge with previous").clicked() {
+        edit.merge_at(a, (a + b) * 0.5, duration);
+        ui.close();
+    }
+    ui.separator();
+    let smooth_label = if props.raw_cursor { "Enable smooth mouse movement" } else { "Disable smooth mouse movement" };
+    if ui.button(smooth_label).clicked() {
+        edit.set_slice_props(a, b, |p| p.raw_cursor = !p.raw_cursor);
+        ui.close();
+    }
+    if ui.button(if props.hide_cursor { "Show mouse cursor" } else { "Hide mouse cursor" }).clicked() {
+        edit.set_slice_props(a, b, |p| p.hide_cursor = !p.hide_cursor);
+        ui.close();
+    }
+    ui.separator();
+    if ui.button("Reset trims and cuts for all slices").clicked() {
+        edit.reset_slices();
+        ui.close();
+    }
 }
 
 /// One pill per detected shortcut, as long as it shows in the video. Click

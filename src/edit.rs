@@ -556,6 +556,36 @@ pub struct Cut {
     pub end: f64,
 }
 
+/// Settings for a stretch of the clip (a slice, from the timeline's
+/// right-click menu): playback speed, audio volume and cursor.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct SliceProps {
+    /// Recording time the settings apply to.
+    pub start: f64,
+    pub end: f64,
+    pub speed: f64,
+    /// Microphone volume multiplier.
+    pub volume: f64,
+    pub system_volume: f64,
+    pub hide_cursor: bool,
+    /// Follow the real cursor exactly (no smoothing), e.g. for dropdowns.
+    pub raw_cursor: bool,
+}
+
+impl Default for SliceProps {
+    fn default() -> Self {
+        Self { start: 0.0, end: 0.0, speed: 1.0, volume: 1.0, system_volume: 1.0, hide_cursor: false, raw_cursor: false }
+    }
+}
+
+impl SliceProps {
+    /// Same settings, ignoring where they apply.
+    pub fn same(&self, o: &SliceProps) -> bool {
+        SliceProps { start: 0.0, end: 0.0, ..*self } == SliceProps { start: 0.0, end: 0.0, ..*o }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptionFont {
     Sans,
@@ -698,6 +728,10 @@ pub struct EditConfig {
     pub shortcuts: ShortcutOverlay,
     /// Removed stretches, sorted and non-overlapping.
     pub cuts: Vec<Cut>,
+    /// Points where the clip is split into slices (recording time, sorted).
+    pub splits: Vec<f64>,
+    /// Per-slice speed, volume and cursor settings, sorted, non-overlapping.
+    pub slices: Vec<SliceProps>,
     /// Part of the screen recording kept (Crop): x, y, w, h as fractions.
     pub crop: [f64; 4],
     pub captions: CaptionSettings,
@@ -719,6 +753,8 @@ impl EditConfig {
         self.zoom_segments = keep.zoom_segments;
         self.masks = keep.masks;
         self.cuts = keep.cuts;
+        self.splits = keep.splits;
+        self.slices = keep.slices;
         self.trim_start = keep.trim_start;
         self.trim_end = keep.trim_end;
         self.crop = keep.crop;
@@ -763,6 +799,8 @@ impl Default for EditConfig {
             instant_animation: false,
             shortcuts: ShortcutOverlay::default(),
             cuts: vec![],
+            splits: vec![],
+            slices: vec![],
             crop: [0.0, 0.0, 1.0, 1.0],
             captions: CaptionSettings::default(),
             camera: CameraSettings::default(),
@@ -850,16 +888,111 @@ impl EditConfig {
     /// Edited-video time of recording time `t`, or None when it is cut or trimmed.
     pub fn output_time(&self, t: f64, duration: f64) -> Option<f64> {
         let mut acc = 0.0;
-        for (a, b) in self.kept_ranges(duration) {
+        for (a, b, speed) in self.segments(duration) {
             if t < a - 1e-6 {
                 return None;
             }
             if t <= b + 1e-6 {
-                return Some(acc + (t - a).max(0.0));
+                return Some(acc + (t - a).max(0.0) / speed);
             }
-            acc += b - a;
+            acc += (b - a) / speed;
         }
         None
+    }
+
+    /// The clip's slices: kept ranges split at the split points.
+    pub fn slice_ranges(&self, duration: f64) -> Vec<(f64, f64)> {
+        let mut out = vec![];
+        for (a, b) in self.kept_ranges(duration) {
+            let mut t = a;
+            for &s in self.splits.iter().filter(|&&s| s > a + 1e-3 && s < b - 1e-3) {
+                out.push((t, s));
+                t = s;
+            }
+            out.push((t, b));
+        }
+        out
+    }
+
+    /// Kept stretches with one speed each: (start, end, speed).
+    pub fn segments(&self, duration: f64) -> Vec<(f64, f64, f64)> {
+        let mut out = vec![];
+        for (a, b) in self.kept_ranges(duration) {
+            let mut edges: Vec<f64> = self.slices.iter().flat_map(|p| [p.start, p.end]).filter(|&x| x > a + 1e-4 && x < b - 1e-4).collect();
+            edges.sort_by(f64::total_cmp);
+            let mut t = a;
+            for e in edges.into_iter().chain([b]) {
+                if e - t > 1e-4 {
+                    out.push((t, e, self.slice_props((t + e) * 0.5).speed.clamp(0.25, 4.0)));
+                }
+                t = e;
+            }
+        }
+        out
+    }
+
+    /// Settings in force at recording time `t`.
+    pub fn slice_props(&self, t: f64) -> SliceProps {
+        self.slices.iter().copied().find(|p| t >= p.start && t < p.end).unwrap_or_default()
+    }
+
+    /// Changes the settings for `start..end`, starting from those at its middle.
+    pub fn set_slice_props(&mut self, start: f64, end: f64, f: impl FnOnce(&mut SliceProps)) {
+        let mut p = self.slice_props((start + end) * 0.5);
+        f(&mut p);
+        p.start = start;
+        p.end = end;
+        let mut out: Vec<SliceProps> = vec![];
+        for q in self.slices.drain(..) {
+            if q.end <= start || q.start >= end {
+                out.push(q);
+                continue;
+            }
+            if q.start < start {
+                out.push(SliceProps { end: start, ..q });
+            }
+            if q.end > end {
+                out.push(SliceProps { start: end, ..q });
+            }
+        }
+        if !p.same(&SliceProps::default()) {
+            out.push(p);
+        }
+        out.sort_by(|a, b| a.start.total_cmp(&b.start));
+        self.slices = out;
+    }
+
+    /// Splits the clip at `t` (ignored outside the kept video or on a split).
+    pub fn split_at(&mut self, t: f64, duration: f64) -> bool {
+        let inside = self.kept_ranges(duration).iter().any(|&(a, b)| t > a + 0.05 && t < b - 0.05);
+        if !inside || self.splits.iter().any(|s| (s - t).abs() < 0.05) {
+            return false;
+        }
+        self.splits.push(t);
+        self.splits.sort_by(f64::total_cmp);
+        true
+    }
+
+    /// Joins the slices meeting at `t`; the merged slice takes the settings
+    /// of the one at `keep`.
+    pub fn merge_at(&mut self, t: f64, keep: f64, duration: f64) {
+        let slices = self.slice_ranges(duration);
+        let (a, b) = (
+            slices.iter().find(|s| (s.1 - t).abs() < 1e-3).map_or(t, |s| s.0),
+            slices.iter().find(|s| (s.0 - t).abs() < 1e-3).map_or(t, |s| s.1),
+        );
+        self.splits.retain(|s| (s - t).abs() > 1e-3);
+        let props = self.slice_props(keep);
+        self.set_slice_props(a, b, |p| *p = props);
+    }
+
+    /// Undoes every trim, cut and split, and clears slice settings.
+    pub fn reset_slices(&mut self) {
+        self.cuts.clear();
+        self.splits.clear();
+        self.slices.clear();
+        self.trim_start = 0.0;
+        self.trim_end = None;
     }
 
     /// The cut containing `t`, if any.
@@ -929,5 +1062,29 @@ mod tests {
         assert_eq!(project.cuts.len(), 1);
         assert_eq!(project.crop, [0.1, 0.1, 0.8, 0.8]);
         assert!(project.matches_preset(&look));
+    }
+
+    #[test]
+    fn slices_split_merge_and_speed() {
+        let mut e = EditConfig::default();
+        let d = 10.0;
+        assert!(e.split_at(4.0, d));
+        assert!(!e.split_at(4.01, d), "too close to an existing split");
+        e.add_cut(7.0, 8.0);
+        assert_eq!(e.slice_ranges(d), vec![(0.0, 4.0), (4.0, 7.0), (8.0, 10.0)]);
+        // 2x on the middle slice: 3 s become 1.5 s.
+        e.set_slice_props(4.0, 7.0, |p| p.speed = 2.0);
+        assert_eq!(e.segments(d), vec![(0.0, 4.0, 1.0), (4.0, 7.0, 2.0), (8.0, 10.0, 1.0)]);
+        assert_eq!(e.output_time(6.0, d), Some(5.0));
+        assert_eq!(e.output_time(9.0, d), Some(6.5));
+        assert_eq!(e.output_time(7.5, d), None);
+        // Merging keeps the settings of the slice it was asked from.
+        e.merge_at(4.0, 2.0, d);
+        assert!(e.splits.is_empty());
+        assert_eq!(e.slice_props(5.0).speed, 1.0);
+        e.set_slice_props(0.0, 7.0, |p| p.hide_cursor = true);
+        assert!(e.slice_props(3.0).hide_cursor && !e.slice_props(9.0).hide_cursor);
+        e.reset_slices();
+        assert!(e.cuts.is_empty() && e.slices.is_empty() && e.slice_ranges(d) == vec![(0.0, 10.0)]);
     }
 }

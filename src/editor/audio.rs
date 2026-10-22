@@ -16,6 +16,8 @@ struct Track {
     pipeline: gst::Pipeline,
     volume: gst::Element,
     offset: f64,
+    gain: f64,
+    kind: &'static str,
 }
 
 /// Preview playback of the export mix (without the microphone filters).
@@ -34,14 +36,15 @@ impl AudioPreview {
             .iter()
             .filter_map(|t| {
                 let desc = format!(
-                    "filesrc location=\"{}\" ! decodebin ! audioconvert ! audioresample ! volume name=v volume={} ! autoaudiosink",
+                    // scaletempo keeps voices at their pitch on sped-up slices.
+                    "filesrc location=\"{}\" ! decodebin ! audioconvert ! scaletempo ! audioconvert ! audioresample ! volume name=v volume={} ! autoaudiosink",
                     t.path.display(),
                     t.gain
                 );
                 let pipeline = gst::parse::launch(&desc).ok()?.downcast::<gst::Pipeline>().ok()?;
                 let volume = pipeline.by_name("v")?;
                 pipeline.set_state(gst::State::Paused).ok()?;
-                Some(Track { pipeline, volume, offset: t.offset })
+                Some(Track { pipeline, volume, offset: t.offset, gain: t.gain, kind: t.kind })
             })
             .collect();
         Self { tracks, key: Self::key_for(edit) }
@@ -57,14 +60,24 @@ impl AudioPreview {
         self.key == Self::key_for(edit)
     }
 
-    /// Starts playing from video time `t`.
-    pub fn play(&self, t: f64) {
+    /// Starts playing from video time `t` with the settings of the slice there.
+    pub fn play(&self, t: f64, slice: &crate::edit::SliceProps) {
         for tr in &self.tracks {
             let pos = (t - tr.offset).max(0.0);
-            let _ = tr.pipeline.seek_simple(
+            let _ = tr.pipeline.seek(
+                slice.speed,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                gst::SeekType::Set,
                 gst::ClockTime::from_nseconds((pos * 1e9) as u64),
+                gst::SeekType::None,
+                gst::ClockTime::NONE,
             );
+            let k = match tr.kind {
+                "microphone" => slice.volume,
+                "system" => slice.system_volume,
+                _ => 1.0,
+            };
+            tr.volume.set_property("volume", tr.gain * k);
             let _ = tr.pipeline.set_state(gst::State::Playing);
         }
     }

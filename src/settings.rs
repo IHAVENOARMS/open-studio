@@ -95,6 +95,8 @@ pub struct Settings {
     pub gpu_encoding: bool,
     /// New recordings start with the look of the project edited last.
     pub use_last_project_settings: bool,
+    /// Audio waveform on the timeline's clip track.
+    pub timeline_waveform: bool,
 }
 
 /// scrcpy settings for the Device button.
@@ -178,6 +180,7 @@ impl Default for Settings {
             preview_quality: 1,
             gpu_encoding: true,
             use_last_project_settings: true,
+            timeline_waveform: true,
         }
     }
 }

@@ -83,6 +83,9 @@ pub enum Icon {
     ArrowRight,
     ExtractFile,
     ClipboardVideo,
+    // Playback bar and clip labels.
+    WaveformZoom,
+    Speedometer,
 }
 
 struct Pen<'a> {
@@ -224,16 +227,12 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(11.5, 8.5), (11.5, 14.0)]);
         }
         Icon::Command => {
-            // The command key glyph inside a circle.
+            // The Linux Super key symbol (❖) inside a circle.
             pen.circle(10.0, 10.0, 8.2);
-            let q = |x: f32, y: f32| (10.0 + (x - 10.0) * 0.58, 10.0 + (y - 10.0) * 0.58);
-            let small = Pen { s: Stroke::new(pen.s.width * 0.9, color), ..pen };
-            for (cx, cy) in [(6.3, 6.3), (13.7, 6.3), (6.3, 13.7), (13.7, 13.7)] {
-                let (x, y) = q(cx, cy);
-                small.circle(x, y, 1.75 * 0.58);
-            }
-            for (a, b) in [((8.0, 6.3), (8.0, 13.7)), ((12.0, 6.3), (12.0, 13.7)), ((6.3, 8.0), (13.7, 8.0)), ((6.3, 12.0), (13.7, 12.0))] {
-                small.line(&[q(a.0, a.1), q(b.0, b.1)]);
+            let (h, d) = (1.75, 2.05);
+            for (dx, dy) in [(0.0, -d), (d, 0.0), (0.0, d), (-d, 0.0)] {
+                let (x, y) = (10.0 + dx, 10.0 + dy);
+                pen.fill(&[(x, y - h), (x + h, y), (x, y + h), (x - h, y)]);
             }
         }
         Icon::Presets => {
@@ -284,6 +283,20 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.closed(&[(5.0, 3.5), (15.0, 3.5), (17.0, 5.5), (17.0, 12.5), (15.0, 14.5), (8.5, 14.5), (5.0, 17.5), (5.0, 14.5), (3.0, 12.5), (3.0, 5.5)]);
             pen.fill(&[(6.3, 6.8), (11.3, 6.8), (11.3, 11.2), (6.3, 11.2)]);
             pen.fill(&[(11.6, 9.0), (14.2, 7.2), (14.2, 10.8)]);
+        }
+        Icon::WaveformZoom => {
+            // Waveform bars with a small magnifier at the bottom right.
+            for (x, h) in [(2.6, 2.2), (5.0, 5.2), (7.4, 7.2), (9.8, 4.6), (12.2, 3.0)] {
+                pen.line(&[(x, 9.0 - h), (x, 9.0 + h)]);
+            }
+            let small = Pen { s: Stroke::new(pen.s.width * 0.9, color), ..pen };
+            small.circle(14.4, 13.6, 2.4);
+            small.line(&[(16.1, 15.3), (18.2, 17.4)]);
+        }
+        Icon::Speedometer => {
+            pen.circle(10.0, 10.0, 7.5);
+            pen.line(&[(10.0, 10.0), (13.4, 6.6)]);
+            p.circle_filled(pen.pt(10.0, 10.0), 1.3 * k, color);
         }
         Icon::FillerWords => {
             // Waveform bars with a minus badge.

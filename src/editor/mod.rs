@@ -215,8 +215,8 @@ impl Editor {
             }
             let now = Instant::now();
             self.playing = Some((self.time, now));
-            self.player.play(self.time, now);
-            self.audio.play(self.time);
+            self.player.play(self.time, now, self.edit.slice_props(self.time).speed);
+            self.audio.play(self.time, &self.edit.slice_props(self.time));
             self.camera_follow(Some(now));
         } else {
             self.playing = None;
@@ -234,7 +234,7 @@ impl Editor {
         let t = (self.time - c.offset - self.edit.camera.delay).max(0.0);
         for (p, _) in [&self.camera, &self.matte].into_iter().flatten() {
             match now {
-                Some(at) => p.play(t, at),
+                Some(at) => p.play(t, at, self.edit.slice_props(self.time).speed),
                 None => {
                     p.pause();
                     p.seek(t);
@@ -248,8 +248,8 @@ impl Editor {
         if self.playing.is_some() {
             let now = Instant::now();
             self.playing = Some((self.time, now));
-            self.player.play(self.time, now);
-            self.audio.play(self.time);
+            self.player.play(self.time, now, self.edit.slice_props(self.time).speed);
+            self.audio.play(self.time, &self.edit.slice_props(self.time));
             self.camera_follow(Some(now));
         } else {
             self.player.seek(self.time);
@@ -462,8 +462,8 @@ impl Editor {
         if let Some((_, _)) = self.playing {
             let now = Instant::now();
             self.playing = Some((self.time, now));
-            self.player.play(self.time, now);
-            self.audio.play(self.time);
+            self.player.play(self.time, now, self.edit.slice_props(self.time).speed);
+            self.audio.play(self.time, &self.edit.slice_props(self.time));
             self.camera_follow(Some(now));
         } else {
             self.player.seek(self.time);
@@ -827,13 +827,17 @@ impl Editor {
         // Clock.
         if let Some((from, at)) = self.playing {
             let (_, end) = self.edit.trim_range(self.rec.duration);
-            self.time = from + at.elapsed().as_secs_f64();
+            let slice = self.edit.slice_props(from);
+            self.time = from + at.elapsed().as_secs_f64() * slice.speed;
             if self.time >= end {
                 self.time = end;
                 self.set_playing(false);
             } else if let Some(c) = self.edit.cut_at(self.time) {
                 // Jump over cut stretches.
                 self.seek(c.end.min(end));
+            } else if !self.edit.slice_props(self.time).same(&slice) {
+                // Entered a slice with another speed or volume: restart from here.
+                self.seek(self.time);
             }
             ctx.request_repaint();
         }
@@ -843,7 +847,7 @@ impl Editor {
         if !self.audio.is_current(&self.edit) {
             self.audio = audio::AudioPreview::new(&self.rec, &self.edit);
             if self.playing.is_some() {
-                self.audio.play(self.time);
+                self.audio.play(self.time, &self.edit.slice_props(self.time));
             }
         }
         self.audio.set_muted(self.edit.audio.mute);
@@ -924,10 +928,14 @@ impl Editor {
                     &mut self.selected,
                     self.waveform.lock().unwrap().as_deref(),
                     self.rec.camera.is_some(),
+                    self.rec.audio.iter().any(|a| a.kind != "microphone"),
                     &shortcuts,
                 );
                 if let Some(t) = out.seek {
                     self.seek(t);
+                }
+                if let Some(m) = out.toast {
+                    self.hint = Some((m, Instant::now()));
                 }
             });
 
@@ -981,7 +989,7 @@ impl Editor {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(preview_rect), |ui| self.preview(ui, rs));
                 let bar_rect = egui::Rect::from_min_max(egui::pos2(avail.min.x, avail.max.y - bar_h), avail.max);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
-                    let out = timeline::playback_bar(ui, self.time, self.rec.duration, self.playing.is_some());
+                    let out = timeline::playback_bar(ui, &mut self.timeline, self.time, self.rec.duration, self.playing.is_some());
                     if out.toggle_play {
                         self.set_playing(self.playing.is_none());
                     }
@@ -1074,7 +1082,11 @@ impl Editor {
         if in_transcript {
             return;
         }
-        if self.crop_tool.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
+        // C splits the clip at the playhead (as in Screen Studio); Shift+C crops.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
+            self.edit.split_at(self.time, self.rec.duration);
+        }
+        if self.crop_tool.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, Key::C)) {
             self.open_crop_tool();
             return;
         }
@@ -1169,7 +1181,7 @@ impl Editor {
                     }
                 }
             });
-            if toolbar_button(ui, Icon::Crop, "Crop", "", false, true).on_hover_text("Crop the recording  (C)").clicked() {
+            if toolbar_button(ui, Icon::Crop, "Crop", "", false, true).on_hover_text("Crop the recording  (Shift+C)").clicked() {
                 self.open_crop_tool();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

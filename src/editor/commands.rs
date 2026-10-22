@@ -44,6 +44,7 @@ enum Cmd {
     Undo,
     Redo,
     Crop,
+    Split,
     Quality(u32),
     Tab(Tab),
     Preset(usize),
@@ -82,7 +83,8 @@ impl Editor {
         out.push(e("Project", Icon::ArrowRight, "Show project in folder", "", Cmd::ShowFolder));
         out.push(e("Edit", Icon::Undo, "Undo", "Ctrl+Z", Cmd::Undo));
         out.push(e("Edit", Icon::Redo, "Redo", "Ctrl+Shift+Z", Cmd::Redo));
-        out.push(e("Edit", Icon::Crop, "Crop recording", "C", Cmd::Crop));
+        out.push(e("Edit", Icon::Scissors, "Split clip at current time", "C", Cmd::Split));
+        out.push(e("Edit", Icon::Crop, "Crop recording", "Shift+C", Cmd::Crop));
         for (i, p) in self.presets.iter().enumerate() {
             out.push(Entry { group: "Presets", icon: Icon::Presets, label: format!("Apply preset: {}", p.name), note: "", cmd: Cmd::Preset(i) });
         }
@@ -295,6 +297,9 @@ impl Editor {
             Cmd::Undo => self.undo(),
             Cmd::Redo => self.redo(),
             Cmd::Crop => self.open_crop_tool(),
+            Cmd::Split => {
+                self.edit.split_at(self.time, self.rec.duration);
+            }
             Cmd::Quality(d) => {
                 self.preview_quality = d;
                 let mut s = Settings::load();
