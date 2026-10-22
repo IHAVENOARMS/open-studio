@@ -414,8 +414,13 @@ fn cursor(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording
             widgets::slider(ui, &mut c.loop_duration, 0.3..=4.0, Some(1.0));
         });
     }
-    toggle_help(ui, "Touch circle", "Show a soft circle instead of the pointer, like a finger on a phone screen.", &mut c.circle);
-    toggle_help(ui, "Hide cursor", "", &mut c.hidden);
+    // The two exclude each other: a hidden cursor would hide the circle too.
+    if toggle_help(ui, "Touch circle", "Show a soft circle instead of the pointer, like a finger on a phone screen.", &mut c.circle) && c.circle {
+        c.hidden = false;
+    }
+    if toggle_help(ui, "Hide cursor", "", &mut c.hidden) && c.hidden {
+        c.circle = false;
+    }
     widgets::divider(ui);
     theme::section(ui, "Click effect");
     widgets::segmented(ui, &mut c.click_visual, &[(ClickVisual::None, "None"), (ClickVisual::Circle, "Circle"), (ClickVisual::Ripple, "Ripple")]);
