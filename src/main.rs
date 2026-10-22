@@ -122,7 +122,7 @@ enum Cmd {
     /// Transcribe a project's microphone track with Whisper (for captions).
     Transcribe {
         project: PathBuf,
-        /// base, small or medium
+        /// base, small, medium or large-v3-turbo
         #[arg(long, default_value = "base")]
         model: String,
         /// Language code such as "en"; detected when omitted.
