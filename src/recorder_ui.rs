@@ -1094,7 +1094,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
 
     // Close.
     let close = Rect::from_center_size(pos2(x + 16.0, cy), vec2(32.0, 32.0));
-    let r = ui.interact(close, ui.scope_id().with("close"), Sense::click()).on_hover_text("Close");
+    let r = ui.interact(close, ui.scope_id().with("close"), Sense::click()).on_hover_text("Close").on_hover_cursor(egui::CursorIcon::PointingHand);
     p.circle_filled(close.center(), 15.0, if r.hovered() { Color32::WHITE } else { Color32::from_rgb(0xe9, 0xe6, 0xef) });
     icons::paint(&p, Rect::from_center_size(close.center(), vec2(16.0, 16.0)), Icon::Close, Color32::from_rgb(0x24, 0x1f, 0x2e));
     if r.clicked() {
@@ -1787,7 +1787,10 @@ fn widget_ui(ui: &mut egui::Ui, sh: &mut Shared) {
     }
     // Finish + timer.
     let finish = Rect::from_min_size(pos2(r.left() + 10.0, r.top() + 8.0), vec2(110.0, r.height() - 16.0));
-    let fr = ui.interact(finish, ui.scope_id().with("finish"), Sense::click()).on_hover_text(format!("Finish recording ({})", sh.settings.stop_shortcut));
+    let fr = ui
+        .interact(finish, ui.scope_id().with("finish"), Sense::click())
+        .on_hover_text(format!("Finish recording ({})", sh.settings.stop_shortcut))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     if fr.hovered() {
         p.rect_filled(finish, 12.0, Color32::from_white_alpha(12));
     }
@@ -1804,6 +1807,7 @@ fn widget_ui(ui: &mut egui::Ui, sh: &mut Shared) {
         let b = Rect::from_min_size(pos2(x, r.top() + 10.0), vec2(bw, r.height() - 20.0));
         x += bw + gap;
         let resp = ui.interact(b, ui.scope_id().with(("w", tip)), Sense::click()).on_hover_text(tip);
+        let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
         if resp.hovered() && enabled {
             p.rect_filled(b, 10.0, Color32::from_white_alpha(14));
         }
