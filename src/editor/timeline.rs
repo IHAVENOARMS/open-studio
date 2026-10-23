@@ -131,12 +131,14 @@ pub struct State {
     pub waveform: bool,
     /// Cuts fold away so the clips sit side by side (Screen Studio's view).
     pub fold_cuts: bool,
+    /// Scrubber: dragging the playhead plays the sound under it.
+    pub scrubber: bool,
 }
 
 impl Default for State {
     fn default() -> Self {
         let s = crate::settings::Settings::load();
-        Self { drag: None, split_mode: false, zoom: 1.0, scroll: 0.0, menu_slice: None, waveform: s.timeline_waveform, fold_cuts: s.timeline_fold_cuts }
+        Self { drag: None, split_mode: false, zoom: 1.0, scroll: 0.0, menu_slice: None, waveform: s.timeline_waveform, fold_cuts: s.timeline_fold_cuts, scrubber: s.scrubber }
     }
 }
 
@@ -146,6 +148,8 @@ pub struct Output {
     pub toggle_play: bool,
     /// Message for the bottom toast ("Removed 2.0s — Ctrl+Z to undo").
     pub toast: Option<String>,
+    /// The playhead is being dragged (for the Scrubber).
+    pub scrubbing: bool,
 }
 
 /// Maps recording time to x. With folded cuts the timeline shows "display
@@ -278,12 +282,21 @@ pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, pl
     p.text(pos2(label_x, c.y), egui::Align2::RIGHT_CENTER, &zoom_label, egui::FontId::proportional(14.0), theme::TEXT);
     let sep_x = label_x - 34.0;
     p.line_segment([pos2(sep_x, c.y - 11.0), pos2(sep_x, c.y + 11.0)], Stroke::new(1.0, Color32::from_white_alpha(24)));
-    let wave = icon_button(ui, pos2(sep_x - 24.0, c.y), "waveform", Icon::WaveformZoom, 20.0)
-        .on_hover_text(if state.waveform { "Hide audio waveform" } else { "Show audio waveform" });
-    if !state.waveform {
-        // Dim when off.
-        p.rect_filled(Rect::from_center_size(pos2(sep_x - 24.0, c.y), vec2(22.0, 22.0)), 0.0, theme::BG.gamma_multiply(0.55));
+    // Scrubber: highlighted while on, as in Screen Studio.
+    let scrub_c = pos2(sep_x - 24.0, c.y);
+    if state.scrubber {
+        p.rect_filled(Rect::from_center_size(scrub_c, vec2(34.0, 30.0)), CornerRadius::same(8), Color32::from_rgba_unmultiplied(0x5b, 0x45, 0xf0, 70));
     }
+    let wave = ui
+        .interact(Rect::from_center_size(scrub_c, vec2(32.0, 32.0)), ui.scope_id().with("scrubber"), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(if state.scrubber {
+            "Scrubber on: drag the playhead to hear the sound under it"
+        } else {
+            "Scrubber: hear the sound while dragging the playhead, to find an exact spot"
+        });
+    let col = if state.scrubber { theme::KNOB } else if wave.hovered() { Color32::WHITE } else { theme::TEXT };
+    icons::paint(&p, Rect::from_center_size(scrub_c, vec2(20.0, 20.0)), Icon::WaveformZoom, col);
     let fold_c = pos2(sep_x - 56.0, c.y);
     let fold = icon_button(ui, fold_c, "fold-cuts", Icon::FoldCuts, 20.0)
         .on_hover_text(if state.fold_cuts { "Show cut parts on the timeline" } else { "Fold cut parts away on the timeline" });
@@ -297,9 +310,9 @@ pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, pl
         s.save();
     }
     if wave.clicked() {
-        state.waveform = !state.waveform;
+        state.scrubber = !state.scrubber;
         let mut s = crate::settings::Settings::load();
-        s.timeline_waveform = state.waveform;
+        s.scrubber = state.scrubber;
         s.save();
     }
     // Zoom slider: log scale from fitting everything to about 3 s across.
@@ -341,7 +354,8 @@ pub fn show(
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
-    let waveform = waveform.filter(|_| state.waveform);
+    // The waveform is always shown, as in Screen Studio.
+    let _ = state.waveform;
     // Zoom and scroll: Ctrl+wheel zooms around the pointer, the wheel scrolls.
     let folds: Vec<(f64, f64)> = if state.fold_cuts {
         edit.cuts.iter().map(|c| (c.start.max(0.0), c.end.min(duration))).filter(|(a, b)| b > a).collect()
@@ -634,7 +648,10 @@ pub fn show(
     if let (Some(drag), Some(pos)) = (state.drag, resp.interact_pointer_pos()) {
         let t = geo.t(pos.x);
         match drag {
-            Drag::Scrub => out.seek = Some(t),
+            Drag::Scrub => {
+                out.seek = Some(t);
+                out.scrubbing = true;
+            }
             Drag::Move { sel, grab } => {
                 let (s0, e0) = spans(edit, sel.track)[sel.index];
                 let len = e0 - s0;

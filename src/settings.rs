@@ -99,6 +99,8 @@ pub struct Settings {
     pub timeline_waveform: bool,
     /// Cut parts take no room on the timeline.
     pub timeline_fold_cuts: bool,
+    /// Scrubber: dragging the playhead plays the sound under it.
+    pub scrubber: bool,
 }
 
 /// scrcpy settings for the Device button.
@@ -184,6 +186,7 @@ impl Default for Settings {
             use_last_project_settings: true,
             timeline_waveform: true,
             timeline_fold_cuts: true,
+            scrubber: false,
         }
     }
 }

@@ -9,6 +9,7 @@ mod curve;
 mod mask_overlay;
 pub mod player;
 pub use widgets::toggle;
+mod scrub;
 mod sidebar;
 mod timeline;
 mod transcript_ui;
@@ -129,6 +130,7 @@ pub struct Editor {
     sidebar: sidebar::State,
     timeline: timeline::State,
     export: Option<ExportDialog>,
+    scrubber: scrub::Scrubber,
     /// Ctrl+K command menu, while open.
     command: Option<commands::CommandMenu>,
     presets: Vec<crate::presets::Preset>,
@@ -197,6 +199,7 @@ impl Editor {
             sidebar: sidebar::State::default(),
             timeline: timeline::State::default(),
             export: None,
+            scrubber: Default::default(),
             command: None,
             presets: vec![],
             preset_name: String::new(),
@@ -951,6 +954,15 @@ impl Editor {
                 );
                 if let Some(t) = out.seek {
                     self.seek(t);
+                }
+                // Scrubber: dragging the playhead plays the sound under it.
+                if self.timeline.scrubber {
+                    self.scrubber.prepare(&self.rec, &self.edit);
+                    if out.scrubbing {
+                        self.scrubber.scrub(self.time);
+                    } else {
+                        self.scrubber.end();
+                    }
                 }
                 if let Some(m) = out.toast {
                     self.hint = Some((m, Instant::now()));
