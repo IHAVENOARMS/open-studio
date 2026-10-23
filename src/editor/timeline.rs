@@ -129,11 +129,14 @@ pub struct State {
     menu_slice: Option<(f64, f64)>,
     /// Audio waveform on the clip track.
     pub waveform: bool,
+    /// Cuts fold away so the clips sit side by side (Screen Studio's view).
+    pub fold_cuts: bool,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { drag: None, split_mode: false, zoom: 1.0, scroll: 0.0, menu_slice: None, waveform: crate::settings::Settings::load().timeline_waveform }
+        let s = crate::settings::Settings::load();
+        Self { drag: None, split_mode: false, zoom: 1.0, scroll: 0.0, menu_slice: None, waveform: s.timeline_waveform, fold_cuts: s.timeline_fold_cuts }
     }
 }
 
@@ -145,10 +148,15 @@ pub struct Output {
     pub toast: Option<String>,
 }
 
+/// Maps recording time to x. With folded cuts the timeline shows "display
+/// time": recording time minus the cuts before it, so a cut takes no width.
 struct Geo {
     left: f32,
     width: f32,
+    /// Display duration (the recording minus folded cuts).
     duration: f64,
+    /// Folded cuts, recording time, sorted.
+    folds: Vec<(f64, f64)>,
 }
 
 /// Seconds as Screen Studio labels cut lengths: "0.4s", "1.0s", "2s".
@@ -173,12 +181,36 @@ fn cut_pin(ui: &Ui, p: &egui::Painter, x: f32, clip_top: f32, label: &str, id: e
     r.on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// Display time of recording time `t`: cuts before it removed, a time
+/// inside a cut lands on its seam.
+fn fold(folds: &[(f64, f64)], t: f64) -> f64 {
+    let mut d = t;
+    for &(a, b) in folds {
+        if t >= b {
+            d -= b - a;
+        } else if t > a {
+            d -= t - a;
+        }
+    }
+    d
+}
+
 impl Geo {
     fn x(&self, t: f64) -> f32 {
-        self.left + (t / self.duration) as f32 * self.width
+        self.xd(fold(&self.folds, t))
+    }
+    /// x of a display time.
+    fn xd(&self, d: f64) -> f32 {
+        self.left + (d / self.duration) as f32 * self.width
     }
     fn t(&self, x: f32) -> f64 {
-        (((x - self.left) / self.width) as f64 * self.duration).clamp(0.0, self.duration)
+        let mut t = (((x - self.left) / self.width) as f64 * self.duration).clamp(0.0, self.duration);
+        for &(a, b) in &self.folds {
+            if t >= a {
+                t += b - a;
+            }
+        }
+        t
     }
 }
 
@@ -252,6 +284,18 @@ pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, pl
         // Dim when off.
         p.rect_filled(Rect::from_center_size(pos2(sep_x - 24.0, c.y), vec2(22.0, 22.0)), 0.0, theme::BG.gamma_multiply(0.55));
     }
+    let fold_c = pos2(sep_x - 56.0, c.y);
+    let fold = icon_button(ui, fold_c, "fold-cuts", Icon::FoldCuts, 20.0)
+        .on_hover_text(if state.fold_cuts { "Show cut parts on the timeline" } else { "Fold cut parts away on the timeline" });
+    if !state.fold_cuts {
+        p.rect_filled(Rect::from_center_size(fold_c, vec2(22.0, 22.0)), 0.0, theme::BG.gamma_multiply(0.55));
+    }
+    if fold.clicked() {
+        state.fold_cuts = !state.fold_cuts;
+        let mut s = crate::settings::Settings::load();
+        s.timeline_fold_cuts = state.fold_cuts;
+        s.save();
+    }
     if wave.clicked() {
         state.waveform = !state.waveform;
         let mut s = crate::settings::Settings::load();
@@ -299,7 +343,12 @@ pub fn show(
     let full = ui.available_rect_before_wrap();
     let waveform = waveform.filter(|_| state.waveform);
     // Zoom and scroll: Ctrl+wheel zooms around the pointer, the wheel scrolls.
-    let dur = duration.max(0.01);
+    let folds: Vec<(f64, f64)> = if state.fold_cuts {
+        edit.cuts.iter().map(|c| (c.start.max(0.0), c.end.min(duration))).filter(|(a, b)| b > a).collect()
+    } else {
+        vec![]
+    };
+    let dur = (duration - folds.iter().map(|(a, b)| b - a).sum::<f64>()).max(0.01);
     let base_w = full.width() - 20.0;
     let max_zoom = (dur / 3.0).max(1.0) as f32;
     if ui.rect_contains_pointer(full) {
@@ -319,11 +368,12 @@ pub fn show(
     let width = base_w * state.zoom;
     let visible = dur / state.zoom as f64;
     // Keep the playhead in view while playing.
-    if playing && (time < state.scroll || time > state.scroll + visible * 0.95) {
-        state.scroll = time - visible * 0.1;
+    let shown = fold(&folds, time);
+    if playing && (shown < state.scroll || shown > state.scroll + visible * 0.95) {
+        state.scroll = shown - visible * 0.1;
     }
     state.scroll = state.scroll.clamp(0.0, (dur - visible).max(0.0));
-    let geo = Geo { left: full.left() + 10.0 - (state.scroll / dur) as f32 * width, width, duration: dur };
+    let geo = Geo { left: full.left() + 10.0 - (state.scroll / dur) as f32 * width, width, duration: dur, folds };
     let ruler = Rect::from_min_size(full.min, vec2(full.width(), 30.0));
     let clip = Rect::from_min_max(pos2(full.left(), ruler.bottom() + 6.0), pos2(full.right(), ruler.bottom() + 66.0));
     let zoom = Rect::from_min_max(pos2(full.left(), clip.bottom() + 10.0), pos2(full.right(), clip.bottom() + 70.0));
@@ -348,14 +398,15 @@ pub fn show(
         .into_iter()
         .find(|s| s * px_per_s >= 70.0)
         .unwrap_or(1200.0);
+    // Ticks count display time (with folded cuts, the time without them).
     let mut t = 0.0;
     while t <= geo.duration + 1e-6 {
-        let x = geo.x(t);
+        let x = geo.xd(t);
         if t > 0.0 {
             p.text(pos2(x, ruler.top() + 10.0), egui::Align2::CENTER_CENTER, format_time(t).trim_end_matches(".0"), egui::FontId::proportional(12.5), theme::TEXT_DIM);
         }
         p.circle_filled(pos2(x, ruler.bottom() - 6.0), 1.5, theme::TEXT_DIM);
-        let half = geo.x(t + step / 2.0);
+        let half = geo.xd(t + step / 2.0);
         if t + step / 2.0 <= geo.duration {
             p.circle_filled(pos2(half, ruler.bottom() - 6.0), 1.5, Color32::from_rgb(0x4a, 0x4c, 0x52));
         }
@@ -1074,4 +1125,24 @@ fn paint_waveform(p: &egui::Painter, clip: Rect, geo: &Geo, env: &[f32], t0: f64
     p.add(mesh);
     // Anti-aliased edge along the top of the fill.
     p.add(egui::Shape::line(outline, Stroke::new(1.0, WAVE)));
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    #[test]
+    fn folded_cuts_take_no_width() {
+        // 10 s recording, cuts at 2-3 and 6-8: 7 s on screen, 70 px.
+        let geo = Geo { left: 0.0, width: 70.0, duration: 7.0, folds: vec![(2.0, 3.0), (6.0, 8.0)] };
+        assert_eq!(geo.x(2.0), geo.x(3.0), "a cut is a seam");
+        assert_eq!(geo.x(2.5), geo.x(3.0));
+        assert!((geo.x(5.0) - 40.0).abs() < 1e-4);
+        assert!((geo.x(9.0) - 60.0).abs() < 1e-4);
+        // Back from x: kept times round-trip, a seam maps past its cut.
+        for t in [0.5, 1.9, 3.5, 5.9, 8.5, 10.0] {
+            assert!((geo.t(geo.x(t)) - t).abs() < 1e-3, "{t}");
+        }
+        assert!((geo.t(geo.x(2.0)) - 3.0).abs() < 1e-3);
+    }
 }

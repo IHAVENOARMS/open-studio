@@ -86,6 +86,7 @@ pub enum Icon {
     // Playback bar and clip labels.
     WaveformZoom,
     Speedometer,
+    FoldCuts,
 }
 
 struct Pen<'a> {
@@ -292,6 +293,12 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             let small = Pen { s: Stroke::new(pen.s.width * 0.9, color), ..pen };
             small.circle(14.4, 13.6, 2.4);
             small.line(&[(16.1, 15.3), (18.2, 17.4)]);
+        }
+        Icon::FoldCuts => {
+            // Two arrows closing in on a seam.
+            pen.line(&[(10.0, 3.5), (10.0, 16.5)]);
+            pen.fill(&[(2.5, 6.8), (7.6, 10.0), (2.5, 13.2)]);
+            pen.fill(&[(17.5, 6.8), (12.4, 10.0), (17.5, 13.2)]);
         }
         Icon::Speedometer => {
             pen.circle(10.0, 10.0, 7.5);

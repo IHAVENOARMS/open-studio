@@ -97,6 +97,8 @@ pub struct Settings {
     pub use_last_project_settings: bool,
     /// Audio waveform on the timeline's clip track.
     pub timeline_waveform: bool,
+    /// Cut parts take no room on the timeline.
+    pub timeline_fold_cuts: bool,
 }
 
 /// scrcpy settings for the Device button.
@@ -181,6 +183,7 @@ impl Default for Settings {
             gpu_encoding: true,
             use_last_project_settings: true,
             timeline_waveform: true,
+            timeline_fold_cuts: true,
         }
     }
 }
