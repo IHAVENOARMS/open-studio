@@ -412,8 +412,11 @@ impl Editor {
                 self.renaming = None;
             } else if enter || r.lost_focus() {
                 let name = self.renaming.take().unwrap_or_default();
-                if let Err(e) = self.rename(&name) {
-                    self.notify(format!("Couldn't rename: {e:#}"));
+                match self.rename(&name) {
+                    // A new name saves the project, like Ctrl+S.
+                    Ok(true) => self.save_with_feedback(),
+                    Ok(false) => {}
+                    Err(e) => self.notify(format!("Couldn't rename: {e:#}")),
                 }
             }
         } else {
@@ -631,10 +634,11 @@ impl Editor {
     }
 
     /// Renames the project; a saved project's folder is renamed with it.
-    fn rename(&mut self, name: &str) -> anyhow::Result<()> {
+    /// Returns whether the name changed.
+    fn rename(&mut self, name: &str) -> anyhow::Result<bool> {
         let name = name.trim().replace('/', "-");
         if name.is_empty() || name == self.name {
-            return Ok(());
+            return Ok(false);
         }
         if !self.is_new() {
             let target = self.dir.with_file_name(&name);
@@ -645,7 +649,7 @@ impl Editor {
             self.set_dir(target);
         }
         self.name = name;
-        Ok(())
+        Ok(true)
     }
 
     /// Leaves the editor, asking first when there are unsaved changes.
