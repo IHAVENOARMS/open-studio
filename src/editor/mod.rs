@@ -207,8 +207,18 @@ impl Editor {
         })
     }
 
+    /// Where the kept video starts and ends: the trim range without cuts
+    /// at either end.
+    fn playable(&self) -> (f64, f64) {
+        let kept = self.edit.kept_ranges(self.rec.duration);
+        match (kept.first(), kept.last()) {
+            (Some(a), Some(b)) => (a.0, b.1),
+            _ => self.edit.trim_range(self.rec.duration),
+        }
+    }
+
     fn set_playing(&mut self, play: bool) {
-        let (start, end) = self.edit.trim_range(self.rec.duration);
+        let (start, end) = self.playable();
         if play {
             if self.time >= end - 0.05 {
                 self.time = start;
@@ -830,7 +840,8 @@ impl Editor {
 
         // Clock.
         if let Some((from, at)) = self.playing {
-            let (_, end) = self.edit.trim_range(self.rec.duration);
+            // Stop where the kept video ends, not past a cut running to the end.
+            let (_, end) = self.playable();
             let slice = self.edit.slice_props(from);
             self.time = from + at.elapsed().as_secs_f64() * slice.speed;
             if self.time >= end {
