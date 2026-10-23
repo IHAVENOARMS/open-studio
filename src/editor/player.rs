@@ -122,9 +122,12 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
                 Err(_) => return,
             }
         };
-        // Collapse a burst of seeks (scrubbing) into the last one.
+        // Only the newest command matters: each one replaces the playhead.
+        // Working through a backlog (a "play from here" per frame while
+        // scrubbing during playback, each reopening the decoder) left the
+        // picture seconds behind, frozen until a pause flushed it.
         let mut cmd = cmd;
-        if matches!(cmd, Some(Cmd::Seek(_))) {
+        if cmd.is_some() {
             while let Ok(next) = rx.try_recv() {
                 cmd = Some(next);
             }
@@ -174,6 +177,68 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
             if wait > 0.0 {
                 std::thread::sleep(std::time::Duration::from_secs_f64(wait.min(0.02)));
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plays, pauses mid-way (pause + seek, as the editor does) and plays
+    /// again, many times; after every resume frames must keep coming.
+    /// Opt-in (decodes video): `cargo test -- --ignored pause_resume`.
+    #[test]
+    #[ignore]
+    fn pause_resume_keeps_frames_coming() {
+        let dir = std::env::temp_dir().join("open-studio-player-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("cam.mp4");
+        if !video.exists() {
+            assert!(std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=30:d=40", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&video)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let p = Player::new(video, (640, 360), 30, egui::Context::default());
+        let wait = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+        let mut t = 2.0;
+        p.seek(t);
+        wait(300);
+        for round in 0..12 {
+            let start = Instant::now();
+            p.play(t, start, 1.0);
+            wait(400 + 37 * round);
+            let before = p.latest().map(|f| f.index);
+            wait(300);
+            let after = p.latest().map(|f| f.index);
+            assert!(after > before, "round {round}: frames stopped at {before:?}");
+            // Scrubbing while playing: a "play from here" every frame.
+            if round == 6 {
+                for k in 0..60 {
+                    let at = Instant::now();
+                    p.play(5.0 + (k % 7) as f64 * 3.1, at, 1.0);
+                    wait(16);
+                }
+                t = 30.0;
+                let at = Instant::now();
+                p.play(t, at, 1.0);
+                wait(500);
+                let f = p.latest().unwrap().index as f64 / 30.0;
+                assert!((f - (t + 0.5)).abs() < 0.35, "after a scrub the camera is at {f:.2}s, expected about {:.2}s", t + 0.5);
+                t += at.elapsed().as_secs_f64();
+                p.pause();
+                p.seek(t);
+                wait(100);
+                continue;
+            }
+            // Pause where the playhead is, like the editor.
+            t += start.elapsed().as_secs_f64();
+            p.pause();
+            p.seek(t);
+            wait(if round % 2 == 0 { 20 } else { 250 });
         }
     }
 }
