@@ -66,20 +66,23 @@ impl Preset {
     }
 }
 
-fn last_path() -> PathBuf {
-    crate::util::config_dir().join("last-project-settings.json")
+/// Phone (device) recordings remember their own last settings: a touch
+/// circle and phone-like corners don't belong on desktop recordings.
+fn last_path(device: bool) -> PathBuf {
+    crate::util::config_dir().join(if device { "last-device-project-settings.json" } else { "last-project-settings.json" })
 }
 
 /// Remembers the settings of the project being edited, for new recordings
-/// (Settings: "Use last project settings as default for new recordings").
-pub fn remember_last(settings: &EditConfig) {
+/// of the same kind (Settings: "Use last project settings as default for
+/// new recordings").
+pub fn remember_last(settings: &EditConfig, device: bool) {
     let _ = std::fs::create_dir_all(crate::util::config_dir());
     if let Ok(text) = serde_json::to_string(settings) {
-        let _ = std::fs::write(last_path(), text);
+        let _ = std::fs::write(last_path(device), text);
     }
 }
 
-/// The settings of the project edited last, if any.
-pub fn last() -> Option<EditConfig> {
-    serde_json::from_str(&std::fs::read_to_string(last_path()).ok()?).ok()
+/// The settings of the desktop (or device) project edited last, if any.
+pub fn last(device: bool) -> Option<EditConfig> {
+    serde_json::from_str(&std::fs::read_to_string(last_path(device)).ok()?).ok()
 }

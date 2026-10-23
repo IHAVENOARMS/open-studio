@@ -1030,7 +1030,7 @@ impl Editor {
         if self.edit != self.committed && !ctx.input(|i| i.pointer.any_down()) {
             let before = std::mem::replace(&mut self.committed, self.edit.clone());
             self.history.push(before);
-            crate::presets::remember_last(&self.edit);
+            crate::presets::remember_last(&self.edit, self.rec.source.kind == "device");
             if self.history.len() > 200 {
                 self.history.remove(0);
             }

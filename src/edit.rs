@@ -862,24 +862,30 @@ impl EditConfig {
             }
         }
         let mut cfg = Self::default();
-        // Start from the look of the project edited last, when that's on.
-        if !cfg!(test) && crate::settings::Settings::load().use_last_project_settings
-            && let Some(last) = crate::presets::last()
-        {
-            cfg.apply_preset(&last);
-        }
-        cfg.zoom_segments = crate::engine::auto_zoom_segments(rec, cfg.default_zoom);
-        if rec.source.kind == "device" {
+        let device = rec.source.kind == "device";
+        // Start from the look of the last project of the same kind (desktop
+        // or phone), when that's on.
+        let last = if !cfg!(test) && crate::settings::Settings::load().use_last_project_settings { crate::presets::last(device) } else { None };
+        if let Some(last) = &last {
+            cfg.apply_preset(last);
+        } else if device {
             // Phone recordings: a touch circle instead of a desktop arrow,
             // and rounder corners like a phone screen.
             cfg.cursor.circle = true;
             cfg.cursor.click_visual = ClickVisual::Circle;
             cfg.radius = 48.0;
-            // The phone's sound plays through the speakers, so system audio
-            // has it too: keep only the clean device track in the mix.
-            if rec.audio.iter().any(|a| a.kind == "device") {
-                cfg.audio.mute_system = true;
-            }
+        }
+        cfg.zoom_segments = crate::engine::auto_zoom_segments(rec, cfg.default_zoom);
+        // The phone's sound plays through the speakers, so system audio has
+        // it too: keep only the clean device track in the mix.
+        if device && rec.audio.iter().any(|a| a.kind == "device") {
+            cfg.audio.mute_system = true;
+        }
+        // Keep these starting settings with the recording: opening it again
+        // before it's saved mustn't rebuild them from whatever project was
+        // edited since.
+        if !cfg!(test) && dir.join(crate::project::RECORDING_FILE).exists() {
+            let _ = cfg.save(dir);
         }
         cfg
     }
