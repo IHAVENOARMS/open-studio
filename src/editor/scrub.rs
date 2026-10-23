@@ -1,7 +1,13 @@
 //! The Scrubber (Screen Studio's waveform-and-magnifier button under the
-//! preview): while it's on, dragging the playhead plays the sound it passes
-//! over, forwards or backwards, faster or slower with the drag, like
-//! scrubbing tape. Used to find an exact spot by ear.
+//! preview): while it's on, dragging the playhead plays the sound under it,
+//! forwards or backwards, faster or slower with the drag. Used to find an
+//! exact spot by ear.
+//!
+//! Granular, so speech stays intelligible: short overlapping snippets
+//! (Hann-windowed, 50% overlap) are taken from wherever the playhead is and
+//! played at their normal pitch; a faster drag skips further between them.
+//! Playing exactly what the drag passed over, squeezed into each frame,
+//! garbled speech with every jitter of the mouse.
 
 use crate::edit::EditConfig;
 use crate::project::Recording;
@@ -24,11 +30,60 @@ pub struct Scrubber {
     src: Option<(gst::Pipeline, gst_app::AppSrc)>,
     /// Playhead and wall time of the previous drag step.
     last: Option<(f64, Instant)>,
+    grains: Grains,
 }
 
 impl Default for Scrubber {
     fn default() -> Self {
-        Self { pcm: Arc::default(), key: String::new(), src: None, last: None }
+        Self { pcm: Arc::default(), key: String::new(), src: None, last: None, grains: Grains::default() }
+    }
+}
+
+/// Snippet length: about a syllable's worth, short enough to follow the drag.
+const GRAIN: usize = (RATE as usize * 60) / 1000;
+const HOP: usize = GRAIN / 2;
+
+/// Overlap-add state carried between drag steps.
+#[derive(Default)]
+struct Grains {
+    /// Sound still to come from snippets already started.
+    tail: Vec<f32>,
+    /// Output samples owed but not yet a whole hop.
+    owed: usize,
+    /// Smoothed drag speed (video seconds per second), against mouse jitter.
+    speed: f64,
+}
+
+impl Grains {
+    /// Output for a drag from `from` to `to` over `n` samples of real time.
+    fn render(&mut self, pcm: &[i16], from: f64, to: f64, n: usize) -> Vec<i16> {
+        if self.tail.len() < GRAIN {
+            self.tail.resize(GRAIN, 0.0);
+        }
+        let dt = n as f64 / RATE as f64;
+        self.speed = 0.7 * self.speed + 0.3 * (to - from) / dt.max(1e-3);
+        let total = self.owed + n;
+        let hops = total / HOP;
+        self.owed = total % HOP;
+        let mut out = Vec::with_capacity(hops * HOP);
+        for k in 0..hops {
+            // A held-still playhead goes quiet instead of looping a snippet.
+            if self.speed.abs() > 0.08 {
+                let at = from + (to - from) * ((k + 1) * HOP) as f64 / (hops * HOP).max(1) as f64;
+                let start = at * RATE as f64;
+                let dir = if self.speed < 0.0 { -1.0 } else { 1.0 };
+                for i in 0..GRAIN {
+                    let w = 0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / GRAIN as f64).cos();
+                    let pos = start + dir * i as f64;
+                    let s = if pos < 0.0 { 0 } else { *pcm.get(pos as usize).unwrap_or(&0) };
+                    self.tail[i] += (w * s as f64) as f32;
+                }
+            }
+            out.extend(self.tail[..HOP].iter().map(|v| v.clamp(-32768.0, 32767.0) as i16));
+            self.tail.drain(..HOP);
+            self.tail.resize(GRAIN, 0.0);
+        }
+        out
     }
 }
 
@@ -103,14 +158,11 @@ impl Scrubber {
         let prev = self.last.replace((t, now));
         let Some(pcm) = self.pcm.lock().unwrap().clone() else { return };
         let Some((from, at)) = prev else { return };
-        // A pause in the drag starts a fresh stretch (with a fade-in).
-        let gap = now.duration_since(at).as_secs_f64();
-        let fresh = gap > 0.12;
-        let dt = gap.clamp(0.008, 0.06);
-        if (t - from).abs() < 1e-4 {
+        let dt = now.duration_since(at).as_secs_f64().clamp(0.004, 0.06);
+        let samples = self.grains.render(&pcm, from, t, (dt * RATE as f64) as usize);
+        if samples.is_empty() {
             return;
         }
-        let samples = stretch(&pcm, from, t, (dt * RATE as f64) as usize, fresh);
         let bytes: Vec<u8> = samples.iter().flat_map(|v| v.to_le_bytes()).collect();
         if let Some(src) = self.output() {
             let _ = src.push_buffer(gst::Buffer::from_mut_slice(bytes));
@@ -120,45 +172,35 @@ impl Scrubber {
     /// The drag ended (or the Scrubber is off).
     pub fn end(&mut self) {
         self.last = None;
+        self.grains = Grains::default();
     }
-}
-
-/// `n` samples covering the mix from `from` to `to` seconds (backwards when
-/// `to < from`), so the sound speeds up, slows down or reverses with the
-/// drag. `fresh` fades the start in to avoid a click.
-fn stretch(pcm: &[i16], from: f64, to: f64, n: usize, fresh: bool) -> Vec<i16> {
-    let fade = (RATE as usize / 200).min(n / 2).max(1); // 5 ms
-    (0..n)
-        .map(|i| {
-            let pos = ((from + (to - from) * i as f64 / n as f64) * RATE as f64).max(0.0);
-            let k = pos.floor() as usize;
-            let f = (pos - pos.floor()) as f32;
-            let a = *pcm.get(k).unwrap_or(&0) as f32;
-            let b = *pcm.get(k + 1).unwrap_or(&0) as f32;
-            let mut v = a + (b - a) * f;
-            if fresh && i < fade {
-                v *= i as f32 / fade as f32;
-            }
-            v as i16
-        })
-        .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn plays_what_the_drag_passes_over() {
+    fn snippets_follow_the_drag_at_normal_pitch() {
         // A ramp: sample value = position in hundredths of a second.
-        let pcm: Vec<i16> = (0..super::RATE * 2).map(|i| (i / (super::RATE / 100)) as i16).collect();
-        // Dragging 0.50 s -> 0.60 s in 20 ms: reads forwards through 0.5-0.6 s.
-        let fwd = super::stretch(&pcm, 0.5, 0.6, 480, false);
-        assert_eq!((fwd[0], *fwd.last().unwrap()), (50, 59));
-        assert!(fwd.windows(2).all(|w| w[1] >= w[0]));
-        // Dragging back reads backwards.
-        let back = super::stretch(&pcm, 0.6, 0.5, 480, false);
-        assert!(back.windows(2).all(|w| w[1] <= w[0]) && back[0] == 60);
-        // A fresh stretch fades in from silence.
-        assert_eq!(super::stretch(&pcm, 0.5, 0.6, 480, true)[0], 0);
+        let pcm: Vec<i16> = (0..RATE * 4).map(|i| (i / (RATE / 100)) as i16).collect();
+        let mut g = Grains::default();
+        // Drag forwards at 1x for a while: steady output from where the
+        // playhead is, rising like the recording.
+        let mut t = 1.0;
+        let mut out = vec![];
+        for _ in 0..30 {
+            out.extend(g.render(&pcm, t, t + 0.016, (0.016 * RATE as f64) as usize));
+            t += 0.016;
+        }
+        let late = &out[out.len() - HOP..];
+        let mean = late.iter().map(|v| *v as f64).sum::<f64>() / late.len() as f64;
+        assert!((mean / 100.0 - t).abs() < 0.15, "playing {:.2}s, playhead at {t:.2}s", mean / 100.0);
+        // Holding still: it goes quiet.
+        for _ in 0..30 {
+            out = g.render(&pcm, t, t, (0.016 * RATE as f64) as usize);
+        }
+        assert!(out.iter().all(|v| *v == 0));
     }
 }
 
