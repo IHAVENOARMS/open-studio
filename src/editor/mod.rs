@@ -412,10 +412,13 @@ impl Editor {
                 self.renaming = None;
             } else if enter || r.lost_focus() {
                 let name = self.renaming.take().unwrap_or_default();
+                // Naming a brand-new recording saves it (into the projects
+                // folder, under that name). A saved project is only renamed:
+                // its unsaved edits stay unsaved until Ctrl+S.
+                let was_new = self.is_new();
                 match self.rename(&name) {
-                    // A new name saves the project, like Ctrl+S.
-                    Ok(true) => self.save_with_feedback(),
-                    Ok(false) => {}
+                    Ok(true) if was_new => self.save_with_feedback(),
+                    Ok(_) => {}
                     Err(e) => self.notify(format!("Couldn't rename: {e:#}")),
                 }
             }
