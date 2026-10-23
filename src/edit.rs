@@ -402,12 +402,28 @@ pub struct ShortcutOverlay {
     pub disabled: Vec<usize>,
     /// The shortcuts track is shown on the timeline.
     pub timeline: bool,
+    /// Combinations always shown, even single keys or Shift ones
+    /// ("Enter", "Shift+Tab"); names as `shortcuts::key_name` gives them.
+    pub custom: Vec<String>,
+    pub style: KeycapStyle,
+    /// Dark plate behind the row of keys.
+    pub backdrop: bool,
+    /// Column and row on a 3×3 grid; [1, 2] is bottom centre.
+    pub position: [u8; 2],
 }
 
 impl Default for ShortcutOverlay {
     fn default() -> Self {
-        Self { show: true, size: 1.0, single_keys: false, disabled: vec![], timeline: false }
+        Self { show: true, size: 1.0, single_keys: false, disabled: vec![], timeline: false, custom: vec![], style: KeycapStyle::Dark, backdrop: true, position: [1, 2] }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeycapStyle {
+    Dark,
+    Light,
+    /// Transparent keys with a white outline.
+    Outline,
 }
 
 /// Camera placement for a stretch of the video (the Layouts track).

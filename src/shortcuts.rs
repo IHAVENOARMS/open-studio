@@ -51,10 +51,52 @@ pub fn key_name(code: u16) -> Option<&'static str> {
     })
 }
 
+/// A combination as typed in settings ("shift + tab", "Ctrl+Enter") in the
+/// overlay's own form: modifiers in Ctrl, Alt, Shift, Super order, then the
+/// key, joined by "+".
+pub fn normalize(combo: &str) -> String {
+    let mut mods = [false; 4];
+    let mut key = String::new();
+    for part in combo.split('+').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.to_lowercase().as_str() {
+            "ctrl" | "control" => mods[0] = true,
+            "alt" | "option" => mods[1] = true,
+            "shift" => mods[2] = true,
+            "super" | "meta" | "win" | "windows" | "cmd" | "logo" => mods[3] = true,
+            "esc" | "escape" => key = "Esc".into(),
+            "return" | "enter" => key = "Enter".into(),
+            "up" | "arrowup" => key = "↑".into(),
+            "down" | "arrowdown" => key = "↓".into(),
+            "left" | "arrowleft" => key = "←".into(),
+            "right" | "arrowright" => key = "→".into(),
+            "pageup" | "page up" => key = "Page Up".into(),
+            "pagedown" | "page down" => key = "Page Down".into(),
+            "del" | "delete" => key = "Delete".into(),
+            "space" => key = "Space".into(),
+            "tab" => key = "Tab".into(),
+            "backspace" => key = "Backspace".into(),
+            "home" => key = "Home".into(),
+            "end" => key = "End".into(),
+            "insert" => key = "Insert".into(),
+            "minus" => key = "-".into(),
+            "equals" | "plus" => key = "=".into(),
+            other if other.len() == 1 => key = other.to_uppercase(),
+            other if other.starts_with('f') && other[1..].parse::<u8>().is_ok() => key = other.to_uppercase(),
+            _ => key = part.to_string(),
+        }
+    }
+    let mut out: Vec<String> = (0..4).filter(|m| mods[*m]).map(|m| MOD_NAMES[m].to_string()).collect();
+    if !key.is_empty() {
+        out.push(key);
+    }
+    out.join("+")
+}
+
 /// Shortcuts in key-press order. Combinations need Ctrl, Alt or Super (Shift
 /// alone is typing). With `single_keys`, isolated single presses also count,
-/// but not fast typing runs.
-pub fn detect(rec: &Recording, single_keys: bool) -> Vec<Shortcut> {
+/// but not fast typing runs. `custom` combinations always count.
+pub fn detect(rec: &Recording, single_keys: bool, custom: &[String]) -> Vec<Shortcut> {
+    let custom: Vec<String> = custom.iter().map(|c| normalize(c)).collect();
     let keys = &rec.events.keys;
     let mut held = [false; 4];
     let mut out = vec![];
@@ -67,8 +109,11 @@ pub fn detect(rec: &Recording, single_keys: bool) -> Vec<Shortcut> {
             continue;
         }
         let Some(name) = key_name(k.code) else { continue };
+        let pressed: Vec<&'static str> = (0..4).filter(|m| held[*m]).map(|m| MOD_NAMES[m]).chain([name]).collect();
         let combo = held[0] || held[1] || held[3];
-        if combo {
+        if custom.contains(&pressed.join("+")) {
+            out.push(Shortcut { id: i, t: k.t, keys: pressed });
+        } else if combo {
             let mut names: Vec<&'static str> = (0..4).filter(|m| held[*m]).map(|m| MOD_NAMES[m]).collect();
             names.push(name);
             out.push(Shortcut { id: i, t: k.t, keys: names });
@@ -88,4 +133,38 @@ pub fn detect(rec: &Recording, single_keys: bool) -> Vec<Shortcut> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod custom_tests {
+    use super::*;
+
+    #[test]
+    fn custom_combinations_always_show() {
+        assert_eq!(normalize("shift + tab"), "Shift+Tab");
+        assert_eq!(normalize("super+ctrl+up"), "Ctrl+Super+↑");
+        assert_eq!(normalize("Return"), "Enter");
+        let key = |t: f64, code: u16, down: bool| crate::project::Key { t, code, down };
+        let mut rec = crate::project::Recording {
+            version: 1,
+            video: "screen.mp4".into(),
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            duration: 5.0,
+            cursor_embedded: false,
+            source: Default::default(),
+            events: Default::default(),
+            custom_cursors: vec![],
+            audio: vec![],
+            camera: None,
+            dir: Default::default(),
+            transcript: None,
+        };
+        // Enter alone, then Shift+Tab: typing-like, so hidden by default.
+        rec.events.keys = vec![key(1.0, 28, true), key(1.1, 28, false), key(3.0, 42, true), key(3.05, 15, true), key(3.1, 15, false), key(3.2, 42, false)];
+        assert!(detect(&rec, false, &[]).is_empty());
+        let found = detect(&rec, false, &["Enter".into(), "shift+tab".into()]);
+        assert_eq!(found.iter().map(|s| s.label()).collect::<Vec<_>>(), vec!["Enter", "Shift + Tab"]);
+    }
 }

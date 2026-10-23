@@ -334,7 +334,7 @@ impl Tracks {
         }
         let o = &edit.shortcuts;
         let shortcuts = if o.show {
-            crate::shortcuts::detect(rec, o.single_keys).into_iter().filter(|s| !o.disabled.contains(&s.id)).collect()
+            crate::shortcuts::detect(rec, o.single_keys, &o.custom).into_iter().filter(|s| !o.disabled.contains(&s.id)).collect()
         } else {
             vec![]
         };

@@ -73,6 +73,8 @@ pub struct State {
     pub cursors: super::cursors::State,
     picking_music: Option<Receiver<Vec<std::path::PathBuf>>>,
     pub captions: super::captions_ui::State,
+    /// Waiting for a key combination to add as a custom shortcut.
+    capturing_shortcut: bool,
     pub camera: super::camera_ui::State,
 }
 
@@ -194,7 +196,7 @@ pub fn show(
                             }
                         }
                         Tab::Audio => audio(ui, state, edit, rec),
-                        Tab::Shortcuts => shortcuts(ui, edit, rec),
+                        Tab::Shortcuts => shortcuts(ui, state, edit, rec),
                         Tab::Animation => animation(ui, edit, rec, selected),
                     }
                 }));
@@ -619,7 +621,7 @@ fn audio(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording)
     }
 }
 
-fn shortcuts(ui: &mut Ui, edit: &mut EditConfig, _rec: &Recording) {
+fn shortcuts(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, _rec: &Recording) {
     // Laid out as Screen Studio's Keyboard shortcuts panel.
     ui.label(RichText::new("Shortcuts").size(12.5).color(theme::TEXT_DIM));
     ui.add_space(4.0);
@@ -635,6 +637,68 @@ fn shortcuts(ui: &mut Ui, edit: &mut EditConfig, _rec: &Recording) {
         "By default, only 2+ keys shortcuts are shown. Enable this option to show single letter shortcuts as well.",
         &mut o.single_keys,
     );
+    widgets::divider(ui);
+    theme::section(ui, "Custom shortcuts");
+    help(ui, "Always shown when pressed, even single keys or Shift combinations, like Enter or Shift+Tab.");
+    let mut remove = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        for (i, c) in o.custom.iter().enumerate() {
+            if widgets::chip(ui, &format!("{c}  ×"), false).on_hover_text("Remove").clicked() {
+                remove = Some(i);
+            }
+        }
+    });
+    if let Some(i) = remove {
+        o.custom.remove(i);
+    }
+    if state.capturing_shortcut {
+        // Hold keyboard focus so the editor's own shortcuts (Space plays)
+        // don't fire while a combination is pressed.
+        let id = egui::Id::NULL.with("shortcut-capture");
+        ui.memory_mut(|m| m.request_focus(id));
+        let combo = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key, pressed: true, modifiers, .. } => {
+                    let mut parts = vec![];
+                    if modifiers.ctrl {
+                        parts.push("Ctrl".to_string());
+                    }
+                    if modifiers.alt {
+                        parts.push("Alt".to_string());
+                    }
+                    if modifiers.shift {
+                        parts.push("Shift".to_string());
+                    }
+                    if modifiers.mac_cmd || (modifiers.command && !modifiers.ctrl) {
+                        parts.push("Super".to_string());
+                    }
+                    parts.push(key.name().to_string());
+                    Some(crate::shortcuts::normalize(&parts.join("+")))
+                }
+                _ => None,
+            })
+        });
+        help(ui, "Press the shortcut…");
+        if let Some(c) = combo {
+            if !o.custom.contains(&c) {
+                o.custom.push(c);
+            }
+            state.capturing_shortcut = false;
+            ui.memory_mut(|m| m.surrender_focus(id));
+        } else if widgets::wide_button(ui, "Cancel").clicked() {
+            state.capturing_shortcut = false;
+            ui.memory_mut(|m| m.surrender_focus(id));
+        }
+    } else if widgets::wide_button_icon(ui, Some(Icon::Plus), "Add shortcut").clicked() {
+        state.capturing_shortcut = true;
+    }
+    widgets::divider(ui);
+    theme::section(ui, "Appearance");
+    widgets::segmented(ui, &mut o.style, &[(crate::edit::KeycapStyle::Dark, "Dark"), (crate::edit::KeycapStyle::Light, "Light"), (crate::edit::KeycapStyle::Outline, "Outline")]);
+    toggle_help(ui, "Background behind keys", "", &mut o.backdrop);
+    theme::section(ui, "Position");
+    super::camera_ui::position_grid(ui, &mut o.position);
     widgets::divider(ui);
     ui.add_space(8.0);
     let label = if o.timeline { "Hide shortcuts timeline" } else { "Show shortcuts timeline" };

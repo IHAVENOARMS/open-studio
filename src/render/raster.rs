@@ -77,6 +77,24 @@ impl Canvas {
         }
     }
 
+    /// Outline of a rounded rectangle, `line` wide, inside its edge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rrect_ring(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, line: f32, c: [f32; 4]) {
+        let (x0, y0) = (x.floor().max(0.0) as usize, y.floor().max(0.0) as usize);
+        let (x1, y1) = (((x + w).ceil() as usize).min(self.w), ((y + h).ceil() as usize).min(self.h));
+        let (cx, cy, hw, hh) = (x + w * 0.5, y + h * 0.5, w * 0.5, h * 0.5);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let qx = (px as f32 + 0.5 - cx).abs() - hw + r;
+                let qy = (py as f32 + 0.5 - cy).abs() - hh + r;
+                let d = (qx.max(0.0).hypot(qy.max(0.0))) + qx.max(qy).min(0.0) - r;
+                // Inside the outer edge and within `line` of it.
+                let cover = (0.5 - d).clamp(0.0, 1.0) * (d + line + 0.5).clamp(0.0, 1.0);
+                self.blend(px, py, [c[0], c[1], c[2]], cover * c[3]);
+            }
+        }
+    }
+
     /// Filled convex or concave polygon, 4x4 supersampled.
     pub fn polygon(&mut self, pts: &[(f32, f32)], c: [f32; 3], alpha: f32) {
         let (x0, x1) = pts.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));

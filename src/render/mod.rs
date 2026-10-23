@@ -937,21 +937,33 @@ impl Compositor {
             self.queue.write_buffer(&sp.buf, 0, bytemuck::bytes_of(&s));
         }
 
-        // Keycap overlay: bottom centre of the frame (above a bottom
-        // caption), outside the camera.
+        // Keycap overlay at its grid position (default bottom centre, above
+        // a bottom caption), outside the camera.
         let keys = frame.keys.as_ref().filter(|k| k.opacity > 0.0 && !k.keys.is_empty());
         if let Some(ko) = keys {
             let key_h = (oh as f64 * 0.075 * ko.size).round().max(12.0) as u32;
-            let id = format!("{}|{key_h}", ko.keys.join("+"));
+            let so = &edit.shortcuts;
+            let id = format!("{}|{key_h}|{:?}|{}", ko.keys.join("+"), so.style, so.backdrop);
             if self.keycaps.as_ref().map(|(k, _)| k) != Some(&id) {
-                let img = keycaps::render(&ko.keys, key_h);
+                let img = keycaps::render(&ko.keys, key_h, so.style, so.backdrop);
                 let sp = self.make_sprite(&img.rgba, img.width, img.height, (img.width as f32, img.height as f32), (0.0, 0.0));
                 self.keycaps = Some((id, sp));
             }
             let (_, sp) = self.keycaps.as_ref().unwrap();
             let (w, h) = (sp.size.0 as f64 * ko.scale, sp.size.1 as f64 * ko.scale);
-            let bottom = if caption.is_some() { caption_top - oh as f64 * 0.015 } else { oh as f64 * 0.94 };
-            let (cx, cy) = (ow as f64 * 0.5, bottom - sp.size.1 as f64 * 0.5);
+            // On the 3×3 grid; at the bottom, above a bottom caption.
+            let (sw, sh) = (sp.size.0 as f64, sp.size.1 as f64);
+            let margin = oh as f64 * 0.05;
+            let cx = match so.position[0] {
+                0 => margin + sw * 0.5,
+                2 => ow as f64 - margin - sw * 0.5,
+                _ => ow as f64 * 0.5,
+            };
+            let cy = match so.position[1] {
+                0 => margin + sh * 0.5,
+                1 => oh as f64 * 0.5,
+                _ => (if caption.is_some() { caption_top - oh as f64 * 0.015 } else { oh as f64 * 0.94 }) - sh * 0.5,
+            };
             let (x0, y0) = (cx - w * 0.5, cy - h * 0.5);
             let s = quad(
                 [ndc(ow, oh, x0, y0), ndc(ow, oh, x0 + w, y0), ndc(ow, oh, x0, y0 + h), ndc(ow, oh, x0 + w, y0 + h)],

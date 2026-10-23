@@ -92,7 +92,7 @@ pub struct Editor {
     tasks_dismissed: bool,
     saving_as: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
     /// Detected shortcuts by single-key setting, for the shortcuts track.
-    shortcuts_cache: Option<(bool, Vec<crate::shortcuts::Shortcut>)>,
+    shortcuts_cache: Option<((bool, Vec<String>), Vec<crate::shortcuts::Shortcut>)>,
     /// Short message under the title ("Saved", errors).
     status: Option<Toast>,
     /// Short note at the bottom ("Removed 6.0s — Ctrl+Z to undo").
@@ -918,9 +918,10 @@ impl Editor {
         // Detected shortcuts for the timeline track, recomputed only when
         // the single-key setting changes.
         let shortcuts = if self.edit.shortcuts.timeline {
-            let single = self.edit.shortcuts.single_keys;
-            if self.shortcuts_cache.as_ref().is_none_or(|(s, _)| *s != single) {
-                self.shortcuts_cache = Some((single, crate::shortcuts::detect(&self.rec, single)));
+            let key = (self.edit.shortcuts.single_keys, self.edit.shortcuts.custom.clone());
+            if self.shortcuts_cache.as_ref().is_none_or(|(k, _)| *k != key) {
+                let list = crate::shortcuts::detect(&self.rec, key.0, &key.1);
+                self.shortcuts_cache = Some((key, list));
             }
             self.shortcuts_cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
         } else {

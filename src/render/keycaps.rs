@@ -22,8 +22,10 @@ fn modifier(key: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
-/// Renders the keys for one shortcut, each `key_h` pixels tall.
-pub fn render(keys: &[&str], key_h: u32) -> Image {
+/// Renders the keys for one shortcut, each `key_h` pixels tall, in `style`,
+/// with or without the plate behind them.
+pub fn render(keys: &[&str], key_h: u32, style: crate::edit::KeycapStyle, backdrop: bool) -> Image {
+    use crate::edit::KeycapStyle;
     let h = key_h as f32;
     let font = font();
     let gap = (h * 0.09).round();
@@ -48,18 +50,34 @@ pub fn render(keys: &[&str], key_h: u32) -> Image {
     let mut cv = Canvas::new(w, ih);
 
     // Backdrop behind the row of keys.
-    cv.rrect(0.0, 0.0, w as f32, ih as f32, h * 0.24, [0.04, 0.04, 0.045, 0.55], [0.03, 0.03, 0.035, 0.6]);
+    if backdrop {
+        cv.rrect(0.0, 0.0, w as f32, ih as f32, h * 0.24, [0.04, 0.04, 0.045, 0.55], [0.03, 0.03, 0.035, 0.6]);
+    }
+    let ink = if style == KeycapStyle::Light { [0.1, 0.1, 0.11] } else { [1.0, 1.0, 1.0] };
 
     let mut x = pad;
     for (k, kw) in keys.iter().zip(&widths) {
         let r = h * 0.17;
-        // Drop shadow, rim and face.
-        cv.rrect(x, pad + shadow, *kw, h, r, [0.0, 0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 0.5]);
-        cv.rrect(x, pad, *kw, h, r, [0.32, 0.32, 0.33, 1.0], [0.15, 0.15, 0.16, 1.0]);
         let rim = (h * 0.018).max(1.0);
-        cv.rrect(x + rim, pad + rim, kw - 2.0 * rim, h - 2.0 * rim, r - rim, [0.175, 0.175, 0.18, 1.0], [0.135, 0.135, 0.14, 1.0]);
+        match style {
+            KeycapStyle::Dark => {
+                // Drop shadow, rim and face.
+                cv.rrect(x, pad + shadow, *kw, h, r, [0.0, 0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 0.5]);
+                cv.rrect(x, pad, *kw, h, r, [0.32, 0.32, 0.33, 1.0], [0.15, 0.15, 0.16, 1.0]);
+                cv.rrect(x + rim, pad + rim, kw - 2.0 * rim, h - 2.0 * rim, r - rim, [0.175, 0.175, 0.18, 1.0], [0.135, 0.135, 0.14, 1.0]);
+            }
+            KeycapStyle::Light => {
+                cv.rrect(x, pad + shadow, *kw, h, r, [0.0, 0.0, 0.0, 0.35], [0.0, 0.0, 0.0, 0.35]);
+                cv.rrect(x, pad, *kw, h, r, [0.86, 0.86, 0.88, 1.0], [0.7, 0.7, 0.73, 1.0]);
+                cv.rrect(x + rim, pad + rim, kw - 2.0 * rim, h - 2.0 * rim, r - rim, [0.99, 0.99, 1.0, 1.0], [0.93, 0.93, 0.95, 1.0]);
+            }
+            KeycapStyle::Outline => {
+                let line = (h * 0.035).max(1.5);
+                cv.rrect_ring(x, pad, *kw, h, r, line, [1.0, 1.0, 1.0, 0.95]);
+            }
+        }
         if let Some(f) = font {
-            let white = [1.0, 1.0, 1.0];
+            let white = ink;
             if let Some(("", name)) = modifier(k) {
                 // Word-only modifier (Ctrl, Alt): centred like a PC keycap.
                 let size = h * 0.32;
@@ -93,7 +111,7 @@ pub fn render(keys: &[&str], key_h: u32) -> Image {
 mod tests {
     #[test]
     fn renders_shortcut() {
-        let img = super::render(&["Ctrl", "Alt", "Super", "Shift", "M"], 96);
+        let img = super::render(&["Ctrl", "Alt", "Super", "Shift", "M"], 96, crate::edit::KeycapStyle::Dark, true);
         assert_eq!(img.rgba.len(), (img.width * img.height * 4) as usize);
         assert!(img.width > 300 && img.height > 96);
         // Somewhere on the M key there is white text.

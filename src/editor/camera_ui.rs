@@ -567,7 +567,7 @@ pub fn segment_editor(ui: &mut Ui, st: &mut State, edit: &mut EditConfig, rec: &
 }
 
 /// The 3x3 dot grid (no centre). Returns true when the position changed.
-fn position_grid(ui: &mut Ui, pos: &mut [u8; 2]) -> bool {
+pub(super) fn position_grid(ui: &mut Ui, pos: &mut [u8; 2]) -> bool {
     let w = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(w, 132.0), Sense::hover());
     ui.painter().rect_filled(r, CornerRadius::same(10), Color32::from_rgb(0x1b, 0x1d, 0x22));
