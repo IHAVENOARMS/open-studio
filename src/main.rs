@@ -1,6 +1,7 @@
 mod app;
 mod bidi;
 mod clicks;
+mod clipboard;
 mod control;
 mod cursor_themes;
 mod editor;

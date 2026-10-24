@@ -268,6 +268,19 @@ impl Target {
 
 /// Renders the edited frame at recording time `t` to a PNG `height` pixels tall.
 pub fn export_frame(comp: &mut Compositor, dir: &Path, rec: &Recording, edit: &EditConfig, t: f64, height: u32, out: &Path) -> Result<()> {
+    render_frame(comp, dir, rec, edit, t, height)?.save(out).context("writing the image")
+}
+
+/// The edited frame at recording time `t` as a PNG file's bytes.
+pub fn frame_png(comp: &mut Compositor, dir: &Path, rec: &Recording, edit: &EditConfig, t: f64, height: u32) -> Result<Vec<u8>> {
+    let img = render_frame(comp, dir, rec, edit, t, height)?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png, image::ImageFormat::Png).context("encoding the image")?;
+    Ok(png.into_inner())
+}
+
+/// The edited frame at recording time `t`, `height` pixels tall.
+pub fn render_frame(comp: &mut Compositor, dir: &Path, rec: &Recording, edit: &EditConfig, t: f64, height: u32) -> Result<image::RgbaImage> {
     let paths = ProjectPaths::new(dir);
     let tracks = Tracks::build(rec, edit);
     let (w, h) = output_size(tracks.layout.aspect, height);
@@ -296,8 +309,7 @@ pub fn export_frame(comp: &mut Compositor, dir: &Path, rec: &Recording, edit: &E
     comp.render(&target.view, (w, h), &tracks.layout, edit, &fs);
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     target.read(comp, &mut rgba)?;
-    image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| anyhow!("frame buffer size"))?.save(out).context("writing the image")?;
-    Ok(())
+    image::RgbaImage::from_raw(w, h, rgba).ok_or_else(|| anyhow!("frame buffer size"))
 }
 
 /// One input to the export mix.

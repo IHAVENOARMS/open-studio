@@ -1141,6 +1141,15 @@ impl Editor {
         if in_transcript {
             return;
         }
+        // Ctrl+C copies the current frame as an image (egui turns the key
+        // into a Copy event).
+        if ctx.input_mut(|i| {
+            let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+            i.events.retain(|e| !matches!(e, egui::Event::Copy));
+            i.consume_key(egui::Modifiers::COMMAND, Key::C) || copy
+        }) {
+            self.copy_frame(ctx);
+        }
         // C splits the clip at the playhead (as in Screen Studio); Shift+C crops.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
             self.edit.split_at(self.time, self.rec.duration);
@@ -1568,6 +1577,13 @@ impl Editor {
         self.comp.render(&target.view, target.size, &self.tracks.layout, &self.edit, &fs);
 
         let resp = ui.allocate_rect(rect, Sense::click());
+        resp.context_menu(|ui| {
+            if menu_item(ui, "Copy current frame as image", "Ctrl+C", false).clicked() {
+                self.copy_frame(ui.ctx());
+                ui.close();
+            }
+        });
+        let target = self.target.as_ref().unwrap();
         ui.painter().image(
             target.id,
             rect,
@@ -2052,21 +2068,8 @@ fn trash(dir: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Puts a file on the Wayland clipboard as a URI list, which file managers,
+/// Puts a file on the clipboard as a URI list, which file managers,
 /// browsers and chat apps accept as a pasted file.
 pub fn copy_file_to_clipboard(path: &std::path::Path) -> Result<(), String> {
-    use std::io::Write;
-    let uri = format!("file://{}\n", path.display());
-    let mut child = std::process::Command::new("wl-copy")
-        .args(["--type", "text/uri-list"])
-        .stdin(std::process::Stdio::piped())
-        // wl-copy keeps serving the clipboard from a background process;
-        // don't let it hold our stdout/stderr open.
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("wl-copy not available: {e}"))?;
-    child.stdin.take().unwrap().write_all(uri.as_bytes()).map_err(|e| e.to_string())?;
-    child.wait().map_err(|e| e.to_string())?;
-    Ok(())
+    crate::clipboard::copy("text/uri-list", format!("file://{}\n", path.display()).as_bytes())
 }

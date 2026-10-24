@@ -34,6 +34,7 @@ pub(super) enum FileTask {
 enum Cmd {
     Export,
     Frame,
+    CopyFrame,
     ExtractAll,
     Extract(PathBuf, &'static str),
     ExportClipboard,
@@ -67,6 +68,7 @@ impl Editor {
         let mut out = vec![
             e("Export", Icon::ExportFilled, "Export…", "", Cmd::Export),
             e("Export", Icon::Export, "Export current frame as image", "", Cmd::Frame),
+            e("Export", Icon::Clipboard, "Copy current frame as image", "Ctrl+C", Cmd::CopyFrame),
             e("Export", Icon::ArrowRight, "Extract recording files", "", Cmd::ExtractAll),
             e("Export", Icon::ExtractFile, "Extract screen recording file", "", Cmd::Extract(paths.video(), "screen")),
         ];
@@ -106,6 +108,27 @@ impl Editor {
             }
         }
         out
+    }
+
+    /// Copies the edited frame under the playhead to the clipboard as a PNG,
+    /// at export size (Ctrl+C, or the preview's right-click menu).
+    pub(super) fn copy_frame(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        self.file_done = Some(rx);
+        let (dir, rec, edit, t) = (self.dir.clone(), self.rec.clone(), self.edit.clone(), self.time);
+        let (device, queue) = (self.comp.device().clone(), self.comp.queue().clone());
+        let height = Settings::load().height.unwrap_or(self.rec.height.clamp(720, 2160));
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let mut comp = crate::render::Compositor::new(device, queue);
+            let res = crate::export::frame_png(&mut comp, &dir, &rec, &edit, t, height).map_err(|e| format!("{e:#}"));
+            let msg = match res.and_then(|png| crate::clipboard::copy("image/png", &png)) {
+                Ok(()) => "Frame copied: paste it anywhere as an image".to_string(),
+                Err(e) => format!("Couldn't copy the frame: {e}"),
+            };
+            let _ = tx.send(msg);
+            ctx.request_repaint();
+        });
     }
 
     pub(super) fn open_command_menu(&mut self) {
@@ -258,6 +281,7 @@ impl Editor {
                 let name = format!("{} {:02}.{:02}.{:02}.png", self.name, (secs / 60.0) as u32, secs as u32 % 60, ((secs.fract()) * 100.0) as u32);
                 self.file_task = Some((dialogs::save_file(ctx.clone(), "Export current frame as image", &dir, &name), FileTask::Frame(self.time)));
             }
+            Cmd::CopyFrame => self.copy_frame(ctx),
             Cmd::ExtractAll => {
                 self.file_task = Some((dialogs::open_folder(ctx.clone(), "Extract recording files to", Some(dir)), FileTask::ExtractAll));
             }
