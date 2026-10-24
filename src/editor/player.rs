@@ -10,6 +10,10 @@ use std::time::Instant;
 /// Preview frames are decoded at most this wide. Full resolution up to 4K so
 /// zoomed-in previews stay sharp.
 pub const PREVIEW_MAX_WIDTH: u32 = 3840;
+/// Width cap while playing backwards.
+const REVERSE_MAX_WIDTH: u32 = 1920;
+/// Frames decoded per backwards chunk: about a third of a second at 30 fps.
+const REVERSE_CHUNK: i64 = 10;
 
 pub struct Frame {
     pub index: i64,
@@ -42,7 +46,8 @@ impl Player {
         let _ = self.tx.send(Cmd::Seek(t));
     }
 
-    /// Plays from `from` (video time) as of `at`, `speed` video seconds per second.
+    /// Plays from `from` (video time) as of `at`, `speed` video seconds per
+    /// second; negative plays backwards (J shuttle).
     pub fn play(&self, from: f64, at: Instant, speed: f64) {
         let _ = self.tx.send(Cmd::Play { from, at, speed });
     }
@@ -108,6 +113,11 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
     // Consecutive decode failures while playing; a few are retried (the
     // decoder is reopened) before playback stops.
     let mut failures = 0;
+    // Frames decoded ahead for playing backwards, oldest first.
+    let mut behind: Vec<Arc<Frame>> = vec![];
+    let mut pending: Option<Receiver<(Vec<Arc<Frame>>, f64)>> = None;
+    // How long a backwards chunk takes to decode, measured.
+    let mut decode_secs = 0.15;
     let publish = |st: &State| {
         *latest.lock().unwrap() = Some(st.frame());
         ctx.request_repaint();
@@ -152,6 +162,57 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
             Some(Cmd::Pause) => playing = None,
             None => {}
         }
+        if let Some((from, at, speed)) = playing.filter(|p| p.2 < 0.0) {
+            let t = from + at.elapsed().as_secs_f64() * speed;
+            let want = (t * fps).floor() as i64;
+            if want < 0 {
+                playing = None;
+                continue;
+            }
+            let speed = -speed;
+            // A finished chunk joins the frames still to show.
+            if let Some(rx) = &pending {
+                if let Ok((mut older, took)) = rx.try_recv() {
+                    pending = None;
+                    decode_secs = 0.5 * decode_secs + 0.5 * took;
+                    behind.retain(|f| f.index <= want + 1);
+                    older.retain(|f| behind.first().is_none_or(|b| f.index < b.index));
+                    older.append(&mut behind);
+                    behind = older;
+                }
+            }
+            // Up to 2x, every frame in chunks fetched one after another,
+            // the next while this one shows. Faster, single frames from
+            // where the playhead will be when they're ready.
+            let dense = speed <= 2.0;
+            let lead = (decode_secs * fps * speed).ceil() as i64;
+            let covered = behind.first().is_some_and(|f| f.index <= want);
+            let next = match behind.first() {
+                Some(f) if dense && covered && f.index - want < lead + 2 => Some(f.index - 1),
+                _ if !covered => Some(want - lead),
+                _ => None,
+            };
+            if let (Some(hi), None) = (next.filter(|h| *h >= 0), &pending) {
+                let n = if dense { REVERSE_CHUNK } else { 1 };
+                let (tx, rx) = channel();
+                let (video, size) = (st.video.clone(), st.size);
+                std::thread::spawn(move || {
+                    let _ = tx.send(decode_chunk(&video, size, fps, (hi - n + 1).max(0), hi));
+                });
+                pending = Some(rx);
+            }
+            let shown = latest.lock().unwrap().as_ref().map(|f| f.index);
+            if let Some(f) = behind.iter().min_by_key(|f| (f.index - want).abs()) {
+                if shown != Some(f.index) {
+                    *latest.lock().unwrap() = Some(f.clone());
+                    ctx.request_repaint();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs_f64((1.0 / (fps * speed)).min(0.01)));
+            continue;
+        }
+        behind.clear();
+        pending = None;
         if let Some((from, at, speed)) = playing {
             let t = from + at.elapsed().as_secs_f64() * speed;
             let want = (t * fps).floor() as i64;
@@ -179,6 +240,23 @@ fn run(video: PathBuf, size: (u32, u32), fps: f64, rx: Receiver<Cmd>, latest: Ar
             }
         }
     }
+}
+
+/// Frames `lo..=hi` for playing backwards, decoded in one go (ffmpeg only
+/// decodes forwards), and how long that took. Smaller than forward frames to
+/// keep memory down; a pause shows the full-size frame again.
+fn decode_chunk(video: &std::path::Path, size: (u32, u32), fps: f64, lo: i64, hi: i64) -> (Vec<Arc<Frame>>, f64) {
+    let start = Instant::now();
+    let Ok(mut d) = Decoder::open(video, lo as f64 / fps, size, Some(REVERSE_MAX_WIDTH)) else { return (vec![], 0.0) };
+    let mut out = vec![];
+    for index in lo..=hi {
+        let mut rgba = Vec::new();
+        match d.read(&mut rgba) {
+            Ok(true) => out.push(Arc::new(Frame { index, width: d.width, height: d.height, rgba })),
+            _ => break,
+        }
+    }
+    (out, start.elapsed().as_secs_f64())
 }
 
 #[cfg(test)]
@@ -239,6 +317,52 @@ mod tests {
             p.pause();
             p.seek(t);
             wait(if round % 2 == 0 { 20 } else { 250 });
+        }
+    }
+
+    /// J shuttle: playing backwards shows earlier and earlier frames, close
+    /// to the clock, at 1x and at 8x. Opt-in: `cargo test -- --ignored backwards`.
+    #[test]
+    #[ignore]
+    fn plays_backwards_on_the_clock() {
+        let dir = std::env::temp_dir().join("open-studio-player-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("reverse.mp4");
+        if !video.exists() {
+            assert!(std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=30", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .arg(&video)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let p = Player::new(video, (1280, 720), 30, egui::Context::default());
+        let wait = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+        for (from, speed) in [(10.0, -1.0), (28.0, -8.0)] {
+            // Paused where J is pressed, as in the editor.
+            p.seek(from);
+            wait(300);
+            let at = Instant::now();
+            p.play(from, at, speed);
+            let mut last = i64::MAX;
+            let mut moved = 0;
+            for _ in 0..8 {
+                wait(150);
+                let f = p.latest().expect("no frame yet");
+                assert!(f.index <= last, "{speed}x: frame {} after {last}", f.index);
+                moved += (f.index < last) as u32;
+                last = f.index;
+            }
+            // Keeps moving, no stalls while the next chunk decodes.
+            assert!(moved >= 7, "{speed}x: the picture changed only {moved} times in 8 looks");
+            let expect = from + at.elapsed().as_secs_f64() * speed;
+            let got = last as f64 / 30.0;
+            assert!((got - expect).abs() < 0.25 * -speed + 0.2, "{speed}x: at {got:.2}s, clock says {expect:.2}s");
+            p.pause();
+            p.seek(5.0);
+            wait(300);
+            let f = p.latest().unwrap();
+            assert_eq!((f.index, f.width), (150, 1280), "a pause shows the full-size frame");
         }
     }
 }

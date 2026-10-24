@@ -150,6 +150,8 @@ pub struct Output {
     pub toast: Option<String>,
     /// The playhead is being dragged (for the Scrubber).
     pub scrubbing: bool,
+    /// Playback speed picked from the speed button.
+    pub rate: Option<f64>,
 }
 
 /// Maps recording time to x. With folded cuts the timeline shows "display
@@ -229,7 +231,7 @@ enum Hit {
 /// Transport controls under the preview: the scissors (split tool) on the
 /// left, time and play controls in the middle, and the waveform toggle with
 /// the timeline zoom on the right.
-pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, playing: bool) -> Output {
+pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, playing: bool, rate: f64) -> Output {
     let mut out = Output::default();
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
     let c = rect.center();
@@ -260,6 +262,35 @@ pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, pl
     if icon_button(ui, pos2(c.x + 64.0, c.y), "next", Icon::SkipForward, 18.0).clicked() {
         out.seek = Some(duration);
     }
+
+    // Playback speed: shows the J/L shuttle speed, and picks one.
+    let label = super::shuttle::label(if playing { rate } else { 1.0 });
+    let g = p.layout_no_wrap(label, egui::FontId::proportional(12.5), theme::TEXT);
+    let pill = Rect::from_min_size(pos2(c.x + 196.0, c.y - 12.0), vec2(g.size().x + 16.0, 24.0));
+    let resp = ui
+        .interact(pill, ui.scope_id().with("speed"), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("Playback speed  (J / K / L)");
+    let shuttling = playing && rate != 1.0;
+    let fill = if shuttling {
+        Color32::from_rgba_unmultiplied(0x5b, 0x45, 0xf0, 90)
+    } else if resp.hovered() {
+        Color32::from_white_alpha(22)
+    } else {
+        Color32::from_white_alpha(10)
+    };
+    p.rect_filled(pill, CornerRadius::same(7), fill);
+    p.galley(pill.center() - g.size() / 2.0, g, if shuttling { Color32::WHITE } else { theme::TEXT });
+    egui::Popup::menu(&resp).show(|ui| {
+        ui.set_min_width(140.0);
+        ui.spacing_mut().item_spacing.y = 2.0;
+        for r in super::shuttle::MENU {
+            if super::menu_item(ui, &super::shuttle::label(r), "", playing && rate == r).clicked() {
+                out.rate = Some(r);
+                ui.close();
+            }
+        }
+    });
 
     // Scissors: the split tool.
     let sc = pos2(rect.left() + 20.0, c.y);

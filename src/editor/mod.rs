@@ -10,6 +10,7 @@ mod mask_overlay;
 pub mod player;
 pub use widgets::toggle;
 mod scrub;
+mod shuttle;
 mod sidebar;
 mod timeline;
 mod transcript_ui;
@@ -125,6 +126,9 @@ pub struct Editor {
     shown_index: i64,
     time: f64,
     playing: Option<(f64, Instant)>,
+    /// Shuttle speed while playing (J/K/L): 1 normal, 2..16 faster, negative
+    /// backwards. On top of slice speeds.
+    rate: f64,
     selected: Option<Selection>,
     tab: Tab,
     sidebar: sidebar::State,
@@ -194,6 +198,7 @@ impl Editor {
             shown_index: -1,
             time: start,
             playing: None,
+            rate: 1.0,
             selected: None,
             tab: Tab::Background,
             sidebar: sidebar::State::default(),
@@ -223,21 +228,44 @@ impl Editor {
     fn set_playing(&mut self, play: bool) {
         let (start, end) = self.playable();
         if play {
-            if self.time >= end - 0.05 {
+            if self.rate > 0.0 && self.time >= end - 0.05 {
                 self.time = start;
             }
-            let now = Instant::now();
-            self.playing = Some((self.time, now));
-            self.player.play(self.time, now, self.edit.slice_props(self.time).speed);
-            self.audio.play(self.time, &self.edit.slice_props(self.time));
-            self.camera_follow(Some(now));
+            self.run_clock();
         } else {
             self.playing = None;
+            self.rate = 1.0;
             self.player.pause();
             self.audio.pause();
             self.player.seek(self.time);
             self.camera_follow(None);
         }
+    }
+
+    /// Shuttle (J/K/L, the speed menu): plays at `rate`, or pauses at 0.
+    fn set_rate(&mut self, rate: f64) {
+        if rate == 0.0 {
+            self.set_playing(false);
+            return;
+        }
+        self.rate = rate;
+        self.set_playing(true);
+    }
+
+    /// Starts every player from the playhead, now, at the slice speed times
+    /// the shuttle rate.
+    fn run_clock(&mut self) {
+        let now = Instant::now();
+        self.playing = Some((self.time, now));
+        let mut slice = self.edit.slice_props(self.time);
+        slice.speed *= self.rate;
+        self.player.play(self.time, now, slice.speed);
+        if shuttle::audible(self.rate) {
+            self.audio.play(self.time, &slice);
+        } else {
+            self.audio.pause();
+        }
+        self.camera_follow(Some(now));
     }
 
     /// Keeps the camera player on the playhead: playing from `now`, or
@@ -247,7 +275,7 @@ impl Editor {
         let t = (self.time - c.offset - self.edit.camera.delay).max(0.0);
         for (p, _) in [&self.camera, &self.matte].into_iter().flatten() {
             match now {
-                Some(at) => p.play(t, at, self.edit.slice_props(self.time).speed),
+                Some(at) => p.play(t, at, self.edit.slice_props(self.time).speed * self.rate),
                 None => {
                     p.pause();
                     p.seek(t);
@@ -259,11 +287,7 @@ impl Editor {
     fn seek(&mut self, t: f64) {
         self.time = t.clamp(0.0, self.rec.duration);
         if self.playing.is_some() {
-            let now = Instant::now();
-            self.playing = Some((self.time, now));
-            self.player.play(self.time, now, self.edit.slice_props(self.time).speed);
-            self.audio.play(self.time, &self.edit.slice_props(self.time));
-            self.camera_follow(Some(now));
+            self.run_clock();
         } else {
             self.player.seek(self.time);
             self.camera_follow(None);
@@ -475,12 +499,8 @@ impl Editor {
         self.matte = open_matte(&self.dir, &self.rec, &self.edit, self.time, &self.ctx);
         self.audio = audio::AudioPreview::new(&self.rec, &self.edit);
         // Resume where we were.
-        if let Some((_, _)) = self.playing {
-            let now = Instant::now();
-            self.playing = Some((self.time, now));
-            self.player.play(self.time, now, self.edit.slice_props(self.time).speed);
-            self.audio.play(self.time, &self.edit.slice_props(self.time));
-            self.camera_follow(Some(now));
+        if self.playing.is_some() {
+            self.run_clock();
         } else {
             self.player.seek(self.time);
             self.camera_follow(None);
@@ -844,15 +864,18 @@ impl Editor {
         // Clock.
         if let Some((from, at)) = self.playing {
             // Stop where the kept video ends, not past a cut running to the end.
-            let (_, end) = self.playable();
+            let (start, end) = self.playable();
             let slice = self.edit.slice_props(from);
-            self.time = from + at.elapsed().as_secs_f64() * slice.speed;
+            self.time = from + at.elapsed().as_secs_f64() * slice.speed * self.rate;
             if self.time >= end {
                 self.time = end;
                 self.set_playing(false);
+            } else if self.time <= start && self.rate < 0.0 {
+                self.time = start;
+                self.set_playing(false);
             } else if let Some(c) = self.edit.cut_at(self.time) {
-                // Jump over cut stretches.
-                self.seek(c.end.min(end));
+                // Jump over cut stretches, whichever way we're going.
+                self.seek(if self.rate < 0.0 { (c.start - 1e-3).max(start) } else { c.end.min(end) });
             } else if !self.edit.slice_props(self.time).same(&slice) {
                 // Entered a slice with another speed or volume: restart from here.
                 self.seek(self.time);
@@ -1022,9 +1045,12 @@ impl Editor {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(preview_rect), |ui| self.preview(ui, rs));
                 let bar_rect = egui::Rect::from_min_max(egui::pos2(avail.min.x, avail.max.y - bar_h), avail.max);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |ui| {
-                    let out = timeline::playback_bar(ui, &mut self.timeline, self.time, self.rec.duration, self.playing.is_some());
+                    let out = timeline::playback_bar(ui, &mut self.timeline, self.time, self.rec.duration, self.playing.is_some(), self.rate);
                     if out.toggle_play {
                         self.set_playing(self.playing.is_none());
+                    }
+                    if let Some(r) = out.rate {
+                        self.set_rate(r);
                     }
                     if let Some(t) = out.seek {
                         let (s, e) = self.edit.trim_range(self.rec.duration);
@@ -1145,6 +1171,23 @@ impl Editor {
         });
         if space {
             self.set_playing(self.playing.is_none());
+        }
+        // J/K/L shuttle. Holding K, J and L step a frame instead.
+        let (j, k, l, k_held) = ctx.input(|i| {
+            let plain = i.modifiers.is_none();
+            (plain && i.key_pressed(Key::J), plain && i.key_pressed(Key::K), plain && i.key_pressed(Key::L), i.key_down(Key::K))
+        });
+        let rate = if self.playing.is_some() { self.rate } else { 0.0 };
+        if k {
+            self.set_rate(shuttle::press_k(rate));
+        } else if k_held && (j || l) {
+            self.set_playing(false);
+            let step = 1.0 / self.rec.fps as f64;
+            self.seek(self.time + if j { -step } else { step });
+        } else if j {
+            self.set_rate(shuttle::press_j(rate));
+        } else if l {
+            self.set_rate(shuttle::press_l(rate));
         }
         if del {
             if let Some(sel) = self.selected.take() {
