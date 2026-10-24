@@ -50,6 +50,7 @@ enum Cmd {
     Tab(Tab),
     Preset(usize),
     ToggleLastSettings,
+    Guide,
 }
 
 struct Entry {
@@ -66,7 +67,7 @@ impl Editor {
         let e = |group, icon, label: &str, note, cmd| Entry { group, icon, label: label.to_string(), note, cmd };
         let paths = crate::project::ProjectPaths::new(&self.dir);
         let mut out = vec![
-            e("Export", Icon::ExportFilled, "Export…", "", Cmd::Export),
+            e("Export", Icon::ExportFilled, "Export…", "Ctrl+Shift+E", Cmd::Export),
             e("Export", Icon::Export, "Export current frame as image", "", Cmd::Frame),
             e("Export", Icon::Clipboard, "Copy current frame as image", "Ctrl+C", Cmd::CopyFrame),
             e("Export", Icon::ArrowRight, "Extract recording files", "", Cmd::ExtractAll),
@@ -83,6 +84,7 @@ impl Editor {
         out.push(e("Project", Icon::Folder, "Save project", "Ctrl+S", Cmd::Save));
         out.push(e("Project", Icon::Folder, "Save project as…", "Ctrl+Shift+S", Cmd::SaveAs));
         out.push(e("Project", Icon::ArrowRight, "Show project in folder", "", Cmd::ShowFolder));
+        out.push(e("Help", Icon::Keyboard, "Show keyboard shortcuts", "Ctrl+/", Cmd::Guide));
         out.push(e("Edit", Icon::Undo, "Undo", "Ctrl+Z", Cmd::Undo));
         out.push(e("Edit", Icon::Redo, "Redo", "Ctrl+Shift+Z", Cmd::Redo));
         out.push(e("Edit", Icon::Scissors, "Split clip at current time", "C", Cmd::Split));
@@ -282,6 +284,7 @@ impl Editor {
                 self.file_task = Some((dialogs::save_file(ctx.clone(), "Export current frame as image", &dir, &name), FileTask::Frame(self.time)));
             }
             Cmd::CopyFrame => self.copy_frame(ctx),
+            Cmd::Guide => self.open_guide(),
             Cmd::ExtractAll => {
                 self.file_task = Some((dialogs::open_folder(ctx.clone(), "Extract recording files to", Some(dir)), FileTask::ExtractAll));
             }

@@ -6,6 +6,7 @@ mod captions_ui;
 mod commands;
 mod cursors;
 mod curve;
+mod guide;
 mod mask_overlay;
 pub mod player;
 pub use widgets::toggle;
@@ -137,6 +138,8 @@ pub struct Editor {
     scrubber: scrub::Scrubber,
     /// Ctrl+K command menu, while open.
     command: Option<commands::CommandMenu>,
+    /// Ctrl+/ Shortcuts Guide, while open.
+    guide: Option<guide::Guide>,
     presets: Vec<crate::presets::Preset>,
     /// "New preset name..." field.
     preset_name: String,
@@ -206,6 +209,7 @@ impl Editor {
             export: None,
             scrubber: Default::default(),
             command: None,
+            guide: None,
             presets: vec![],
             preset_name: String::new(),
             preset_menu: None,
@@ -1061,6 +1065,7 @@ impl Editor {
 
         self.export_dialog(&ctx);
         self.command_menu(&ctx);
+        self.guide_window(&ctx);
         self.poll_file_tasks(&ctx);
 
         // Undo history: a change settles once no mouse button is held, so a
@@ -1130,6 +1135,14 @@ impl Editor {
             self.open_command_menu();
             return;
         }
+        if self.guide.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Slash)) {
+            self.open_guide();
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::E)) && self.export.is_none() {
+            self.export = Some(ExportDialog { settings: Settings::load(), job: None, picking_dir: None, saving: None });
+            return;
+        }
         // Ctrl+Z undoes; Ctrl+Shift+Z or Ctrl+Y redoes.
         let redo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, Key::Z) || i.consume_key(egui::Modifiers::COMMAND, Key::Y));
         let undo = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Z));
@@ -1149,6 +1162,16 @@ impl Editor {
             i.consume_key(egui::Modifiers::COMMAND, Key::C) || copy
         }) {
             self.copy_frame(ctx);
+        }
+        // Alt+B/L/S: camera layouts (Screen Studio's Control+B/L/S; Ctrl+S
+        // saves here).
+        if self.rec.camera.is_some() {
+            use crate::edit::CameraLayoutKind as K;
+            for (key, kind) in [(Key::B, K::Default), (Key::L, K::Fullscreen), (Key::S, K::Hide)] {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, key)) {
+                    self.add_layout_at_playhead(kind);
+                }
+            }
         }
         // C splits the clip at the playhead (as in Screen Studio); Shift+C crops.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
