@@ -53,6 +53,71 @@ pub const DEFAULT_MIC: &str = "@DEFAULT_SOURCE@";
 /// PipeWire node name) instead of a Pulse source.
 pub const STREAM_PREFIX: &str = "stream:";
 
+/// Live input level of a microphone, for the bar under the microphone
+/// icon (Screen Studio's sign that the microphone is picking up sound).
+pub struct MicMeter {
+    pipeline: gst::Pipeline,
+    /// Peak level 0..1000 (see `meter_fraction`).
+    level: Arc<std::sync::atomic::AtomicU32>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Bar length (0..1) for a peak level in dB: silence below -60 dB, full at
+/// 0 dB.
+pub fn meter_fraction(db: f64) -> f32 {
+    if !db.is_finite() {
+        return 0.0;
+    }
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32
+}
+
+impl MicMeter {
+    pub fn start(device: &str) -> Option<Self> {
+        Self::start_from(&format!("pulsesrc device=\"{device}\" client-name=\"Open Studio\""))
+    }
+
+    /// Meters what `src` (a GStreamer source description) produces.
+    fn start_from(src: &str) -> Option<Self> {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        gst::init().ok()?;
+        let desc = format!("{src} ! level interval=50000000 post-messages=true ! fakesink sync=false");
+        let pipeline = gst::parse::launch(&desc).ok()?.downcast::<gst::Pipeline>().ok()?;
+        let bus = pipeline.bus()?;
+        pipeline.set_state(gst::State::Playing).ok()?;
+        let level = Arc::new(AtomicU32::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (l, st) = (level.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !st.load(Ordering::Relaxed) {
+                let Some(msg) = bus.timed_pop_filtered(gst::ClockTime::from_mseconds(100), &[gst::MessageType::Element, gst::MessageType::Error]) else {
+                    continue;
+                };
+                if let gst::MessageView::Error(_) = msg.view() {
+                    l.store(0, Ordering::Relaxed);
+                    return;
+                }
+                let Some(s) = msg.structure().filter(|s| s.name() == "level") else { continue };
+                let Ok(peaks) = s.get::<gst::glib::ValueArray>("peak") else { continue };
+                let db = peaks.iter().filter_map(|v| v.get::<f64>().ok()).fold(f64::NEG_INFINITY, f64::max);
+                l.store((meter_fraction(db) * 1000.0) as u32, Ordering::Relaxed);
+            }
+        });
+        Some(Self { pipeline, level, stop })
+    }
+
+    /// Current level, 0..1.
+    pub fn level(&self) -> f32 {
+        self.level.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0
+    }
+}
+
+impl Drop for MicMeter {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
 /// True when a playback stream with this node name exists right now.
 fn stream_exists(name: &str) -> bool {
     std::process::Command::new("pactl")
@@ -208,6 +273,25 @@ impl AudioCapture {
         }
         let _ = &self.path;
         Ok(w.first_ns.map(|first_ns| AudioResult { first_ns, frames }))
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::*;
+
+    #[test]
+    fn meter_follows_the_level() {
+        assert_eq!(meter_fraction(f64::NEG_INFINITY), 0.0);
+        assert_eq!(meter_fraction(-80.0), 0.0);
+        assert_eq!(meter_fraction(-30.0), 0.5);
+        assert_eq!(meter_fraction(3.0), 1.0);
+        // A half-scale tone reads about -6 dB; silence reads nothing.
+        let tone = MicMeter::start_from("audiotestsrc is-live=true wave=sine volume=0.5").unwrap();
+        let quiet = MicMeter::start_from("audiotestsrc is-live=true wave=silence").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!((tone.level() - 0.9).abs() < 0.05, "tone level {}", tone.level());
+        assert_eq!(quiet.level(), 0.0);
     }
 }
 

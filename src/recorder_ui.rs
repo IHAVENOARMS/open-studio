@@ -138,6 +138,10 @@ struct Shared {
     can_pause: bool,
     /// Recording flags made so far.
     flags: usize,
+    /// Level of the chosen microphone, while the bar is showing.
+    mic_meter: Option<record::audio::MicMeter>,
+    /// Microphone the meter was started for.
+    mic_meter_for: Option<String>,
     /// Seconds left before recording starts, while counting down.
     countdown: Option<f64>,
     /// Clicked the countdown to cancel it.
@@ -294,6 +298,8 @@ pub fn run() -> Result<Outcome> {
             paused: false,
             can_pause: false,
             flags: 0,
+            mic_meter: None,
+            mic_meter_for: None,
             countdown: None,
             cancel_countdown: false,
             recorded_rect: Rect::NOTHING,
@@ -574,6 +580,8 @@ impl Rt {
     /// what will be recorded, then recording starts.
     fn begin_countdown(&mut self, req: DirectRequest) {
         self.destroy_surfaces();
+        self.shared.mic_meter = None;
+        self.shared.mic_meter_for = None;
         self.shared.recorded_rect = rect_of(&req);
         self.shared.cancel_countdown = false;
         self.shared.countdown = Some(self.shared.settings.countdown as f64);
@@ -626,6 +634,8 @@ impl Rt {
     fn begin_recording(&mut self, req: DirectRequest) {
         // Remove the picker before capture starts so it isn't recorded.
         self.destroy_surfaces();
+        self.shared.mic_meter = None;
+        self.shared.mic_meter_for = None;
         let _ = self.conn.roundtrip();
         std::thread::sleep(std::time::Duration::from_millis(180));
         let recorded = req.name.clone().unwrap_or_default();
@@ -1372,6 +1382,15 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         }
         icons::paint(&p, Rect::from_center_size(pos2(r.left() + 16.0, cy), vec2(22.0, 22.0)), icon, col);
         p.text(pos2(r.left() + 36.0, cy), Align2::LEFT_CENTER, label, FontId::proportional(15.0), col);
+        if i == 1 {
+            // The white bar under the microphone shows it's picking up sound.
+            if let Some(level) = mic_level(sh) {
+                let track = Rect::from_min_size(pos2(r.left() + 6.0, cy + 13.0), vec2(20.0, 2.0));
+                p.rect_filled(track, 1.0, Color32::from_white_alpha(30));
+                p.rect_filled(Rect::from_min_size(track.min, vec2(track.width() * level, 2.0)), 1.0, Color32::WHITE);
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
         if enabled && resp.clicked() {
             sh.menu = if sh.menu == Some(i) { None } else { Some(i) };
@@ -2041,6 +2060,22 @@ fn snap_area(mut a: Rect, screen: Rect, drag: AreaDrag) -> (Rect, Vec<Guide>) {
     (a, lines)
 }
 
+/// Level of the chosen microphone (0..1), metering it from first ask until
+/// recording starts. None without a microphone.
+fn mic_level(sh: &mut Shared) -> Option<f32> {
+    let Some(mic) = sh.settings.microphone.clone() else {
+        sh.mic_meter = None;
+        sh.mic_meter_for = None;
+        return None;
+    };
+    // One try per microphone: a meter that can't start isn't retried every frame.
+    if sh.mic_meter_for.as_deref() != Some(mic.as_str()) {
+        sh.mic_meter = record::audio::MicMeter::start(&mic);
+        sh.mic_meter_for = Some(mic);
+    }
+    Some(sh.mic_meter.as_ref()?.level())
+}
+
 /// Countdown circle size, logical pixels.
 const COUNTDOWN_SIZE: f32 = 200.0;
 
@@ -2436,6 +2471,8 @@ mod tests {
             paused: false,
             can_pause: true,
             flags: 0,
+            mic_meter: None,
+            mic_meter_for: None,
             countdown: None,
             cancel_countdown: false,
             recorded_rect: Rect::NOTHING,
