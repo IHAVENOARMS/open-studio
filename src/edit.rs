@@ -44,6 +44,50 @@ impl ZoomSegment {
     }
 }
 
+/// A phone drawn around a device recording (Screen Studio's device frames,
+/// drawn here rather than photographed).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct DeviceFrame {
+    pub enabled: bool,
+    pub color: FrameColor,
+}
+
+impl Default for DeviceFrame {
+    fn default() -> Self {
+        Self { enabled: true, color: FrameColor::Black }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameColor {
+    Black,
+    Silver,
+    Titanium,
+    Blue,
+}
+
+impl FrameColor {
+    pub const ALL: [FrameColor; 4] = [Self::Black, Self::Silver, Self::Titanium, Self::Blue];
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Black => "Black",
+            Self::Silver => "Silver",
+            Self::Titanium => "Titanium",
+            Self::Blue => "Blue",
+        }
+    }
+    /// sRGB body colour.
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            Self::Black => [0x1c, 0x1c, 0x1f],
+            Self::Silver => [0xd9, 0xdb, 0xde],
+            Self::Titanium => [0x8e, 0x88, 0x80],
+            Self::Blue => [0x2f, 0x3e, 0x5c],
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaskKind {
     /// "Sensitive data": the region is blurred.
@@ -778,6 +822,8 @@ pub struct EditConfig {
     pub typing_removed: Vec<f64>,
     /// Hide sensitive data and Hide faces.
     pub privacy: PrivacySettings,
+    /// Phone frame around device recordings.
+    pub device_frame: DeviceFrame,
     /// Part of the screen recording kept (Crop): x, y, w, h as fractions.
     pub crop: [f64; 4],
     pub captions: CaptionSettings,
@@ -850,6 +896,7 @@ impl Default for EditConfig {
             slices: vec![],
             typing_removed: vec![],
             privacy: PrivacySettings::default(),
+            device_frame: DeviceFrame::default(),
             crop: [0.0, 0.0, 1.0, 1.0],
             captions: CaptionSettings::default(),
             camera: CameraSettings::default(),

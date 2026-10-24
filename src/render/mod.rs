@@ -52,6 +52,8 @@ struct SceneUniform {
     crop: [f32; 4],
     /// Screen card placement: offset x, y, scale.
     screen_xf: [f32; 4],
+    /// Device frame: on (1/0), bezel width in canvas units.
+    device: [f32; 4],
 }
 
 #[repr(C)]
@@ -753,10 +755,12 @@ impl Compositor {
         let lod = density.log2().max(0.0) as f32;
         let bicubic = if density < 0.9 { 1.0 } else { 0.0 };
         let samples = if edit.motion_blur { blur_samples(layout, frame, edit, oh as f64) } else { 1 };
+        let device = layout.device;
         let u = SceneUniform {
             out_size: [ow, oh],
             aspect: layout.aspect as f32,
-            radius: (edit.radius / 1080.0) as f32,
+            // A phone's outer corners follow its screen's, a bezel out.
+            radius: if device { (edit.radius / 1080.0 + (card.w - c.w) * 0.5) as f32 } else { (edit.radius / 1080.0) as f32 },
             content: [c.x as f32, c.y as f32, c.w as f32, c.h as f32],
             cam: [cam.cx as f32, cam.cy as f32, cam.scale as f32, edit.shadow as f32],
             prev_cam: [frame.blur_from.cx as f32, frame.blur_from.cy as f32, frame.blur_from.scale as f32, samples as f32],
@@ -783,7 +787,11 @@ impl Compositor {
             bg: bg.1,
             params: [lod, bg.0, bicubic, bg_lod],
             card: [card.x as f32, card.y as f32, card.w as f32, card.h as f32],
-            inset: {
+            inset: if device {
+                // The phone body is drawn as an inset in the frame colour.
+                let rgb = background::linear(edit.device_frame.color.rgb());
+                [rgb[0], rgb[1], rgb[2], 1.0]
+            } else {
                 let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
                 let i = &edit.inset;
                 let rgb = background::linear(i.color.map(to8));
@@ -792,7 +800,9 @@ impl Compositor {
             },
             shadow: {
                 let radius = (edit.radius / 1080.0) as f32;
-                let inner = if edit.inset.enabled {
+                let inner = if device {
+                    radius
+                } else if edit.inset.enabled {
                     let i = ((card.h - c.h) * 0.5) as f32;
                     (radius - i).max(radius * 0.4)
                 } else {
@@ -821,6 +831,7 @@ impl Compositor {
             loupe2: [frame.loupe.map_or(0.0, |l| l.amount.max(0.0) as f32), (layout.video_w / layout.video_h) as f32, 0.0, 0.0],
             crop: layout.crop.map(|v| v as f32),
             screen_xf: [frame.screen_xf[0] as f32, frame.screen_xf[1] as f32, frame.screen_xf[2].max(1e-3) as f32, 0.0],
+            device: [if device { 1.0 } else { 0.0 }, ((card.w - c.w) * 0.5) as f32, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.scene_buf, 0, bytemuck::bytes_of(&u));
 

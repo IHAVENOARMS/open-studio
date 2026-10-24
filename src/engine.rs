@@ -53,6 +53,14 @@ pub struct Rect {
     pub h: f64,
 }
 
+/// Device frame bezel, as a fraction of the screen's longer side.
+pub const BEZEL: f64 = 0.022;
+
+/// True when a phone frame is drawn around the recording.
+pub fn device_frame(rec: &Recording, edit: &EditConfig) -> bool {
+    rec.source.kind == "device" && edit.device_frame.enabled
+}
+
 /// Scene layout in canvas units: the canvas is `aspect` wide and 1 tall.
 #[derive(Clone, Copy, Debug)]
 pub struct Layout {
@@ -65,6 +73,8 @@ pub struct Layout {
     pub crop: [f64; 4],
     pub video_w: f64,
     pub video_h: f64,
+    /// A phone frame is drawn around the screen (card = phone body).
+    pub device: bool,
 }
 
 impl Layout {
@@ -75,9 +85,17 @@ impl Layout {
         let pad = edit.padding * aspect.min(1.0);
         let (aw, ah) = ((aspect - 2.0 * pad).max(0.05), (1.0 - 2.0 * pad).max(0.05));
         let (w, h) = if aw / ah > vr { (ah * vr, ah) } else { (aw, aw / vr) };
-        let card = Rect { x: (aspect - w) * 0.5, y: (1.0 - h) * 0.5, w, h };
+        let mut card = Rect { x: (aspect - w) * 0.5, y: (1.0 - h) * 0.5, w, h };
         let mut content = card;
-        if edit.inset.enabled && edit.inset.size > 0.0 {
+        if device_frame(rec, edit) {
+            // The phone: the screen keeps its place and size, the body is a
+            // bezel wider all round (shrunk to fit if needed).
+            let b = BEZEL * h.max(w);
+            let fit = (aw / (w + 2.0 * b)).min(ah / (h + 2.0 * b)).min(1.0);
+            let (sw, sh, b) = (w * fit, h * fit, b * fit);
+            content = Rect { x: (aspect - sw) * 0.5, y: (1.0 - sh) * 0.5, w: sw, h: sh };
+            card = Rect { x: content.x - b, y: content.y - b, w: sw + 2.0 * b, h: sh + 2.0 * b };
+        } else if edit.inset.enabled && edit.inset.size > 0.0 {
             // Shrink the video inside the card, keeping its aspect; the
             // position setting moves it towards an edge.
             let i = edit.inset.size * h;
@@ -91,7 +109,7 @@ impl Layout {
                 h: ih,
             };
         }
-        Self { aspect, card, content, crop, video_w: rec.width as f64, video_h: rec.height as f64 }
+        Self { aspect, card, content, crop, video_w: rec.width as f64, video_h: rec.height as f64, device: device_frame(rec, edit) }
     }
 
     /// Recording pixels to canvas units (through the crop).
@@ -1133,5 +1151,47 @@ mod tests {
         assert!(matches!(cursor_shape(&r, &edit, 1.2), Some(CursorShape::Named { name, .. }) if name == "text"));
         // 3 s of "hidden" (to the end) really hides it.
         assert!(cursor_shape(&r, &edit, 4.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod device_frame_tests {
+    use super::*;
+    use crate::project::{Events, Recording, Source};
+
+    #[test]
+    fn device_frame_wraps_the_screen() {
+        let mut rec = Recording {
+            version: 1,
+            video: "screen.mp4".into(),
+            width: 1080,
+            height: 2340,
+            fps: 30,
+            duration: 2.0,
+            cursor_embedded: true,
+            source: Source { kind: "device".into(), ..Default::default() },
+            events: Events::default(),
+            custom_cursors: vec![],
+            audio: vec![],
+            camera: None,
+            dir: Default::default(),
+            transcript: None,
+        };
+        let edit = EditConfig::default();
+        let l = Layout::new(&rec, &edit);
+        assert!(l.device);
+        let b = (l.card.w - l.content.w) / 2.0;
+        assert!(b > 0.0 && ((l.card.h - l.content.h) / 2.0 - b).abs() < 1e-9, "even bezel all round");
+        assert!((b - BEZEL * l.content.h).abs() < 1e-9);
+        // The screen keeps its shape; the phone fits the canvas.
+        assert!((l.content.w / l.content.h - 1080.0 / 2340.0).abs() < 1e-9);
+        assert!(l.card.x >= 0.0 && l.card.y >= 0.0 && l.card.x + l.card.w <= l.aspect + 1e-9 && l.card.y + l.card.h <= 1.0 + 1e-9);
+        // Turned off, or a desktop recording: no frame.
+        let mut off = edit.clone();
+        off.device_frame.enabled = false;
+        let l = Layout::new(&rec, &off);
+        assert!(!l.device && l.card.w == l.content.w);
+        rec.source.kind = "monitor".into();
+        assert!(!Layout::new(&rec, &edit).device);
     }
 }

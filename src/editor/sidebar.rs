@@ -227,6 +227,9 @@ pub fn show(
                     match tab {
                         Tab::Background => {
                             background(ui, state, edit);
+                            if rec.source.kind == "device" {
+                                device_frame(ui, edit);
+                            }
                             super::privacy_ui::section(ui, &mut state.privacy, edit);
                         }
                         Tab::Cursor => cursor(ui, state, edit, rec),
@@ -305,6 +308,28 @@ pub(super) fn help(ui: &mut Ui, text: &str) {
 
 fn to_color32(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
+}
+
+/// Device frame (phone recordings): a phone drawn around the screen, in a
+/// choice of colours.
+fn device_frame(ui: &mut Ui, edit: &mut EditConfig) {
+    widgets::divider(ui);
+    theme::section(ui, "Device frame");
+    let f = &mut edit.device_frame;
+    widgets::toggle_row(ui, "Show device frame", &mut f.enabled);
+    if f.enabled {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            for c in crate::edit::FrameColor::ALL {
+                let [r, g, b] = c.rgb();
+                let col = egui::Color32::from_rgb(r, g, b);
+                if widgets::swatch(ui, [col; 4], f.color == c, 34.0).on_hover_text(c.name()).clicked() {
+                    f.color = c;
+                }
+            }
+        });
+    }
 }
 
 fn background(ui: &mut Ui, state: &mut State, edit: &mut EditConfig) {

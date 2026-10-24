@@ -24,6 +24,7 @@ struct Scene {
     loupe2: vec4f,       // grow amount (0 = off), video aspect
     crop: vec4f,         // screen crop: x, y, w, h (fractions of the recording)
     screen_xf: vec4f,    // screen card placement: offset x, y, scale (camera Split layout)
+    device: vec4f,       // device frame: on, bezel width (canvas units)
 };
 
 @group(0) @binding(0) var<uniform> u: Scene;
@@ -277,10 +278,14 @@ fn scene(q_canvas: vec2f, px_canvas: f32) -> vec3f {
 
     var cover: f32;
     if (u.inset.w > 0.0) {
-        // Inset frame: the card in the inset colour, the screen inside it.
         let dc = sd_round_rect(q - center, half, r);
         let card_cover = clamp(0.5 - dc / px, 0.0, 1.0);
-        col = mix(col, u.inset.rgb, card_cover * u.inset.w);
+        if (u.device.x > 0.5) {
+            col = device_body(col, q, center, half, r, dc, card_cover, px);
+        } else {
+            // Inset frame: the card in the inset colour, the screen inside it.
+            col = mix(col, u.inset.rgb, card_cover * u.inset.w);
+        }
         let ih = u.content.zw * 0.5;
         let di = sd_round_rect(q - (u.content.xy + ih), ih, min(u.shadow.w, min(ih.x, ih.y)));
         cover = clamp(0.5 - di / px, 0.0, 1.0);
@@ -331,9 +336,70 @@ fn scene(q_canvas: vec2f, px_canvas: f32) -> vec3f {
             let rim = clamp(1.0 - abs(lens - 1.0) / max(pxv * 1.6, 0.004), 0.0, 1.0);
             v = mix(v, vec3f(1.0), 0.75 * rim);
         }
+        if (u.device.x > 0.5) {
+            v = camera_hole(v, q, px);
+        }
         col = mix(col, v, cover);
     }
     return col;
+}
+
+// Device frame: side buttons, then the phone body with a bright rim at its
+// edge and a dark lip around the screen.
+fn device_body(col_in: vec3f, q: vec2f, center: vec2f, half: vec2f, r: f32, dc: f32, card_cover: f32, px: f32) -> vec3f {
+    var col = col_in;
+    let b = u.device.y;
+    let body = u.inset.rgb;
+    let button_col = body * 0.8 + vec3f(0.03);
+    // Long side up: power on the right, volume on the left (rotated for a
+    // landscape screen).
+    let tall = half.y >= half.x;
+    let long = select(half.x, half.y, tall);
+    let across = select(half.y, half.x, tall);
+    let p = select(vec2f(q.y - center.y, q.x - center.x), vec2f(q.x - center.x, q.y - center.y), tall);
+    let w = b * 0.32;
+    let buttons = array<vec3f, 3>(
+        vec3f(1.0, -0.42, 0.11),   // side (right), from the middle, half length
+        vec3f(-1.0, -0.52, 0.07),  // volume up (left)
+        vec3f(-1.0, -0.33, 0.07),  // volume down
+    );
+    for (var i = 0; i < 3; i++) {
+        let k = buttons[i];
+        let c = vec2f(k.x * (across + w * 0.6), k.y * long);
+        let d = sd_round_rect(p - c, vec2f(w, k.z * long), w * 0.8);
+        col = mix(col, button_col, clamp(0.5 - d / px, 0.0, 1.0));
+    }
+    // Body, a touch lighter towards the top.
+    let shade = 1.0 + 0.06 * clamp((center.y - q.y) / half.y, -1.0, 1.0);
+    var c_body = body * shade;
+    // Bright rim at the outer edge, dark lip just outside the screen.
+    let rim = clamp(1.0 - abs(dc + b * 0.08) / (b * 0.12 + px), 0.0, 1.0);
+    c_body = mix(c_body, min(body * 1.7 + vec3f(0.12), vec3f(1.0)), 0.55 * rim);
+    let ih = u.content.zw * 0.5;
+    let di = sd_round_rect(q - (u.content.xy + ih), ih, min(u.shadow.w, min(ih.x, ih.y)));
+    let lip = clamp(1.0 - di / (b * 0.45), 0.0, 1.0);
+    c_body = mix(c_body, vec3f(0.0), 0.85 * lip * lip);
+    return mix(col, c_body, card_cover);
+}
+
+// Device frame: the front camera, a small dark hole near the top of the
+// screen (the short top edge).
+fn camera_hole(v: vec3f, q: vec2f, px: f32) -> vec3f {
+    let c = u.content;
+    let short = min(c.z, c.w);
+    let rad = short * 0.022;
+    var at: vec2f;
+    if (c.w >= c.z) {
+        at = vec2f(c.x + c.z * 0.5, c.y + short * 0.045);
+    } else {
+        at = vec2f(c.x + short * 0.045, c.y + c.w * 0.5);
+    }
+    let d = length(q - at) - rad;
+    var out = mix(v, vec3f(0.01), clamp(0.5 - d / px, 0.0, 1.0));
+    // A faint lens glint.
+    let g = length(q - at + vec2f(rad * 0.3, rad * 0.3)) - rad * 0.28;
+    out = mix(out, vec3f(0.12, 0.13, 0.2), clamp(0.5 - g / px, 0.0, 1.0) * 0.8);
+    return out;
 }
 
 // Click highlight: a soft filled circle or an expanding ring.
