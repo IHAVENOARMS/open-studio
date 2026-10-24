@@ -57,6 +57,7 @@ pub struct App {
     selected: Vec<PathBuf>,
     picking_batch_dir: Option<Receiver<Vec<PathBuf>>>,
     batch: Option<crate::batch::Batch>,
+    settings_window: Option<crate::settings_ui::SettingsWindow>,
 }
 
 /// Saved projects, plus recordings never saved (left over when the app was
@@ -94,6 +95,7 @@ impl App {
             selected: vec![],
             picking_batch_dir: None,
             batch: None,
+            settings_window: None,
         };
         if let (Some(dir), Some(rs)) = (open, cc.wgpu_render_state.as_ref()) {
             app.open_editor(dir, &cc.egui_ctx, rs);
@@ -130,6 +132,11 @@ impl App {
 
     fn home(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
         let ctx = ui.ctx().clone();
+        if let Some(w) = &mut self.settings_window {
+            if !w.show(&ctx) {
+                self.settings_window = None;
+            }
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin::same(32)))
             .show(ui, |ui| {
@@ -142,6 +149,10 @@ impl App {
                     let rec_btn = icons::button(ui, Icon::Record, "Start recording", theme::semibold(15.0), Color32::WHITE, Some(theme::ACCENT), vec2(260.0, 46.0));
                     if rec_btn.clicked() {
                         self.start_recording(&ctx);
+                    }
+                    ui.add_space(8.0);
+                    if icons::button(ui, Icon::Gear, "Settings", egui::FontId::proportional(14.0), theme::TEXT, Some(theme::SURFACE), vec2(260.0, 40.0)).clicked() {
+                        self.settings_window = Some(Default::default());
                     }
                     ui.add_space(8.0);
                     let busy = self.importing.is_some();

@@ -47,6 +47,7 @@ use Category::*;
 pub const SHORTCUTS: &[Shortcut] = &[
     s(General, "Application", &["Ctrl", "K"], "Open command menu"),
     s(General, "Application", &["Ctrl", "/"], "Show shortcuts guide"),
+    s(General, "Application", &["Ctrl", ","], "Show settings"),
     s(General, "View", &["Ctrl", "="], "Zoom in preview"),
     s(General, "View", &["Ctrl", "-"], "Zoom out preview"),
     s(General, "View", &["Ctrl", "1…9"], "Show sidebar tab"),

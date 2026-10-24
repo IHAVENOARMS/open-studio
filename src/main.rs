@@ -7,6 +7,7 @@ mod control;
 mod cursor_themes;
 mod editor;
 mod settings;
+mod settings_ui;
 mod shortcuts;
 mod cutout;
 mod face;

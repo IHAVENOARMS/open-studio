@@ -51,6 +51,7 @@ enum Cmd {
     Preset(usize),
     ToggleLastSettings,
     Guide,
+    Settings,
 }
 
 struct Entry {
@@ -85,6 +86,7 @@ impl Editor {
         out.push(e("Project", Icon::Folder, "Save project as…", "Ctrl+Shift+S", Cmd::SaveAs));
         out.push(e("Project", Icon::ArrowRight, "Show project in folder", "", Cmd::ShowFolder));
         out.push(e("Help", Icon::Keyboard, "Show keyboard shortcuts", "Ctrl+/", Cmd::Guide));
+        out.push(e("Settings", Icon::Gear, "Show settings", "Ctrl+,", Cmd::Settings));
         out.push(e("Edit", Icon::Undo, "Undo", "Ctrl+Z", Cmd::Undo));
         out.push(e("Edit", Icon::Redo, "Redo", "Ctrl+Shift+Z", Cmd::Redo));
         out.push(e("Edit", Icon::Scissors, "Split clip at current time", "C", Cmd::Split));
@@ -285,6 +287,7 @@ impl Editor {
             }
             Cmd::CopyFrame => self.copy_frame(ctx),
             Cmd::Guide => self.open_guide(),
+            Cmd::Settings => self.settings_window = Some(Default::default()),
             Cmd::ExtractAll => {
                 self.file_task = Some((dialogs::open_folder(ctx.clone(), "Extract recording files to", Some(dir)), FileTask::ExtractAll));
             }

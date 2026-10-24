@@ -16,7 +16,7 @@ mod shuttle;
 mod sidebar;
 mod timeline;
 mod transcript_ui;
-mod widgets;
+pub mod widgets;
 
 use crate::edit::{EditConfig, ZoomFocus};
 use crate::engine::{Tracks, frame_state};
@@ -141,6 +141,8 @@ pub struct Editor {
     command: Option<commands::CommandMenu>,
     /// Typing stretches found in the recorded keys (Speed up typing).
     typing: Vec<crate::typing::Typing>,
+    /// Settings window (Ctrl+,), while open.
+    settings_window: Option<crate::settings_ui::SettingsWindow>,
     /// Ctrl+/ Shortcuts Guide, while open.
     guide: Option<guide::Guide>,
     presets: Vec<crate::presets::Preset>,
@@ -213,6 +215,7 @@ impl Editor {
             scrubber: Default::default(),
             command: None,
             guide: None,
+            settings_window: None,
             typing: crate::typing::detect(&rec.events.keys, rec.duration),
             presets: vec![],
             preset_name: String::new(),
@@ -1076,6 +1079,11 @@ impl Editor {
         self.export_dialog(&ctx);
         self.command_menu(&ctx);
         self.guide_window(&ctx);
+        if let Some(w) = &mut self.settings_window {
+            if !w.show(&ctx) {
+                self.settings_window = None;
+            }
+        }
         self.poll_file_tasks(&ctx);
 
         // Undo history: a change settles once no mouse button is held, so a
@@ -1143,6 +1151,10 @@ impl Editor {
         }
         if self.command.is_none() && !in_transcript && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::K)) {
             self.open_command_menu();
+            return;
+        }
+        if self.settings_window.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Comma)) {
+            self.settings_window = Some(Default::default());
             return;
         }
         if self.guide.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Slash)) {
