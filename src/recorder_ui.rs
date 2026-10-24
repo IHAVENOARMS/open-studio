@@ -766,11 +766,12 @@ fn open_camera(sh: &mut Shared, id: Option<String>, ctx: &egui::Context) {
     let Some(id) = id else { return };
     let (tx, rx) = std::sync::mpsc::channel();
     let known = sh.cameras.clone();
+    let max_height = sh.settings.max_camera_height;
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let src = known.into_iter().find(|c| c.id() == id).or_else(|| record::camera::list().into_iter().find(|c| c.id() == id));
         let r = match src {
-            Some(src) => record::camera::CameraFeed::open(&src).map_err(|e| format!("{e:#}")),
+            Some(src) => record::camera::CameraFeed::open(&src, max_height).map_err(|e| format!("{e:#}")),
             None => Err("camera not connected".into()),
         };
         let _ = tx.send(r);
@@ -1109,7 +1110,7 @@ fn shortcut_row(ui: &mut egui::Ui, icon: Icon, label: &str, value: &mut String, 
 }
 
 fn gear_menu_rect(bar: Rect) -> Rect {
-    Rect::from_min_size(pos2(bar.right() - 330.0, bar.top() - 294.0), vec2(330.0, 282.0))
+    Rect::from_min_size(pos2(bar.right() - 360.0, bar.top() - 492.0), vec2(360.0, 480.0))
 }
 
 /// Title, subtitle and a "Start recording" button centred on `c`, drawn at
@@ -1615,9 +1616,50 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
         None => "Checking for a GPU encoder…".to_string(),
     };
     ui.label(egui::RichText::new(note).size(12.0).color(BAR_DIM));
+    let mut toggle = |ui: &mut egui::Ui, label: &str, help: &str, on: &mut bool| {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(label).size(13.5).color(BAR_TEXT));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                changed |= crate::editor::toggle(ui, on).changed();
+            });
+        });
+        ui.label(egui::RichText::new(help).size(12.0).color(BAR_DIM));
+    };
+    toggle(ui, "Highlight recorded area", "Dims the part of the screen that isn't being recorded.", &mut sh.settings.highlight_recorded_area);
+    toggle(ui, "Create zooms automatically", "Zooms are made from your clicks in every new project.", &mut sh.settings.auto_zooms);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Recording countdown").size(13.5).color(BAR_TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for (secs, label) in [(10, "10s"), (5, "5s"), (3, "3s"), (0, "Off")] {
+                changed |= small_choice(ui, label, &mut sh.settings.countdown, secs);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Maximum camera resolution").size(13.5).color(BAR_TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for (h, label) in [(2160, "4K"), (1080, "1080p"), (720, "720p")] {
+                changed |= small_choice(ui, label, &mut sh.settings.max_camera_height, h);
+            }
+        });
+    });
+    ui.label(egui::RichText::new("Higher resolutions look better but may slow down recording.").size(12.0).color(BAR_DIM));
     if changed {
         sh.settings.save();
     }
+}
+
+/// One option of a small segmented choice in the settings menu.
+fn small_choice(ui: &mut egui::Ui, label: &str, value: &mut u32, option: u32) -> bool {
+    let on = *value == option;
+    let b = egui::Button::new(egui::RichText::new(label).size(12.5).color(BAR_TEXT))
+        .fill(if on { Color32::from_white_alpha(34) } else { Color32::from_white_alpha(10) })
+        .corner_radius(CornerRadius::same(6));
+    if ui.add(b).clicked() && !on {
+        *value = option;
+        return true;
+    }
+    false
 }
 
 fn area_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor, over_bar: bool) {
@@ -2303,6 +2345,32 @@ mod tests {
         h.frame(&mut sh, vec![egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: mods }]);
         assert_eq!(sh.settings.stop_shortcut, "Ctrl+Shift+S");
         assert!(!sh.capturing_shortcut);
+    }
+
+    #[test]
+    fn countdown_and_camera_resolution_can_be_picked() {
+        isolate_config();
+        let (mut h, mut sh) = (Harness::new(false), shared());
+        sh.settings.countdown = 0;
+        sh.settings.max_camera_height = 1080;
+        let b = bar();
+        h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
+        let m = gear_menu_rect(b).shrink(18.0);
+        let find = |h: &mut Harness, sh: &mut Shared, done: &dyn Fn(&Shared) -> bool| {
+            for dy in (200..470).step_by(5) {
+                for dx in [20, 45, 70, 95, 120] {
+                    if done(sh) {
+                        return;
+                    }
+                    h.click(sh, pos2(m.right() - dx as f32, m.top() + dy as f32));
+                }
+            }
+        };
+        find(&mut h, &mut sh, &|sh| sh.settings.countdown == 3);
+        assert_eq!(sh.settings.countdown, 3, "3s countdown button not found");
+        assert_eq!(Settings::load().countdown, 3, "saved");
+        find(&mut h, &mut sh, &|sh| sh.settings.max_camera_height == 720);
+        assert_eq!(sh.settings.max_camera_height, 720, "720p button not found");
     }
 
     #[test]

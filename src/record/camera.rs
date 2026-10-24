@@ -97,14 +97,28 @@ pub struct CameraFeed {
     phone: Option<PhoneStream>,
 }
 
+/// Largest camera picture (width, height) for a Maximum camera resolution
+/// setting, landscape 16:9 at most.
+pub fn max_size(max_height: u32) -> (u32, u32) {
+    let h = match max_height {
+        0..=720 => 720,
+        721..=1080 => 1080,
+        _ => 2160,
+    };
+    (h * 16 / 9, h)
+}
+
 impl CameraFeed {
-    pub fn open(source: &Source) -> Result<Self> {
+    /// Opens a camera, recording at most `max_height` lines (Maximum camera
+    /// resolution: 720, 1080 or 2160).
+    pub fn open(source: &Source, max_height: u32) -> Result<Self> {
         gst::init()?;
         let tail = "videoconvert n-threads=0 ! video/x-raw,format=RGBA ! appsink name=sink sync=false max-buffers=2 drop=true";
+        let (w, h) = max_size(max_height);
         let (desc, phone) = match source {
-            // Largest mode up to 1920 wide; MJPEG or raw, whichever the camera offers.
+            // Largest mode within the limit; MJPEG or raw, whichever the camera offers.
             Source::V4l2 { path, .. } => (
-                format!("v4l2src device={path} ! video/x-raw,width=[1,1920];image/jpeg,width=[1,1920] ! decodebin ! {tail}"),
+                format!("v4l2src device={path} ! video/x-raw,width=[1,{w}],height=[1,{h}];image/jpeg,width=[1,{w}],height=[1,{h}] ! decodebin ! {tail}"),
                 None,
             ),
             Source::Phone { serial, facing, .. } => (
@@ -137,7 +151,7 @@ impl CameraFeed {
         let phone = match phone {
             Some((serial, facing)) => {
                 let src = pipeline.by_name("src").unwrap().downcast::<gst_app::AppSrc>().map_err(|_| anyhow!("appsrc"))?;
-                Some(PhoneStream::start(&serial, &facing, src, error.clone())?)
+                Some(PhoneStream::start(&serial, &facing, w, src, error.clone())?)
             }
             None => None,
         };
@@ -200,7 +214,8 @@ struct PhoneStream {
 }
 
 impl PhoneStream {
-    fn start(serial: &str, facing: &str, src: gst_app::AppSrc, error: Arc<Mutex<Option<String>>>) -> Result<Self> {
+    /// `max_side`: the picture's long side at most this many pixels.
+    fn start(serial: &str, facing: &str, max_side: u32, src: gst_app::AppSrc, error: Arc<Mutex<Option<String>>>) -> Result<Self> {
         let adb = super::device::adb().ok_or_else(|| anyhow!("adb is not installed"))?;
         let jar = super::device::scrcpy_server().ok_or_else(|| anyhow!("scrcpy is not installed"))?;
         let version = super::device::scrcpy_version().unwrap_or_else(|| "4.1".into());
@@ -223,7 +238,7 @@ impl PhoneStream {
                 "log_level=warn".into(),
                 "video_source=camera".into(),
                 format!("camera_facing={facing}"),
-                "max_size=1920".into(),
+                format!("max_size={max_side}"),
                 "camera_fps=30".into(),
                 "audio=false".into(),
                 "control=false".into(),
@@ -287,5 +302,18 @@ impl Drop for PhoneStream {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    #[test]
+    fn maximum_camera_resolution() {
+        assert_eq!(super::max_size(720), (1280, 720));
+        assert_eq!(super::max_size(1080), (1920, 1080));
+        assert_eq!(super::max_size(2160), (3840, 2160));
+        // Anything else rounds to the nearest offered step.
+        assert_eq!(super::max_size(0), (1280, 720));
+        assert_eq!(super::max_size(5000), (3840, 2160));
     }
 }

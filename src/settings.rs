@@ -77,6 +77,14 @@ pub struct Settings {
     pub stop_shortcut: String,
     /// Global shortcut that marks a recording flag (Screen Studio: ⌘⌥⌃F).
     pub flag_shortcut: String,
+    /// Zooms are made from clicks in every new project.
+    pub auto_zooms: bool,
+    /// Dim what isn't being recorded while recording.
+    pub highlight_recorded_area: bool,
+    /// Seconds counted down before recording starts (0 = off).
+    pub countdown: u32,
+    /// Webcams record at most this tall (720, 1080 or 2160).
+    pub max_camera_height: u32,
     /// Draw the system cursor into the video instead of re-rendering it.
     pub bake_cursor: bool,
     /// Microphone to record (Pulse source name), or None.
@@ -177,6 +185,10 @@ impl Default for Settings {
             destination: Destination::File,
             stop_shortcut: "Ctrl+Alt+Enter".into(),
             flag_shortcut: "Ctrl+Alt+F".into(),
+            auto_zooms: true,
+            highlight_recorded_area: true,
+            countdown: 0,
+            max_camera_height: 1080,
             bake_cursor: false,
             microphone: None,
             system_audio: false,

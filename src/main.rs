@@ -220,7 +220,7 @@ fn main() -> Result<()> {
                     }
                     Some(id) => {
                         let src = record::camera::list().into_iter().find(|c| c.id() == id).ok_or_else(|| anyhow::anyhow!("no camera {id}"))?;
-                        Some(std::sync::Arc::new(record::camera::CameraFeed::open(&src)?))
+                        Some(std::sync::Arc::new(record::camera::CameraFeed::open(&src, settings::Settings::load().max_camera_height)?))
                     }
                 },
             };

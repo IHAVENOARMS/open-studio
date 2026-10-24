@@ -898,7 +898,11 @@ impl EditConfig {
             cfg.cursor.click_visual = ClickVisual::Circle;
             cfg.radius = 48.0;
         }
-        cfg.zoom_segments = crate::engine::auto_zoom_segments(rec, cfg.default_zoom);
+        // "Create zooms automatically" (Settings), on unless turned off.
+        let auto_zooms = cfg!(test) || crate::settings::Settings::load().auto_zooms;
+        if auto_zooms {
+            cfg.zoom_segments = crate::engine::auto_zoom_segments(rec, cfg.default_zoom);
+        }
         // The phone's sound plays through the speakers, so system audio has
         // it too: keep only the clean device track in the mix.
         if device && rec.audio.iter().any(|a| a.kind == "device") {
