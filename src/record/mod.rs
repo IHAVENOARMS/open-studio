@@ -288,6 +288,12 @@ impl Recorder {
         self.clock.is_paused()
     }
 
+    /// Where a recorded window's top-left is now (window capture), global
+    /// logical pixels.
+    pub fn window_origin(&self) -> Option<[f64; 2]> {
+        self.window_track.lock().unwrap().last().map(|p| p.1)
+    }
+
     /// Marks this moment with a recording flag (shown on the timeline).
     /// Flags made while paused are dropped, as nothing is recorded then.
     pub fn flag(&self) {

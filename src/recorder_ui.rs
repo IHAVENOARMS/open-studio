@@ -138,6 +138,15 @@ struct Shared {
     can_pause: bool,
     /// Recording flags made so far.
     flags: usize,
+    /// Seconds left before recording starts, while counting down.
+    countdown: Option<f64>,
+    /// Clicked the countdown to cancel it.
+    cancel_countdown: bool,
+    /// What's being recorded, in global logical pixels (countdown and
+    /// highlight).
+    recorded_rect: Rect,
+    /// True when a whole monitor is recorded (nothing on it is dimmed).
+    recording_monitor: Option<String>,
     saving: bool,
     action: Option<WidgetAction>,
 }
@@ -147,6 +156,11 @@ enum SurfKind {
     Overlay,
     /// Small floating recording controls.
     Widget,
+    /// Recording countdown over the recorded monitor.
+    Countdown,
+    /// Highlight recorded area: dims a monitor around what's recorded.
+    /// Clicks pass through.
+    Dim,
 }
 
 struct Surf {
@@ -193,6 +207,8 @@ struct Rt {
     modifiers: egui::Modifiers,
     shared: Shared,
     recording: Option<Recording>,
+    /// Counting down to this recording, since then.
+    countdown: Option<(DirectRequest, Instant)>,
     shortcut_hit: Arc<AtomicBool>,
     shortcut_stop: Arc<AtomicBool>,
     start_time: Instant,
@@ -278,10 +294,15 @@ pub fn run() -> Result<Outcome> {
             paused: false,
             can_pause: false,
             flags: 0,
+            countdown: None,
+            cancel_countdown: false,
+            recorded_rect: Rect::NOTHING,
+            recording_monitor: None,
             saving: false,
             action: None,
         },
         recording: None,
+        countdown: None,
         shortcut_hit: Arc::new(AtomicBool::new(false)),
         shortcut_stop: Arc::new(AtomicBool::new(false)),
         start_time: Instant::now(),
@@ -410,6 +431,25 @@ impl Rt {
                 layer.set_size(WIDGET_W, WIDGET_H);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::None);
             }
+            SurfKind::Countdown | SurfKind::Dim => {
+                layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+                layer.set_exclusive_zone(-1);
+                layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            }
+        }
+        // Clicks go through to the apps below: all of a dim, and all of the
+        // countdown but its circle (which cancels).
+        if let Ok(region) = smithay_client_toolkit::compositor::Region::new(&self.compositor) {
+            match kind {
+                SurfKind::Dim => layer.wl_surface().set_input_region(Some(region.wl_region())),
+                SurfKind::Countdown => {
+                    let c = countdown_centre(&monitor, self.shared.recorded_rect);
+                    let r = (COUNTDOWN_SIZE / 2.0) as i32;
+                    region.add(c.x as i32 - r, c.y as i32 - r, 2 * r, 2 * r);
+                    layer.wl_surface().set_input_region(Some(region.wl_region()));
+                }
+                _ => {}
+            }
         }
         layer.commit();
         let instance = self.gpu_instance();
@@ -509,7 +549,14 @@ impl Rt {
             return;
         }
         if let Some(req) = self.shared.start.take() {
-            self.begin_recording(req);
+            if self.shared.settings.countdown > 0 {
+                self.begin_countdown(req);
+            } else {
+                self.begin_recording(req);
+            }
+        }
+        if self.countdown.is_some() {
+            self.update_countdown();
         }
         if self.recording.is_some() {
             self.update_recording();
@@ -519,6 +566,59 @@ impl Rt {
             let due = self.surfaces[i].redraw_at.is_some_and(|t| t <= now) || !self.surfaces[i].events.is_empty();
             if due {
                 self.draw(i);
+            }
+        }
+    }
+
+    /// Recording countdown: the picker goes, a big number counts down over
+    /// what will be recorded, then recording starts.
+    fn begin_countdown(&mut self, req: DirectRequest) {
+        self.destroy_surfaces();
+        self.shared.recorded_rect = rect_of(&req);
+        self.shared.cancel_countdown = false;
+        self.shared.countdown = Some(self.shared.settings.countdown as f64);
+        if let Some(m) = monitor_for(&self.shared.monitors, self.shared.recorded_rect) {
+            let out = self.output_for(&m.name);
+            self.new_surface(SurfKind::Countdown, m, out.as_ref());
+        }
+        self.countdown = Some((req, Instant::now()));
+    }
+
+    fn update_countdown(&mut self) {
+        let Some((_, at)) = &self.countdown else { return };
+        let left = self.shared.settings.countdown as f64 - at.elapsed().as_secs_f64();
+        if self.shared.cancel_countdown {
+            // Back to the picker.
+            self.countdown = None;
+            self.shared.countdown = None;
+            self.shared.cancel_countdown = false;
+            self.destroy_surfaces();
+            self.create_overlays();
+        } else if left <= 0.0 {
+            let (req, _) = self.countdown.take().unwrap();
+            self.shared.countdown = None;
+            self.begin_recording(req);
+        } else {
+            self.shared.countdown = Some(left);
+            for s in &mut self.surfaces {
+                s.redraw_at.get_or_insert(Instant::now());
+            }
+        }
+    }
+
+    /// Highlight recorded area: a dim over every monitor, with a hole where
+    /// the recording is. Made before the widget so the widget sits on top.
+    fn create_dims(&mut self, req: &DirectRequest) {
+        self.shared.recorded_rect = rect_of(req);
+        self.shared.recording_monitor = (req.kind == "monitor").then(|| req.name.clone().unwrap_or_default());
+        let monitors = self.shared.monitors.clone();
+        for m in monitors {
+            if self.shared.recording_monitor.as_deref() == Some(m.name.as_str()) {
+                continue;
+            }
+            let out = self.output_for(&m.name);
+            if out.is_some() {
+                self.new_surface(SurfKind::Dim, m, out.as_ref());
             }
         }
     }
@@ -547,6 +647,10 @@ impl Rt {
             self.shortcut_hit.store(false, Ordering::Relaxed);
             record::input::watch_shortcut(sc, self.shortcut_hit.clone(), self.shortcut_stop.clone());
         }
+        if self.shared.settings.highlight_recorded_area {
+            let req = self.recording.as_ref().unwrap().request.clone();
+            self.create_dims(&req);
+        }
         // Controls go on another monitor when possible, so they aren't recorded.
         let cursor = hyprland::cursor_pos().unwrap_or((0.0, 0.0));
         let others: Vec<Monitor> = self.shared.monitors.iter().filter(|m| m.name != recorded).cloned().collect();
@@ -565,6 +669,16 @@ impl Rt {
     fn update_recording(&mut self) {
         let Some(rec) = &mut self.recording else { return };
         if let Some(r) = &rec.recorder {
+            // A recorded window that moves takes its highlight along.
+            if let Some([x, y]) = r.window_origin() {
+                let moved = Rect::from_min_size(pos2(x as f32, y as f32), self.shared.recorded_rect.size());
+                if moved != self.shared.recorded_rect {
+                    self.shared.recorded_rect = moved;
+                    for s in self.surfaces.iter_mut().filter(|s| matches!(s.kind, SurfKind::Dim)) {
+                        s.redraw_at.get_or_insert(Instant::now());
+                    }
+                }
+            }
             self.shared.elapsed = r.elapsed();
             self.shared.paused = r.is_paused();
             self.shared.flags = r.flag_count();
@@ -638,14 +752,18 @@ impl Rt {
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point = Some(ppp);
         let monitor = surf.monitor.clone();
-        let is_widget = matches!(surf.kind, SurfKind::Widget);
+        let kind = match surf.kind {
+            SurfKind::Overlay => 0,
+            SurfKind::Widget => 1,
+            SurfKind::Countdown => 2,
+            SurfKind::Dim => 3,
+        };
         let shared = &mut self.shared;
-        let out = surf.ctx.run_ui(raw, |ui| {
-            if is_widget {
-                widget_ui(ui, shared);
-            } else {
-                overlay_ui(ui, shared, &monitor);
-            }
+        let out = surf.ctx.run_ui(raw, |ui| match kind {
+            1 => widget_ui(ui, shared),
+            2 => countdown_ui(ui, shared, &monitor),
+            3 => dim_ui(ui, shared, &monitor),
+            _ => overlay_ui(ui, shared, &monitor),
         });
         // Cursor shape for this surface.
         if self.pointer_surface.as_ref() == Some(surf.layer.wl_surface()) && out.platform_output.cursor_icon != surf.cursor {
@@ -1845,6 +1963,87 @@ fn area_request(mon: &Monitor, area: Rect) -> DirectRequest {
 const WIDGET_W: u32 = 300;
 const WIDGET_H: u32 = 72;
 
+/// Countdown circle size, logical pixels.
+const COUNTDOWN_SIZE: f32 = 200.0;
+
+/// Global logical rect a request records.
+fn rect_of(req: &DirectRequest) -> Rect {
+    let r = req.logical_rect;
+    Rect::from_min_size(pos2(r[0] as f32, r[1] as f32), vec2(r[2] as f32, r[3] as f32))
+}
+
+/// The monitor showing most of `r`.
+fn monitor_for(monitors: &[Monitor], r: Rect) -> Option<Monitor> {
+    monitors.iter().max_by(|a, b| a.global().intersect(r).area().total_cmp(&b.global().intersect(r).area())).cloned()
+}
+
+/// Where the countdown sits on `mon`: the middle of the recorded part.
+fn countdown_centre(mon: &Monitor, recorded: Rect) -> Pos2 {
+    let visible = mon.global().intersect(recorded);
+    let c = if visible.is_positive() { visible.center() } else { mon.global().center() };
+    c - mon.global().min.to_vec2()
+}
+
+/// The number shown with `left` seconds to go: 3, 2, 1.
+fn countdown_number(left: f64) -> u32 {
+    left.ceil().max(1.0) as u32
+}
+
+/// Parts of `screen` outside `hole`, to dim (a hole a little larger than
+/// the recording, so the dim's edge never reaches it).
+fn dim_rects(screen: Rect, hole: Rect) -> Vec<Rect> {
+    let hole = hole.expand(3.0).intersect(screen);
+    if !hole.is_positive() {
+        return vec![screen];
+    }
+    [
+        Rect::from_min_max(screen.min, pos2(screen.right(), hole.top())),
+        Rect::from_min_max(pos2(screen.left(), hole.bottom()), screen.max),
+        Rect::from_min_max(pos2(screen.left(), hole.top()), pos2(hole.left(), hole.bottom())),
+        Rect::from_min_max(pos2(hole.right(), hole.top()), pos2(screen.right(), hole.bottom())),
+    ]
+    .into_iter()
+    .filter(|r| r.is_positive())
+    .collect()
+}
+
+fn countdown_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
+    let Some(left) = sh.countdown else { return };
+    let c = countdown_centre(mon, sh.recorded_rect);
+    let n = countdown_number(left);
+    // Each number arrives a little large and settles.
+    let f = (n as f64 - left).clamp(0.0, 1.0) as f32;
+    let pop = 1.0 + 0.12 * (1.0 - (f * 6.0).min(1.0));
+    let p = ui.painter();
+    let r = COUNTDOWN_SIZE / 2.0;
+    p.circle_filled(c, r, Color32::from_rgba_premultiplied(14, 12, 20, 215));
+    p.circle_stroke(c, r, Stroke::new(1.0, Color32::from_white_alpha(40)));
+    // A ring empties over each second.
+    let arc: Vec<Pos2> = (0..=48)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * (1.0 - f) * i as f32 / 48.0;
+            c + vec2(a.cos(), a.sin()) * (r - 8.0)
+        })
+        .collect();
+    p.add(egui::Shape::line(arc, Stroke::new(4.0, theme::KNOB)));
+    p.text(c - vec2(0.0, 8.0), Align2::CENTER_CENTER, n.to_string(), theme::semibold(96.0 * pop), Color32::WHITE);
+    p.text(c + vec2(0.0, 58.0), Align2::CENTER_CENTER, "Click to cancel", FontId::proportional(12.5), BAR_DIM);
+    let hit = Rect::from_center_size(c, vec2(COUNTDOWN_SIZE, COUNTDOWN_SIZE));
+    let resp = ui.interact(hit, ui.scope_id().with("countdown"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        sh.cancel_countdown = true;
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+}
+
+fn dim_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor) {
+    let screen = ui.max_rect();
+    let hole = sh.recorded_rect.translate(-mon.global().min.to_vec2());
+    for r in dim_rects(screen, hole) {
+        ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(110));
+    }
+}
+
 fn widget_ui(ui: &mut egui::Ui, sh: &mut Shared) {
     let r = ui.max_rect().shrink2(vec2(6.0, 6.0));
     let p = ui.painter().clone();
@@ -1950,7 +2149,7 @@ impl LayerShellHandler for Rt {
             let m = &self.surfaces[i].monitor;
             (w, h) = match self.surfaces[i].kind {
                 SurfKind::Widget => (WIDGET_W, WIDGET_H),
-                SurfKind::Overlay => (m.rect[2] as u32, m.rect[3] as u32),
+                SurfKind::Overlay | SurfKind::Countdown | SurfKind::Dim => (m.rect[2] as u32, m.rect[3] as u32),
             };
         }
         self.surfaces[i].size = (w, h);
@@ -2159,6 +2358,10 @@ mod tests {
             paused: false,
             can_pause: true,
             flags: 0,
+            countdown: None,
+            cancel_countdown: false,
+            recorded_rect: Rect::NOTHING,
+            recording_monitor: None,
             saving: false,
             action: None,
         }
@@ -2345,6 +2548,60 @@ mod tests {
         h.frame(&mut sh, vec![egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: mods }]);
         assert_eq!(sh.settings.stop_shortcut, "Ctrl+Shift+S");
         assert!(!sh.capturing_shortcut);
+    }
+
+    #[test]
+    fn countdown_and_highlight_geometry() {
+        assert_eq!([3.0, 2.4, 2.0, 1.01, 0.3].map(countdown_number), [3, 3, 2, 2, 1]);
+        let a = Monitor { name: "A".into(), description: String::new(), rect: [0.0, 0.0, 1920.0, 1080.0], pixels: (1920, 1080), refresh: 60.0 };
+        let b = Monitor { name: "B".into(), description: String::new(), rect: [1920.0, 0.0, 2560.0, 1440.0], pixels: (2560, 1440), refresh: 60.0 };
+        let mons = [a.clone(), b.clone()];
+        // A window mostly on B belongs to B; the countdown sits in its middle,
+        // in B's own coordinates.
+        let win = Rect::from_min_size(pos2(1800.0, 100.0), vec2(800.0, 600.0));
+        assert_eq!(monitor_for(&mons, win).unwrap().name, "B");
+        assert_eq!(countdown_centre(&b, win), pos2((1920.0 + 2600.0) / 2.0 - 1920.0, 400.0));
+        // Nothing of it on A: A's middle.
+        assert_eq!(countdown_centre(&a, Rect::from_min_size(pos2(3000.0, 0.0), vec2(10.0, 10.0))), pos2(960.0, 540.0));
+        // Dims leave a hole around the recording and cover the rest exactly.
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0));
+        let hole = Rect::from_min_size(pos2(200.0, 100.0), vec2(400.0, 300.0));
+        let dims = dim_rects(screen, hole);
+        assert_eq!(dims.len(), 4);
+        assert!(dims.iter().all(|d| !d.intersects(hole.expand(2.9))), "dim reaches the recording");
+        let area: f32 = dims.iter().map(|d| d.area()).sum();
+        assert!((area + hole.expand(3.0).area() - screen.area()).abs() < 1.0, "dims overlap or leave gaps");
+        // Hole off this screen: all dimmed. Hole at the edge: fewer pieces.
+        assert_eq!(dim_rects(screen, hole.translate(vec2(5000.0, 0.0))), vec![screen]);
+        assert_eq!(dim_rects(screen, Rect::from_min_size(Pos2::ZERO, vec2(300.0, 800.0))).len(), 1);
+    }
+
+    #[test]
+    fn countdown_click_cancels() {
+        isolate_config();
+        let mut h = Harness::new(false);
+        let mut sh = shared();
+        sh.countdown = Some(2.5);
+        sh.recorded_rect = Rect::from_min_size(pos2(100.0, 100.0), vec2(800.0, 600.0));
+        let mon = test_monitor();
+        let draw = |h: &mut Harness, sh: &mut Shared, events: Vec<egui::Event>| {
+            h.t += 0.05;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)), time: Some(h.t), events, ..Default::default() };
+            let mut out = h.ctx.run_ui(raw, |ui| countdown_ui(ui, sh, &mon));
+            out.textures_delta.clear();
+        };
+        let c = countdown_centre(&mon, sh.recorded_rect);
+        let m = egui::Modifiers::default();
+        // A click beside the circle does nothing.
+        let away = c + vec2(300.0, 0.0);
+        for ev in [vec![egui::Event::PointerMoved(away)], vec![egui::Event::PointerButton { pos: away, button: egui::PointerButton::Primary, pressed: true, modifiers: m }], vec![egui::Event::PointerButton { pos: away, button: egui::PointerButton::Primary, pressed: false, modifiers: m }]] {
+            draw(&mut h, &mut sh, ev);
+        }
+        assert!(!sh.cancel_countdown);
+        for ev in [vec![egui::Event::PointerMoved(c)], vec![egui::Event::PointerButton { pos: c, button: egui::PointerButton::Primary, pressed: true, modifiers: m }], vec![egui::Event::PointerButton { pos: c, button: egui::PointerButton::Primary, pressed: false, modifiers: m }]] {
+            draw(&mut h, &mut sh, ev);
+        }
+        assert!(sh.cancel_countdown);
     }
 
     #[test]
