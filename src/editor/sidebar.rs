@@ -81,6 +81,10 @@ pub struct State {
     capturing_shortcut: bool,
     pub camera: super::camera_ui::State,
     pub privacy: super::privacy_ui::State,
+    /// Frame shown in the manual zoom picker: for which time (ms), and
+    /// the one being decoded.
+    focus_frame: Option<(i64, egui::TextureHandle)>,
+    focus_loading: Option<(i64, Receiver<Option<egui::ColorImage>>)>,
 }
 
 /// Plays a background audio file by itself (the "Play <track>" button).
@@ -202,7 +206,7 @@ pub fn show(
                     if let Some(sel) = *selected {
                         match sel.track {
                             Track::Zoom if sel.index < edit.zoom_segments.len() => {
-                                zoom_segment(ui, edit, sel.index, selected);
+                                zoom_segment(ui, state, edit, sel.index, selected, rec);
                                 return;
                             }
                             Track::Mask if sel.index < edit.masks.len() => {
@@ -913,7 +917,53 @@ fn slice_editor(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Opt
     }
 }
 
-fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Option<Selection>) {
+/// The recording's frame at time `t`, small, for the manual zoom picker;
+/// decoded in the background and kept while the same zoom is open.
+fn focus_frame<'a>(ui: &Ui, state: &'a mut State, rec: &Recording, t: f64) -> Option<&'a egui::TextureHandle> {
+    let key = (t * 1000.0) as i64;
+    if let Some((k, rx)) = &state.focus_loading {
+        match rx.try_recv() {
+            Ok(img) => {
+                let k = *k;
+                state.focus_loading = None;
+                if let Some(img) = img {
+                    state.focus_frame = Some((k, ui.ctx().load_texture("zoom-focus-frame", img, Default::default())));
+                }
+            }
+            Err(TryRecvError::Disconnected) => state.focus_loading = None,
+            Err(TryRecvError::Empty) => ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)),
+        }
+    }
+    let have = state.focus_frame.as_ref().is_some_and(|f| f.0 == key);
+    let loading = state.focus_loading.as_ref().is_some_and(|l| l.0 == key);
+    if !have && !loading {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (video, size, ctx) = (rec.dir.join(&rec.video), (rec.width, rec.height), ui.ctx().clone());
+        std::thread::spawn(move || {
+            let img = crate::decode::Decoder::open(&video, t, size, Some(640)).ok().and_then(|mut d| {
+                let mut buf = vec![];
+                d.read(&mut buf).ok()?.then(|| egui::ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &buf))
+            });
+            let _ = tx.send(img);
+            ctx.request_repaint();
+        });
+        state.focus_loading = Some((key, rx));
+    }
+    state.focus_frame.as_ref().filter(|f| f.0 == key || !have).map(|f| &f.1)
+}
+
+/// Manual focus for a zoom or loupe: Screen Studio's picker.
+fn manual_focus(ui: &mut Ui, state: &mut State, rec: &Recording, seg: &mut crate::edit::ZoomSegment) {
+    let ZoomFocus::Manual { mut x, mut y } = seg.focus else { return };
+    let t = (seg.start + seg.end) * 0.5;
+    let aspect = rec.width as f32 / rec.height.max(1) as f32;
+    let tex = focus_frame(ui, state, rec, t).cloned();
+    if widgets::focus_picker(ui, tex.as_ref(), aspect, &mut x, &mut y) {
+        seg.focus = ZoomFocus::Manual { x, y };
+    }
+}
+
+fn zoom_segment(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, i: usize, selected: &mut Option<Selection>, rec: &Recording) {
     let close = icons::button(ui, Icon::Back, "Close   Esc", egui::FontId::proportional(13.5), theme::TEXT, Some(theme::SURFACE), vec2(0.0, 34.0));
     if close.clicked() {
         *selected = None;
@@ -934,7 +984,8 @@ fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Opt
             seg.focus = if manual { ZoomFocus::Manual { x: 0.5, y: 0.5 } } else { ZoomFocus::Auto };
         }
         if manual {
-            help(ui, "Click on the preview to place the lens.");
+            help(ui, "Drag the dot to where the lens should be.");
+            manual_focus(ui, state, rec, seg);
         }
         theme::section(ui, &format!("Magnification  ·  {:.1}×", seg.scale));
         widgets::slider(ui, &mut seg.scale, 1.2..=4.0, Some(2.0));
@@ -961,11 +1012,15 @@ fn zoom_segment(ui: &mut Ui, edit: &mut EditConfig, i: usize, selected: &mut Opt
     help(
         ui,
         if manual {
-            "Click on the preview to choose where the camera zooms in."
+            "You can manually pick part of the video that will be zoomed in"
         } else {
             "Zoomed camera will automatically try to keep the mouse cursor visible."
         },
     );
+    if manual {
+        ui.add_space(6.0);
+        manual_focus(ui, state, rec, seg);
+    }
     ui.add_space(6.0);
     theme::section(ui, &format!("Zoom level  ·  {:.0}%", seg.scale * 100.0));
     help(ui, "How close to zoom on the cursor during this zoom phase");
