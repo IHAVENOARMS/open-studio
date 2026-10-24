@@ -105,6 +105,8 @@ struct Shared {
     area_drag: Option<AreaDrag>,
     settings: Settings,
     gear_open: bool,
+    /// Height of the settings menu's contents, from the last time it drew.
+    gear_content: f32,
     capturing_shortcut: bool,
     capturing_flag: bool,
     start: Option<DirectRequest>,
@@ -295,6 +297,7 @@ pub fn run() -> Result<Outcome> {
             area_drag: None,
             settings,
             gear_open: false,
+            gear_content: 700.0,
             capturing_shortcut: false,
             capturing_flag: false,
             start: None,
@@ -1412,10 +1415,11 @@ fn shortcut_row(ui: &mut egui::Ui, icon: Icon, label: &str, value: &mut String, 
     changed
 }
 
-fn gear_menu_rect(bar: Rect) -> Rect {
-    // Tall enough for everything; on a short screen it stops near the top
-    // and its contents scroll.
-    let h = 760.0f32.min(bar.top() - 24.0).max(200.0);
+/// The settings menu above the bar, as tall as its contents (`content`,
+/// measured as it's drawn); on a short screen it stops near the top and
+/// scrolls.
+fn gear_menu_rect(bar: Rect, content: f32) -> Rect {
+    let h = (content + 32.0).min(bar.top() - 24.0).max(200.0);
     Rect::from_min_size(pos2(bar.right() - 380.0, bar.top() - 12.0 - h), vec2(380.0, h))
 }
 
@@ -1614,7 +1618,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         sh.capturing_flag = false;
     }
     if sh.gear_open {
-        gear_menu(ui, sh, gear_menu_rect(bar));
+        gear_menu(ui, sh, gear_menu_rect(bar, sh.gear_content));
     }
     if sh.device_options.is_some() {
         device_options_panel(ui, sh, device_options_rect(ui.ctx(), bar));
@@ -1899,10 +1903,15 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
     let inner = r.shrink2(vec2(20.0, 16.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
     child.set_clip_rect(inner);
-    egui::ScrollArea::vertical().id_salt("gear-menu").max_height(inner.height()).auto_shrink([false, false]).show(&mut child, |ui| {
+    let out = egui::ScrollArea::vertical().id_salt("gear-menu").max_height(inner.height()).auto_shrink([false, false]).show(&mut child, |ui| {
         ui.set_width(inner.width() - 8.0);
         gear_menu_items(ui, sh);
     });
+    let h = out.content_size.y;
+    if (h - sh.gear_content).abs() > 0.5 {
+        sh.gear_content = h;
+        ui.ctx().request_repaint();
+    }
 }
 
 fn gear_menu_items(ui: &mut egui::Ui, sh: &mut Shared) {
@@ -2929,6 +2938,7 @@ mod tests {
             area_drag: None,
             settings: Settings::default(),
             gear_open: false,
+            gear_content: 700.0,
             capturing_shortcut: false,
             capturing_flag: false,
             start: None,
@@ -3091,7 +3101,7 @@ mod tests {
         h.click(&mut sh, gear);
         assert!(sh.gear_open);
         // The switch sits at the right edge of the first option row.
-        let m = gear_menu_rect(b).shrink(18.0);
+        let m = gear_menu_rect(b, sh.gear_content).shrink(18.0);
         let mut toggled = false;
         for dy in (0..90).step_by(4) {
             h.click(&mut sh, pos2(m.right() - 20.0, m.top() + 26.0 + dy as f32));
@@ -3135,7 +3145,7 @@ mod tests {
         let (mut h, mut sh) = (Harness::new(false), shared());
         let b = bar();
         h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
-        let m = gear_menu_rect(b).shrink(18.0);
+        let m = gear_menu_rect(b, sh.gear_content).shrink(18.0);
         // The shortcut button is on the last row, right-aligned.
         for dy in (60..150).step_by(4) {
             h.click(&mut sh, pos2(m.right() - 30.0, m.top() + dy as f32));
@@ -3371,7 +3381,7 @@ mod tests {
     fn settings_menu_fits() {
         isolate_config();
         let mut sh = shared();
-        let r = gear_menu_rect(bar());
+        let r = gear_menu_rect(bar(), 5000.0);
         let inner = r.shrink2(vec2(20.0, 16.0));
         let ctx = egui::Context::default();
         let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0))), ..Default::default() };
@@ -3386,6 +3396,20 @@ mod tests {
         assert!(used.width() <= inner.width(), "contents {:.0}px wide, room for {:.0}px", used.width(), inner.width());
     }
 
+    /// The menu is as tall as its contents: no empty space at the bottom.
+    #[test]
+    fn settings_menu_hugs_its_contents() {
+        isolate_config();
+        let (mut h, mut sh) = (Harness::new(false), shared());
+        let b = bar();
+        h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
+        h.frame(&mut sh, vec![]);
+        let measured = sh.gear_content;
+        assert!(measured > 300.0 && measured < 700.0, "contents measured as {measured}");
+        let r = gear_menu_rect(b, measured);
+        assert_eq!(r.height(), measured + 32.0, "16 px above and below the contents");
+    }
+
     #[test]
     fn countdown_and_camera_resolution_can_be_picked() {
         isolate_config();
@@ -3394,7 +3418,7 @@ mod tests {
         sh.settings.max_camera_height = 1080;
         let b = bar();
         h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
-        let m = gear_menu_rect(b).shrink(18.0);
+        let m = gear_menu_rect(b, sh.gear_content).shrink(18.0);
         let find = |h: &mut Harness, sh: &mut Shared, done: &dyn Fn(&Shared) -> bool| {
             for dy in (200..720).step_by(5) {
                 for dx in [20, 45, 70, 95, 120, 150, 180, 210, 240, 270, 300, 330] {
@@ -3419,7 +3443,7 @@ mod tests {
         assert_eq!(sh.settings.flag_shortcut, "Ctrl+Alt+F");
         let b = bar();
         h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
-        let m = gear_menu_rect(b).shrink(18.0);
+        let m = gear_menu_rect(b, sh.gear_content).shrink(18.0);
         for dy in (60..190).step_by(4) {
             h.click(&mut sh, pos2(m.right() - 30.0, m.top() + dy as f32));
             if sh.capturing_flag {
