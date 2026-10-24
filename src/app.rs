@@ -53,6 +53,10 @@ pub struct App {
     /// "Create project from video": the file dialog, then the import.
     picking_video: Option<Receiver<Vec<PathBuf>>>,
     importing: Option<Receiver<Result<PathBuf, String>>>,
+    /// Projects picked with Ctrl+click, to export together.
+    selected: Vec<PathBuf>,
+    picking_batch_dir: Option<Receiver<Vec<PathBuf>>>,
+    batch: Option<crate::batch::Batch>,
 }
 
 /// Saved projects, plus recordings never saved (left over when the app was
@@ -87,6 +91,9 @@ impl App {
             picking_projects_dir: None,
             picking_video: None,
             importing: None,
+            selected: vec![],
+            picking_batch_dir: None,
+            batch: None,
         };
         if let (Some(dir), Some(rs)) = (open, cc.wgpu_render_state.as_ref()) {
             app.open_editor(dir, &cc.egui_ctx, rs);
@@ -233,25 +240,130 @@ impl App {
                     });
                 });
                 ui.add_space(6.0);
+                // Export several projects at once.
+                if let Some(rx) = &self.picking_batch_dir {
+                    match rx.try_recv() {
+                        Ok(dirs) => {
+                            self.picking_batch_dir = None;
+                            if let Some(out) = dirs.into_iter().next() {
+                                let gpu = Some((rs.device.clone(), rs.queue.clone()));
+                                self.batch = Some(crate::batch::start(std::mem::take(&mut self.selected), out, crate::settings::Settings::load(), gpu, Some(ctx.clone())));
+                            }
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => self.picking_batch_dir = None,
+                        Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+                    }
+                }
+                if let Some(batch) = self.batch.clone() {
+                    let done = batch.finished();
+                    let items = batch.items.lock().unwrap();
+                    let n = items.len();
+                    let at = items.iter().position(|i| matches!(i.status, crate::batch::Status::Exporting(_)));
+                    let title = match at {
+                        Some(i) => format!("Exporting {} of {n}", i + 1),
+                        None if done => format!("Exported {} of {n}", items.iter().filter(|i| matches!(i.status, crate::batch::Status::Done(_))).count()),
+                        None => "Preparing export…".to_string(),
+                    };
+                    ui.label(RichText::new(title).font(theme::semibold(15.0)));
+                    ui.add_space(4.0);
+                    let mut folder = None;
+                    for it in items.iter() {
+                        use crate::batch::Status::*;
+                        let (state, p) = match &it.status {
+                            Waiting => ("Waiting for previous export to finish".to_string(), None),
+                            Exporting(p) => (format!("{:.0}%", *p as f32 / 10.0), Some(*p as f32 / 1000.0)),
+                            Done(out) => {
+                                folder = out.parent().map(|p| p.to_path_buf());
+                                ("Done".to_string(), None)
+                            }
+                            Failed(e) => (format!("Failed: {e}"), None),
+                            Stopped => ("Stopped".to_string(), None),
+                        };
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&it.name).size(13.5));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(state).size(12.5).color(theme::TEXT_DIM));
+                            });
+                        });
+                        if let Some(p) = p {
+                            ui.add(egui::ProgressBar::new(p).desired_height(4.0).fill(theme::ACCENT));
+                        }
+                    }
+                    drop(items);
+                    ui.horizontal(|ui| {
+                        if !done {
+                            if ui.button("Stop export").clicked() {
+                                batch.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        } else {
+                            if let Some(f) = &folder {
+                                if ui.button("Show in folder").clicked() {
+                                    let _ = std::process::Command::new("xdg-open").arg(f).spawn();
+                                }
+                            }
+                            if ui.button("Done").clicked() {
+                                self.batch = None;
+                            }
+                        }
+                    });
+                    ui.add_space(14.0);
+                } else if !self.selected.is_empty() {
+                    ui.horizontal(|ui| {
+                        let n = self.selected.len();
+                        ui.label(RichText::new(format!("{n} selected")).size(13.5));
+                        let label = if n == 1 { "Export 1 project…".to_string() } else { format!("Export {n} projects…") };
+                        if icons::button(ui, Icon::Export, &label, egui::FontId::proportional(13.5), Color32::WHITE, Some(theme::ACCENT), vec2(0.0, 32.0)).clicked()
+                            && self.picking_batch_dir.is_none()
+                        {
+                            let dir = crate::settings::Settings::load().export_dir;
+                            self.picking_batch_dir = Some(crate::dialogs::open_folder(ctx.clone(), "Export projects to", Some(dir)));
+                        }
+                        if ui.button("Clear").clicked() {
+                            self.selected.clear();
+                        }
+                    });
+                    ui.add_space(6.0);
+                } else if self.projects.len() > 1 {
+                    ui.label(RichText::new("Ctrl+click projects to export several at once.").size(12.0).color(theme::TEXT_DIM));
+                    ui.add_space(4.0);
+                }
                 let mut open = None;
+                let mut toggle = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if self.projects.is_empty() {
                         ui.label(RichText::new("No recordings yet.").color(theme::TEXT_DIM));
                     }
                     for p in &self.projects {
                         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+                        let picked = self.selected.contains(&p.dir);
                         let fill = if resp.hovered() { theme::SURFACE_HOVER } else { theme::PANEL };
                         ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+                        if picked {
+                            ui.painter().rect_stroke(rect, CornerRadius::same(10), egui::Stroke::new(1.5, theme::KNOB), egui::StrokeKind::Inside);
+                        }
                         let g = ui.painter().text(rect.left_center() + vec2(16.0, 0.0), egui::Align2::LEFT_CENTER, &p.name, egui::FontId::proportional(14.0), theme::TEXT);
                         if p.unsaved {
                             ui.painter().text(g.right_center() + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, "Not saved", egui::FontId::proportional(12.5), theme::TEXT_DIM);
                         }
                         ui.painter().text(rect.right_center() - vec2(16.0, 0.0), egui::Align2::RIGHT_CENTER, format_time(p.duration), egui::FontId::proportional(13.0), theme::TEXT_DIM);
                         if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                            open = Some(p.dir.clone());
+                            // Ctrl+click picks it for exporting together.
+                            if ui.input(|i| i.modifiers.command) || !self.selected.is_empty() {
+                                toggle = Some(p.dir.clone());
+                            } else {
+                                open = Some(p.dir.clone());
+                            }
                         }
                     }
                 });
+                if let Some(dir) = toggle {
+                    match self.selected.iter().position(|d| *d == dir) {
+                        Some(i) => {
+                            self.selected.remove(i);
+                        }
+                        None => self.selected.push(dir),
+                    }
+                }
                 if let Some(dir) = open {
                     self.open_editor(dir, &ctx, rs);
                 }

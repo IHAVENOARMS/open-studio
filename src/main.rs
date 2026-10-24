@@ -1,4 +1,5 @@
 mod app;
+mod batch;
 mod bidi;
 mod clicks;
 mod clipboard;
