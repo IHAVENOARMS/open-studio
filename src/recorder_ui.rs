@@ -635,7 +635,12 @@ impl Rt {
     fn begin_quick_share(&mut self, dir: PathBuf) {
         self.recording = None;
         self.shared.settings.show_notes = false;
-        let monitor = self.surfaces.iter().find(|s| matches!(s.kind, SurfKind::Widget)).map(|s| s.monitor.clone());
+        // Where you're looking: the monitor with the mouse (you just clicked
+        // Stop there), else the one the controls were on.
+        let cursor = hyprland::cursor_pos().ok();
+        let monitor = cursor
+            .and_then(|(x, y)| self.shared.monitors.iter().find(|m| m.global().contains(pos2(x as f32, y as f32))).cloned())
+            .or_else(|| self.surfaces.iter().find(|s| matches!(s.kind, SurfKind::Widget)).map(|s| s.monitor.clone()));
         self.destroy_surfaces();
         let rec = match crate::project::Recording::load(&dir) {
             Ok(r) => r,
