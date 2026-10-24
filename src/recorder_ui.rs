@@ -1413,7 +1413,10 @@ fn shortcut_row(ui: &mut egui::Ui, icon: Icon, label: &str, value: &mut String, 
 }
 
 fn gear_menu_rect(bar: Rect) -> Rect {
-    Rect::from_min_size(pos2(bar.right() - 360.0, bar.top() - 612.0), vec2(360.0, 600.0))
+    // Tall enough for everything; on a short screen it stops near the top
+    // and its contents scroll.
+    let h = 760.0f32.min(bar.top() - 24.0).max(200.0);
+    Rect::from_min_size(pos2(bar.right() - 380.0, bar.top() - 12.0 - h), vec2(380.0, h))
 }
 
 /// Title, subtitle and a "Start recording" button centred on `c`, drawn at
@@ -1893,8 +1896,16 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
     p.add(egui::epaint::Shadow { offset: [0, 8], blur: 30, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(r, CornerRadius::same(14)));
     p.rect_filled(r, 14.0, BAR_BG);
     p.rect_stroke(r, 14.0, Stroke::new(1.0, BAR_BORDER), StrokeKind::Inside);
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r.shrink(18.0)).layout(egui::Layout::top_down(egui::Align::Min)));
-    let ui = &mut child;
+    let inner = r.shrink2(vec2(20.0, 16.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)));
+    child.set_clip_rect(inner);
+    egui::ScrollArea::vertical().id_salt("gear-menu").max_height(inner.height()).auto_shrink([false, false]).show(&mut child, |ui| {
+        ui.set_width(inner.width() - 8.0);
+        gear_menu_items(ui, sh);
+    });
+}
+
+fn gear_menu_items(ui: &mut egui::Ui, sh: &mut Shared) {
     ui.spacing_mut().item_spacing.y = 10.0;
     ui.label(egui::RichText::new("Recording").font(theme::semibold(14.0)).color(BAR_TEXT));
     let mut changed = false;
@@ -1941,21 +1952,18 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
     toggle(ui, "Show speaker notes", "Your notes and a teleprompter, seen only by you.  Ctrl+Alt+/", &mut sh.settings.show_notes);
     toggle(ui, "Highlight recorded area", "Dims the part of the screen that isn't being recorded.", &mut sh.settings.highlight_recorded_area);
     toggle(ui, "Create zooms automatically", "Zooms are made from your clicks in every new project.", &mut sh.settings.auto_zooms);
+    // Label above, choices under it: they don't fit beside a long label.
+    ui.label(egui::RichText::new("Recording countdown").size(13.5).color(BAR_TEXT));
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Recording countdown").size(13.5).color(BAR_TEXT));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            for (secs, label) in [(10, "10s"), (5, "5s"), (3, "3s"), (0, "Off")] {
-                changed |= small_choice(ui, label, &mut sh.settings.countdown, secs);
-            }
-        });
+        for (secs, label) in [(0, "Off"), (3, "3s"), (5, "5s"), (10, "10s")] {
+            changed |= small_choice(ui, label, &mut sh.settings.countdown, secs);
+        }
     });
+    ui.label(egui::RichText::new("Maximum camera resolution").size(13.5).color(BAR_TEXT));
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Maximum camera resolution").size(13.5).color(BAR_TEXT));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            for (h, label) in [(2160, "4K"), (1080, "1080p"), (720, "720p")] {
-                changed |= small_choice(ui, label, &mut sh.settings.max_camera_height, h);
-            }
-        });
+        for (h, label) in [(720, "720p"), (1080, "1080p"), (2160, "4K")] {
+            changed |= small_choice(ui, label, &mut sh.settings.max_camera_height, h);
+        }
     });
     ui.label(egui::RichText::new("Higher resolutions look better but may slow down recording.").size(12.0).color(BAR_DIM));
     if changed {
@@ -3357,6 +3365,27 @@ mod tests {
         assert!(sh.cancel_countdown);
     }
 
+    /// Everything in the settings menu fits inside it (no spilling onto the
+    /// bar) on a 1080p screen, and no row is wider than the menu.
+    #[test]
+    fn settings_menu_fits() {
+        isolate_config();
+        let mut sh = shared();
+        let r = gear_menu_rect(bar());
+        let inner = r.shrink2(vec2(20.0, 16.0));
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0))), ..Default::default() };
+        let mut used = Rect::NOTHING;
+        let mut out = ctx.run_ui(raw, |ui| {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(inner.min, vec2(inner.width() - 8.0, 5000.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+            gear_menu_items(&mut child, &mut sh);
+            used = child.min_rect();
+        });
+        out.textures_delta.clear();
+        assert!(used.height() <= inner.height(), "contents {:.0}px tall, room for {:.0}px", used.height(), inner.height());
+        assert!(used.width() <= inner.width(), "contents {:.0}px wide, room for {:.0}px", used.width(), inner.width());
+    }
+
     #[test]
     fn countdown_and_camera_resolution_can_be_picked() {
         isolate_config();
@@ -3367,8 +3396,8 @@ mod tests {
         h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
         let m = gear_menu_rect(b).shrink(18.0);
         let find = |h: &mut Harness, sh: &mut Shared, done: &dyn Fn(&Shared) -> bool| {
-            for dy in (200..590).step_by(5) {
-                for dx in [20, 45, 70, 95, 120] {
+            for dy in (200..720).step_by(5) {
+                for dx in [20, 45, 70, 95, 120, 150, 180, 210, 240, 270, 300, 330] {
                     if done(sh) {
                         return;
                     }
