@@ -90,6 +90,14 @@ pub fn dispatch(lua: &str, legacy: &str) -> Result<()> {
     if reply.trim() == "ok" { Ok(()) } else { Err(anyhow!("hyprctl dispatch failed: {}", reply.trim())) }
 }
 
+/// Keeps layer surfaces with this namespace out of screen capture (so
+/// speaker notes aren't recorded). Hyprland 0.56+ (Lua config); older
+/// versions ignore it. True when Hyprland took the rule.
+pub fn hide_layer_from_capture(namespace: &str) -> bool {
+    let lua = format!("hl.layer_rule({{ name = \"{namespace}\", match = {{ namespace = \"^{namespace}$\" }}, no_screen_share = true }})");
+    request(&format!("eval {lua}")).is_ok_and(|r| r.trim() == "ok")
+}
+
 /// Moves the window owned by `pid` to a workspace without following it.
 pub fn move_window_to_workspace(pid: u32, workspace: &str, follow: bool) -> Result<()> {
     let lua = format!("hl.dsp.window.move({{workspace=\"{workspace}\", follow={follow}, window=\"pid:{pid}\"}})");

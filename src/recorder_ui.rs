@@ -138,6 +138,14 @@ struct Shared {
     can_pause: bool,
     /// Recording flags made so far.
     flags: usize,
+    /// Speaker notes prompter running, and how far it has scrolled.
+    prompting: bool,
+    prompter_offset: f32,
+    /// Speaker notes settings popover open.
+    notes_menu: bool,
+    /// The notes are on the recorded screen with nothing keeping them out
+    /// of the recording.
+    notes_recorded: bool,
     /// Level of the chosen microphone, while the bar is showing.
     mic_meter: Option<record::audio::MicMeter>,
     /// Microphone the meter was started for.
@@ -165,6 +173,8 @@ enum SurfKind {
     /// Highlight recorded area: dims a monitor around what's recorded.
     /// Clicks pass through.
     Dim,
+    /// Speaker notes: a private teleprompter.
+    Notes,
 }
 
 struct Surf {
@@ -213,6 +223,9 @@ struct Rt {
     recording: Option<Recording>,
     /// Counting down to this recording, since then.
     countdown: Option<(DirectRequest, Instant)>,
+    /// Global shortcuts while recording: show notes, start/stop prompter.
+    notes_hit: Arc<AtomicBool>,
+    prompter_hit: Arc<AtomicBool>,
     shortcut_hit: Arc<AtomicBool>,
     shortcut_stop: Arc<AtomicBool>,
     start_time: Instant,
@@ -298,6 +311,10 @@ pub fn run() -> Result<Outcome> {
             paused: false,
             can_pause: false,
             flags: 0,
+            prompting: false,
+            prompter_offset: 0.0,
+            notes_menu: false,
+            notes_recorded: false,
             mic_meter: None,
             mic_meter_for: None,
             countdown: None,
@@ -309,6 +326,8 @@ pub fn run() -> Result<Outcome> {
         },
         recording: None,
         countdown: None,
+        notes_hit: Arc::new(AtomicBool::new(false)),
+        prompter_hit: Arc::new(AtomicBool::new(false)),
         shortcut_hit: Arc::new(AtomicBool::new(false)),
         shortcut_stop: Arc::new(AtomicBool::new(false)),
         start_time: Instant::now(),
@@ -422,7 +441,8 @@ impl Rt {
 
     fn new_surface(&mut self, kind: SurfKind, monitor: Monitor, output: Option<&wl_output::WlOutput>) {
         let surface = self.compositor.create_surface(&self.qh);
-        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Overlay, Some("open-studio"), output);
+        let namespace = if matches!(kind, SurfKind::Notes) { NOTES_NAMESPACE } else { "open-studio" };
+        let layer = self.layer_shell.create_layer_surface(&self.qh, surface, Layer::Overlay, Some(namespace), output);
         match kind {
             SurfKind::Overlay => {
                 layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
@@ -436,6 +456,12 @@ impl Rt {
                 layer.set_margin(0, 0, 36, 0);
                 layer.set_size(WIDGET_W, WIDGET_H);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            }
+            SurfKind::Notes => {
+                layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
+                layer.set_margin(56, 56, 0, 0);
+                layer.set_size(NOTES_W, NOTES_H);
+                layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
             }
             SurfKind::Countdown | SurfKind::Dim => {
                 layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
@@ -564,6 +590,14 @@ impl Rt {
         if self.countdown.is_some() {
             self.update_countdown();
         }
+        if self.notes_hit.swap(false, Ordering::Relaxed) {
+            self.shared.settings.show_notes = !self.shared.settings.show_notes;
+            self.shared.settings.save();
+        }
+        if self.prompter_hit.swap(false, Ordering::Relaxed) {
+            self.shared.prompting = !self.shared.prompting;
+        }
+        self.sync_notes();
         if self.recording.is_some() {
             self.update_recording();
         }
@@ -573,6 +607,33 @@ impl Rt {
             if due {
                 self.draw(i);
             }
+        }
+    }
+
+    /// Shows or hides the speaker notes as the setting says. While
+    /// recording they go on a screen that isn't recorded when there is one;
+    /// on Hyprland they're also kept out of capture.
+    fn sync_notes(&mut self) {
+        let want = self.shared.settings.show_notes;
+        let at = self.surfaces.iter().position(|s| matches!(s.kind, SurfKind::Notes));
+        match (want, at) {
+            (true, None) => {
+                let recording = self.recording.is_some() || self.countdown.is_some();
+                let recorded = recording.then_some(self.shared.recorded_rect);
+                let Some(m) = notes_monitor(&self.shared.monitors, &self.shared.bar_monitor, recorded) else { return };
+                let hidden = record::hyprland::available() && record::hyprland::hide_layer_from_capture(NOTES_NAMESPACE);
+                let on_recorded = recorded.is_some_and(|r| m.global().intersects(r));
+                self.shared.notes_recorded = on_recorded && !hidden;
+                let out = self.output_for(&m.name);
+                self.new_surface(SurfKind::Notes, m, out.as_ref());
+            }
+            (false, Some(i)) => {
+                let s = self.surfaces.remove(i);
+                drop(s.wgpu);
+                drop(s.layer);
+                self.shared.prompting = false;
+            }
+            _ => {}
         }
     }
 
@@ -656,6 +717,13 @@ impl Rt {
         if let Some(sc) = record::input::Shortcut::parse(&self.shared.settings.stop_shortcut) {
             self.shortcut_hit.store(false, Ordering::Relaxed);
             record::input::watch_shortcut(sc, self.shortcut_hit.clone(), self.shortcut_stop.clone());
+        }
+        // Speaker notes: show (Ctrl+Alt+/) and start/stop the prompter
+        // (Ctrl+Alt+.), as Screen Studio's ⌥⌘/ and ⌥⌘.
+        for (keys, hit) in [(NOTES_SHORTCUT, &self.notes_hit), (PROMPTER_SHORTCUT, &self.prompter_hit)] {
+            if let Some(sc) = record::input::Shortcut::parse(keys) {
+                record::input::watch_shortcut(sc, hit.clone(), self.shortcut_stop.clone());
+            }
         }
         if self.shared.settings.highlight_recorded_area {
             let req = self.recording.as_ref().unwrap().request.clone();
@@ -767,12 +835,14 @@ impl Rt {
             SurfKind::Widget => 1,
             SurfKind::Countdown => 2,
             SurfKind::Dim => 3,
+            SurfKind::Notes => 4,
         };
         let shared = &mut self.shared;
         let out = surf.ctx.run_ui(raw, |ui| match kind {
             1 => widget_ui(ui, shared),
             2 => countdown_ui(ui, shared, &monitor),
             3 => dim_ui(ui, shared, &monitor),
+            4 => notes_ui(ui, shared),
             _ => overlay_ui(ui, shared, &monitor),
         });
         // Cursor shape for this surface.
@@ -1238,7 +1308,7 @@ fn shortcut_row(ui: &mut egui::Ui, icon: Icon, label: &str, value: &mut String, 
 }
 
 fn gear_menu_rect(bar: Rect) -> Rect {
-    Rect::from_min_size(pos2(bar.right() - 360.0, bar.top() - 492.0), vec2(360.0, 480.0))
+    Rect::from_min_size(pos2(bar.right() - 360.0, bar.top() - 552.0), vec2(360.0, 540.0))
 }
 
 /// Title, subtitle and a "Start recording" button centred on `c`, drawn at
@@ -1762,6 +1832,7 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
         });
         ui.label(egui::RichText::new(help).size(12.0).color(BAR_DIM));
     };
+    toggle(ui, "Show speaker notes", "Your notes and a teleprompter, seen only by you.  Ctrl+Alt+/", &mut sh.settings.show_notes);
     toggle(ui, "Highlight recorded area", "Dims the part of the screen that isn't being recorded.", &mut sh.settings.highlight_recorded_area);
     toggle(ui, "Create zooms automatically", "Zooms are made from your clicks in every new project.", &mut sh.settings.auto_zooms);
     ui.horizontal(|ui| {
@@ -2076,6 +2147,133 @@ fn mic_level(sh: &mut Shared) -> Option<f32> {
     Some(sh.mic_meter.as_ref()?.level())
 }
 
+/// Speaker notes panel size, and its layer namespace (kept out of capture).
+const NOTES_W: u32 = 380;
+const NOTES_H: u32 = 460;
+const NOTES_NAMESPACE: &str = "open-studio-notes";
+const NOTES_SHORTCUT: &str = "Ctrl+Alt+/";
+const PROMPTER_SHORTCUT: &str = "Ctrl+Alt+.";
+
+/// Where speaker notes go: while recording (`recorded` is what's
+/// recorded), a monitor that isn't recorded if any; otherwise the one with
+/// the recording bar.
+fn notes_monitor(monitors: &[Monitor], bar: &str, recorded: Option<Rect>) -> Option<Monitor> {
+    if let Some(r) = recorded {
+        if let Some(m) = monitors.iter().find(|m| !m.global().intersects(r)) {
+            return Some(m.clone());
+        }
+        return monitor_for(monitors, r);
+    }
+    monitors.iter().find(|m| m.name == bar).or(monitors.first()).cloned()
+}
+
+/// Speaker notes, as in Screen Studio: notes you type, and a prompter
+/// that scrolls them at your pace (play button), with speed, opacity and
+/// font size in its settings.
+fn notes_ui(ui: &mut egui::Ui, sh: &mut Shared) {
+    let r = ui.max_rect().shrink(6.0);
+    let p = ui.painter().clone();
+    let alpha = (sh.settings.notes_opacity.clamp(0.2, 1.0) * 245.0) as u8;
+    p.add(egui::epaint::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(alpha / 2) }.as_shape(r, CornerRadius::same(16)));
+    p.rect_filled(r, 16.0, Color32::from_rgba_unmultiplied(10, 10, 12, alpha));
+    p.rect_stroke(r, 16.0, Stroke::new(1.0, Color32::from_white_alpha(28)), StrokeKind::Inside);
+    // Top row: title, play/pause, settings.
+    let top = Rect::from_min_size(r.min + vec2(14.0, 12.0), vec2(r.width() - 28.0, 40.0));
+    p.text(pos2(top.left(), top.center().y), Align2::LEFT_CENTER, "Speaker notes", FontId::proportional(13.0), BAR_DIM);
+    let button = |ui: &mut egui::Ui, at: Rect, id: &str, icon: Icon, tip: &str, on: bool| {
+        let resp = ui.interact(at, ui.scope_id().with(id), Sense::click()).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let fill = if on { Color32::from_white_alpha(30) } else if resp.hovered() { Color32::from_white_alpha(18) } else { Color32::from_white_alpha(9) };
+        ui.painter().rect_filled(at, 9.0, fill);
+        icons::paint(ui.painter(), at.shrink(10.0), icon, BAR_TEXT);
+        resp.clicked()
+    };
+    let gear = Rect::from_min_size(pos2(top.right() - 40.0, top.top()), vec2(40.0, 40.0));
+    let play = gear.translate(vec2(-48.0, 0.0));
+    if button(ui, play, "prompter", if sh.prompting { Icon::Pause } else { Icon::Play }, "Start/stop prompter  (Ctrl+Alt+.)", sh.prompting) {
+        sh.prompting = !sh.prompting;
+        sh.notes_menu = false;
+        sh.settings.save();
+    }
+    if button(ui, gear, "notes-gear", Icon::Gear, "Settings", sh.notes_menu) {
+        sh.notes_menu = !sh.notes_menu;
+    }
+    // Body.
+    let body = Rect::from_min_max(pos2(r.left() + 18.0, top.bottom() + 14.0), pos2(r.right() - 18.0, r.bottom() - if sh.notes_recorded { 34.0 } else { 16.0 }));
+    let font = FontId::proportional(sh.settings.notes_font_size.clamp(10.0, 64.0));
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).layout(egui::Layout::top_down(egui::Align::Min)));
+    if sh.prompting {
+        let dt = ui.input(|i| i.stable_dt).min(0.1);
+        sh.prompter_offset += sh.settings.prompter_speed * dt;
+        let out = egui::ScrollArea::vertical()
+            .id_salt("prompter")
+            .vertical_scroll_offset(sh.prompter_offset)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(&mut child, |ui| {
+                ui.set_width(body.width());
+                ui.label(egui::RichText::new(&sh.settings.notes).font(font.clone()).color(Color32::WHITE));
+                // Room to scroll the last line up to the top.
+                ui.add_space(body.height());
+            });
+        // At the end: stop there.
+        let max = (out.content_size.y - body.height()).max(0.0);
+        if sh.prompter_offset >= max {
+            // Done: the next start begins at the top again.
+            sh.prompter_offset = 0.0;
+            sh.prompting = false;
+        }
+        ui.ctx().request_repaint();
+    } else {
+        egui::ScrollArea::vertical().id_salt("notes-edit").show(&mut child, |ui| {
+            let edit = egui::TextEdit::multiline(&mut sh.settings.notes)
+                .font(font)
+                .text_color(Color32::WHITE)
+                .frame(egui::Frame::NONE)
+                .hint_text("Type or paste your notes here. Only you can see them.")
+                .desired_width(body.width())
+                .desired_rows(12);
+            let resp = ui.add(edit);
+            if resp.changed() {
+                sh.prompter_offset = 0.0;
+            }
+            if resp.lost_focus() {
+                sh.settings.save();
+            }
+        });
+    }
+    if sh.notes_recorded {
+        p.text(pos2(r.left() + 18.0, r.bottom() - 14.0), Align2::LEFT_BOTTOM, "Visible in the recording on this screen", FontId::proportional(11.5), Color32::from_rgb(0xff, 0x8a, 0x80));
+    }
+    // Settings popover, as in Screen Studio.
+    if sh.notes_menu {
+        let m = Rect::from_min_size(pos2(r.right() - 270.0, gear.bottom() + 6.0), vec2(256.0, 236.0));
+        p.add(egui::epaint::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(140) }.as_shape(m, CornerRadius::same(12)));
+        p.rect_filled(m, 12.0, BAR_BG);
+        p.rect_stroke(m, 12.0, Stroke::new(1.0, BAR_BORDER), StrokeKind::Inside);
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(m.shrink(16.0)).layout(egui::Layout::top_down(egui::Align::Min)));
+        let ui = &mut child;
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let mut changed = false;
+        let mut row = |ui: &mut egui::Ui, icon: Icon, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f64>, default: Option<f64>| {
+            ui.horizontal(|ui| {
+                let (ir, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                icons::paint(ui.painter(), ir, icon, BAR_TEXT);
+                ui.label(egui::RichText::new(label).size(13.5).color(BAR_TEXT));
+            });
+            let mut v = *value as f64;
+            if crate::editor::slider(ui, &mut v, range, default) {
+                *value = v as f32;
+                changed = true;
+            }
+        };
+        row(ui, Icon::Speedometer, "Prompter speed", &mut sh.settings.prompter_speed, 10.0..=200.0, None);
+        row(ui, Icon::Contrast, "Notepad opacity", &mut sh.settings.notes_opacity, 0.2..=1.0, None);
+        row(ui, Icon::TextSize, "Font size", &mut sh.settings.notes_font_size, 12.0..=48.0, Some(20.0));
+        if changed {
+            sh.settings.save();
+        }
+    }
+}
+
 /// Countdown circle size, logical pixels.
 const COUNTDOWN_SIZE: f32 = 200.0;
 
@@ -2263,6 +2461,7 @@ impl LayerShellHandler for Rt {
             (w, h) = match self.surfaces[i].kind {
                 SurfKind::Widget => (WIDGET_W, WIDGET_H),
                 SurfKind::Overlay | SurfKind::Countdown | SurfKind::Dim => (m.rect[2] as u32, m.rect[3] as u32),
+                SurfKind::Notes => (NOTES_W, NOTES_H),
             };
         }
         self.surfaces[i].size = (w, h);
@@ -2471,6 +2670,10 @@ mod tests {
             paused: false,
             can_pause: true,
             flags: 0,
+            prompting: false,
+            prompter_offset: 0.0,
+            notes_menu: false,
+            notes_recorded: false,
             mic_meter: None,
             mic_meter_for: None,
             countdown: None,
@@ -2715,6 +2918,71 @@ mod tests {
         // The edge not being dragged doesn't snap.
         let (s, _) = snap_area(Rect::from_min_max(pos2(4.0, 100.0), pos2(700.0, 500.0)), screen, AreaDrag::Handle(1, 0));
         assert_eq!(s.left(), 4.0);
+    }
+
+    #[test]
+    fn speaker_notes_prompter_scrolls_and_stops() {
+        isolate_config();
+        let mut h = Harness::new(false);
+        h.size = vec2(NOTES_W as f32, NOTES_H as f32);
+        let mut sh = shared();
+        sh.settings.notes = (1..=40).map(|i| format!("Line {i} of the script.")).collect::<Vec<_>>().join("\n");
+        sh.settings.prompter_speed = 200.0;
+        let draw = |h: &mut Harness, sh: &mut Shared, events: Vec<egui::Event>| {
+            h.t += 0.05;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)), time: Some(h.t), events, ..Default::default() };
+            let mut out = h.ctx.run_ui(raw, |ui| notes_ui(ui, sh));
+            out.textures_delta.clear();
+        };
+        let m = egui::Modifiers::default();
+        let click = |h: &mut Harness, sh: &mut Shared, pos: Pos2| {
+            draw(h, sh, vec![egui::Event::PointerMoved(pos)]);
+            draw(h, sh, vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
+            draw(h, sh, vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
+        };
+        draw(&mut h, &mut sh, vec![]);
+        // The play button: left of the settings button, top right.
+        let r = Rect::from_min_size(Pos2::ZERO, h.size).shrink(6.0);
+        let gear = pos2(r.right() - 14.0 - 20.0, r.top() + 12.0 + 20.0);
+        let play = gear - vec2(48.0, 0.0);
+        click(&mut h, &mut sh, play);
+        assert!(sh.prompting, "play didn't start the prompter");
+        let before = sh.prompter_offset;
+        for _ in 0..10 {
+            draw(&mut h, &mut sh, vec![]);
+        }
+        assert!(sh.prompter_offset > before + 20.0, "prompter didn't scroll: {}", sh.prompter_offset);
+        // Pausing keeps the place.
+        click(&mut h, &mut sh, play);
+        assert!(!sh.prompting);
+        let kept = sh.prompter_offset;
+        draw(&mut h, &mut sh, vec![]);
+        assert_eq!(sh.prompter_offset, kept);
+        // Played to the end, it stops and starts over next time.
+        click(&mut h, &mut sh, play);
+        for _ in 0..400 {
+            if !sh.prompting {
+                break;
+            }
+            draw(&mut h, &mut sh, vec![]);
+        }
+        assert!(!sh.prompting && sh.prompter_offset == 0.0, "never reached the end");
+        // Settings popover.
+        click(&mut h, &mut sh, gear);
+        assert!(sh.notes_menu);
+    }
+
+    #[test]
+    fn notes_go_where_they_are_not_recorded() {
+        let a = Monitor { name: "A".into(), description: String::new(), rect: [0.0, 0.0, 1920.0, 1080.0], pixels: (1920, 1080), refresh: 60.0 };
+        let b = Monitor { name: "B".into(), description: String::new(), rect: [1920.0, 0.0, 1920.0, 1080.0], pixels: (1920, 1080), refresh: 60.0 };
+        let both = [a.clone(), b.clone()];
+        let on_a = Rect::from_min_size(pos2(100.0, 100.0), vec2(800.0, 600.0));
+        assert_eq!(notes_monitor(&both, "A", Some(on_a)).unwrap().name, "B");
+        // One screen: it has to be that one.
+        assert_eq!(notes_monitor(&[a.clone()], "A", Some(on_a)).unwrap().name, "A");
+        // Not recording: next to the recording bar.
+        assert_eq!(notes_monitor(&both, "B", None).unwrap().name, "B");
     }
 
     #[test]

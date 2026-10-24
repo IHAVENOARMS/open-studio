@@ -108,6 +108,8 @@ fn key_from_name(k: &str) -> Option<KeyCode> {
         "p" => KeyCode::KEY_P,
         "2" => KeyCode::KEY_2,
         "5" => KeyCode::KEY_5,
+        "/" | "slash" => KeyCode::KEY_SLASH,
+        "." | "period" => KeyCode::KEY_DOT,
         _ => {
             let c = k.chars().next()?;
             if k.len() == 1 && c.is_ascii_alphabetic() {

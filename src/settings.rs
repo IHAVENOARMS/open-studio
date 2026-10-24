@@ -85,6 +85,13 @@ pub struct Settings {
     pub countdown: u32,
     /// Webcams record at most this tall (720, 1080 or 2160).
     pub max_camera_height: u32,
+    /// Speaker notes: shown, their text, and the prompter's look.
+    pub show_notes: bool,
+    pub notes: String,
+    /// Prompter scroll speed, pixels per second.
+    pub prompter_speed: f32,
+    pub notes_opacity: f32,
+    pub notes_font_size: f32,
     /// Draw the system cursor into the video instead of re-rendering it.
     pub bake_cursor: bool,
     /// Microphone to record (Pulse source name), or None.
@@ -189,6 +196,11 @@ impl Default for Settings {
             highlight_recorded_area: true,
             countdown: 0,
             max_camera_height: 1080,
+            show_notes: false,
+            notes: String::new(),
+            prompter_speed: 40.0,
+            notes_opacity: 1.0,
+            notes_font_size: 20.0,
             bake_cursor: false,
             microphone: None,
             system_audio: false,

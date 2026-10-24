@@ -61,6 +61,8 @@ pub enum Icon {
     PauseCircle,
     Keyboard,
     Flag,
+    Contrast,
+    TextSize,
     Mic,
     // Editor rail.
     RailBackground,
@@ -548,6 +550,24 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.rrect(7.5, 2.5, 12.5, 11.5, 2.5);
             pen.line(&[(4.5, 9.0), (4.5, 10.0), (6.0, 13.5), (10.0, 15.0), (14.0, 13.5), (15.5, 10.0), (15.5, 9.0)]);
             pen.line(&[(10.0, 15.0), (10.0, 17.5)]);
+        }
+        Icon::Contrast => {
+            // A circle, one half filled (opacity).
+            pen.circle(10.0, 10.0, 7.5);
+            let half: Vec<(f32, f32)> = (0..=16)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 16.0;
+                    (10.0 + 7.5 * a.cos(), 10.0 + 7.5 * a.sin())
+                })
+                .collect();
+            pen.fill(&half);
+        }
+        Icon::TextSize => {
+            // A small and a large A (font size).
+            pen.line(&[(2.0, 17.0), (5.0, 10.0), (8.0, 17.0)]);
+            pen.line(&[(3.3, 14.2), (6.7, 14.2)]);
+            pen.line(&[(9.0, 17.0), (13.5, 4.0), (18.0, 17.0)]);
+            pen.line(&[(10.6, 12.5), (16.4, 12.5)]);
         }
         Icon::Flag => {
             // Pole and a waving flag (Screen Studio's recording flag).

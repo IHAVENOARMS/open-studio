@@ -10,7 +10,7 @@ mod guide;
 mod mask_overlay;
 pub mod player;
 mod privacy_ui;
-pub use widgets::toggle;
+pub use widgets::{slider, toggle};
 mod scrub;
 mod shuttle;
 mod sidebar;
