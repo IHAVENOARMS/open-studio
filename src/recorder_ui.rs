@@ -1860,8 +1860,18 @@ fn area_ui(ui: &mut egui::Ui, sh: &mut Shared, mon: &Monitor, over_bar: bool) {
                 }
                 AreaDrag::New { origin } => a = Rect::from_two_pos(origin, pt),
             }
-            if a.width() >= 40.0 && a.height() >= 40.0 {
-                sh.area = a.translate(origin);
+            let (snapped, lines) = snap_area(a, screen, drag);
+            if snapped.width() >= 40.0 && snapped.height() >= 40.0 {
+                sh.area = snapped.translate(origin);
+            }
+            // Guide lines where the area lines up with the screen.
+            let guide = Stroke::new(1.0, Color32::from_rgb(0xff, 0x4f, 0xa3));
+            for l in lines {
+                let pts = match l {
+                    Guide::X(x) => [pos2(x, screen.top()), pos2(x, screen.bottom())],
+                    Guide::Y(y) => [pos2(screen.left(), y), pos2(screen.right(), y)],
+                };
+                p.extend(egui::Shape::dashed_line(&pts, guide, 5.0, 4.0));
             }
         }
     }
@@ -1962,6 +1972,74 @@ fn area_request(mon: &Monitor, area: Rect) -> DirectRequest {
 
 const WIDGET_W: u32 = 300;
 const WIDGET_H: u32 = 72;
+
+/// A guide line shown while picking the area: a vertical line at x or a
+/// horizontal one at y.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Guide {
+    X(f32),
+    Y(f32),
+}
+
+/// How close (logical pixels) an edge or centre must come to snap.
+const SNAP: f32 = 8.0;
+
+/// Snaps the area being dragged to the screen's edges and centre lines,
+/// and says which lines it snapped to. Moving keeps the size; resizing and
+/// drawing move only the edges being dragged.
+fn snap_area(mut a: Rect, screen: Rect, drag: AreaDrag) -> (Rect, Vec<Guide>) {
+    let mut lines = vec![];
+    let xs = [screen.left(), screen.center().x, screen.right()];
+    let ys = [screen.top(), screen.center().y, screen.bottom()];
+    let near = |v: f32, targets: &[f32]| targets.iter().copied().find(|t| (v - t).abs() <= SNAP);
+    match drag {
+        AreaDrag::Move { .. } => {
+            // Centre first, then the edges.
+            let dx = [a.center().x, a.left(), a.right()].into_iter().find_map(|v| near(v, &xs).map(|t| t - v));
+            let dy = [a.center().y, a.top(), a.bottom()].into_iter().find_map(|v| near(v, &ys).map(|t| t - v));
+            a = a.translate(vec2(dx.unwrap_or(0.0), dy.unwrap_or(0.0)));
+            if dx.is_some() {
+                lines.extend(xs.iter().filter(|x| [a.center().x, a.left(), a.right()].iter().any(|v| (v - *x).abs() < 0.5)).map(|x| Guide::X(*x)));
+            }
+            if dy.is_some() {
+                lines.extend(ys.iter().filter(|y| [a.center().y, a.top(), a.bottom()].iter().any(|v| (v - *y).abs() < 0.5)).map(|y| Guide::Y(*y)));
+            }
+        }
+        AreaDrag::Handle(..) | AreaDrag::New { .. } => {
+            // Whichever edges moved (all four can when drawing).
+            let (hx, hy) = match drag {
+                AreaDrag::Handle(hx, hy) => (hx, hy),
+                _ => (2, 2),
+            };
+            if hx == -1 || hx == 2 {
+                if let Some(t) = near(a.left(), &xs) {
+                    a.min.x = t;
+                    lines.push(Guide::X(t));
+                }
+            }
+            if hx == 1 || hx == 2 {
+                if let Some(t) = near(a.right(), &xs) {
+                    a.max.x = t;
+                    lines.push(Guide::X(t));
+                }
+            }
+            if hy == -1 || hy == 2 {
+                if let Some(t) = near(a.top(), &ys) {
+                    a.min.y = t;
+                    lines.push(Guide::Y(t));
+                }
+            }
+            if hy == 1 || hy == 2 {
+                if let Some(t) = near(a.bottom(), &ys) {
+                    a.max.y = t;
+                    lines.push(Guide::Y(t));
+                }
+            }
+        }
+    }
+    lines.dedup();
+    (a, lines)
+}
 
 /// Countdown circle size, logical pixels.
 const COUNTDOWN_SIZE: f32 = 200.0;
@@ -2574,6 +2652,32 @@ mod tests {
         // Hole off this screen: all dimmed. Hole at the edge: fewer pieces.
         assert_eq!(dim_rects(screen, hole.translate(vec2(5000.0, 0.0))), vec![screen]);
         assert_eq!(dim_rects(screen, Rect::from_min_size(Pos2::ZERO, vec2(300.0, 800.0))).len(), 1);
+    }
+
+    #[test]
+    fn area_snaps_to_screen_with_guides() {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(1920.0, 1080.0));
+        let mv = AreaDrag::Move { grab: Pos2::ZERO };
+        // Nearly centred: snaps to the centre on both axes, size kept.
+        let a = Rect::from_center_size(pos2(965.0, 534.0), vec2(800.0, 400.0));
+        let (s, lines) = snap_area(a, screen, mv);
+        assert_eq!(s.center(), pos2(960.0, 540.0));
+        assert_eq!(s.size(), a.size());
+        assert_eq!(lines, vec![Guide::X(960.0), Guide::Y(540.0)]);
+        // Near the left edge only.
+        let (s, lines) = snap_area(Rect::from_min_size(pos2(6.0, 300.0), vec2(500.0, 300.0)), screen, mv);
+        assert_eq!(s.left(), 0.0);
+        assert_eq!(lines, vec![Guide::X(0.0)]);
+        // Far from everything: untouched, no guides.
+        let free = Rect::from_min_size(pos2(300.0, 200.0), vec2(500.0, 300.0));
+        assert_eq!(snap_area(free, screen, mv), (free, vec![]));
+        // Resizing the right edge to the centre line moves only that edge.
+        let (s, lines) = snap_area(Rect::from_min_max(pos2(100.0, 100.0), pos2(955.0, 500.0)), screen, AreaDrag::Handle(1, 0));
+        assert_eq!((s.left(), s.right()), (100.0, 960.0));
+        assert_eq!(lines, vec![Guide::X(960.0)]);
+        // The edge not being dragged doesn't snap.
+        let (s, _) = snap_area(Rect::from_min_max(pos2(4.0, 100.0), pos2(700.0, 500.0)), screen, AreaDrag::Handle(1, 0));
+        assert_eq!(s.left(), 4.0);
     }
 
     #[test]
