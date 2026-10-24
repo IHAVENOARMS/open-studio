@@ -50,6 +50,9 @@ pub struct App {
     /// The unsaved-changes prompt has been answered; let the window close.
     may_close: bool,
     picking_projects_dir: Option<Receiver<Vec<PathBuf>>>,
+    /// "Create project from video": the file dialog, then the import.
+    picking_video: Option<Receiver<Vec<PathBuf>>>,
+    importing: Option<Receiver<Result<PathBuf, String>>>,
 }
 
 /// Saved projects, plus recordings never saved (left over when the app was
@@ -82,6 +85,8 @@ impl App {
             control: ControlServer::start().ok().map(Arc::new),
             may_close: false,
             picking_projects_dir: None,
+            picking_video: None,
+            importing: None,
         };
         if let (Some(dir), Some(rs)) = (open, cc.wgpu_render_state.as_ref()) {
             app.open_editor(dir, &cc.egui_ctx, rs);
@@ -130,6 +135,48 @@ impl App {
                     let rec_btn = icons::button(ui, Icon::Record, "Start recording", theme::semibold(15.0), Color32::WHITE, Some(theme::ACCENT), vec2(260.0, 46.0));
                     if rec_btn.clicked() {
                         self.start_recording(&ctx);
+                    }
+                    ui.add_space(8.0);
+                    let busy = self.importing.is_some();
+                    let label = if busy { "Creating project…" } else { "Create project from video…" };
+                    let imp = icons::button(ui, Icon::Video, label, egui::FontId::proportional(14.0), theme::TEXT, Some(theme::SURFACE), vec2(260.0, 40.0))
+                        .on_hover_text("Zooms, backgrounds and other effects for a video you already have");
+                    if imp.clicked() && !busy && self.picking_video.is_none() {
+                        let filter = ashpd::desktop::file_chooser::FileFilter::new("Videos").mimetype("video/*");
+                        self.picking_video = Some(crate::dialogs::open_files(ctx.clone(), "Create project from video", Some(filter), false));
+                    }
+                    if let Some(rx) = &self.picking_video {
+                        match rx.try_recv() {
+                            Ok(files) => {
+                                self.picking_video = None;
+                                if let Some(f) = files.into_iter().next() {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    let ctx2 = ctx.clone();
+                                    std::thread::spawn(move || {
+                                        let _ = tx.send(crate::import::create_project(&f).map_err(|e| format!("{e:#}")));
+                                        ctx2.request_repaint();
+                                    });
+                                    self.importing = Some(rx);
+                                }
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.picking_video = None,
+                            Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+                        }
+                    }
+                    if let Some(rx) = &self.importing {
+                        match rx.try_recv() {
+                            Ok(Ok(dir)) => {
+                                self.importing = None;
+                                self.open_editor(dir, &ctx, rs);
+                                return;
+                            }
+                            Ok(Err(e)) => {
+                                self.importing = None;
+                                self.error = Some(format!("Couldn't create the project: {e}"));
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.importing = None,
+                            Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+                        }
                     }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {

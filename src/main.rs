@@ -21,6 +21,7 @@ mod export;
 mod gpu;
 mod hwenc;
 mod icons;
+mod import;
 mod presets;
 mod privacy;
 mod project;

@@ -47,6 +47,8 @@ pub(super) fn tab_enabled(t: Tab, rec: &Recording) -> bool {
         Tab::CameraLayout | Tab::CameraStyle => rec.camera.is_some(),
         Tab::Captions | Tab::Transcript => rec.audio.iter().any(|a| a.kind == "microphone"),
         Tab::Shortcuts => !rec.events.keys.is_empty(),
+        // An imported video has no cursor data.
+        Tab::Cursor => rec.source.kind != "import",
         _ => true,
     }
 }
