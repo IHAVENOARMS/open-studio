@@ -138,6 +138,8 @@ pub struct Settings {
     pub countdown: u32,
     /// Webcams record at most this tall (720, 1080 or 2160).
     pub max_camera_height: u32,
+    /// After recording, show the quick share widget instead of the editor.
+    pub quick_share: bool,
     /// Speaker notes: shown, their text, and the prompter's look.
     pub show_notes: bool,
     pub notes: String,
@@ -250,6 +252,7 @@ impl Default for Settings {
             highlight_recorded_area: true,
             countdown: 0,
             max_camera_height: 1080,
+            quick_share: true,
             show_notes: false,
             notes: String::new(),
             prompter_speed: 40.0,

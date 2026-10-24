@@ -138,6 +138,8 @@ struct Shared {
     can_pause: bool,
     /// Recording flags made so far.
     flags: usize,
+    /// The quick share widget, once a recording is finished.
+    quick: Option<Quick>,
     /// Speaker notes prompter running, and how far it has scrolled.
     prompting: bool,
     prompter_offset: f32,
@@ -175,6 +177,8 @@ enum SurfKind {
     Dim,
     /// Speaker notes: a private teleprompter.
     Notes,
+    /// Quick share widget after recording.
+    Quick,
 }
 
 struct Surf {
@@ -223,6 +227,8 @@ struct Rt {
     recording: Option<Recording>,
     /// Counting down to this recording, since then.
     countdown: Option<(DirectRequest, Instant)>,
+    /// Just finished recording here; the quick share widget comes next.
+    finished: Option<PathBuf>,
     /// Global shortcuts while recording: show notes, start/stop prompter.
     notes_hit: Arc<AtomicBool>,
     prompter_hit: Arc<AtomicBool>,
@@ -311,6 +317,7 @@ pub fn run() -> Result<Outcome> {
             paused: false,
             can_pause: false,
             flags: 0,
+            quick: None,
             prompting: false,
             prompter_offset: 0.0,
             notes_menu: false,
@@ -326,6 +333,7 @@ pub fn run() -> Result<Outcome> {
         },
         recording: None,
         countdown: None,
+        finished: None,
         notes_hit: Arc::new(AtomicBool::new(false)),
         prompter_hit: Arc::new(AtomicBool::new(false)),
         shortcut_hit: Arc::new(AtomicBool::new(false)),
@@ -456,6 +464,12 @@ impl Rt {
                 layer.set_margin(0, 0, 36, 0);
                 layer.set_size(WIDGET_W, WIDGET_H);
                 layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            }
+            SurfKind::Quick => {
+                layer.set_anchor(Anchor::BOTTOM | Anchor::RIGHT);
+                layer.set_margin(0, 32, 32, 0);
+                layer.set_size(QUICK_W, QUICK_H);
+                layer.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
             }
             SurfKind::Notes => {
                 layer.set_anchor(Anchor::TOP | Anchor::RIGHT);
@@ -601,12 +615,95 @@ impl Rt {
         if self.recording.is_some() {
             self.update_recording();
         }
+        if let Some(dir) = self.finished.take() {
+            self.begin_quick_share(dir);
+        }
+        if self.shared.quick.is_some() {
+            self.update_quick_share();
+        }
         let now = Instant::now();
         for i in 0..self.surfaces.len() {
             let due = self.surfaces[i].redraw_at.is_some_and(|t| t <= now) || !self.surfaces[i].events.is_empty();
             if due {
                 self.draw(i);
             }
+        }
+    }
+
+    /// Quick share widget: the recording's first frame with Save, Copy and
+    /// Edit, in the corner of the screen the controls were on.
+    fn begin_quick_share(&mut self, dir: PathBuf) {
+        self.recording = None;
+        self.shared.settings.show_notes = false;
+        let monitor = self.surfaces.iter().find(|s| matches!(s.kind, SurfKind::Widget)).map(|s| s.monitor.clone());
+        self.destroy_surfaces();
+        let rec = match crate::project::Recording::load(&dir) {
+            Ok(r) => r,
+            Err(_) => {
+                self.result = Some(Some(dir));
+                return;
+            }
+        };
+        let edit = crate::edit::EditConfig::load_or_create(&dir, &rec);
+        let mut quick = Quick { dir, rec, edit, thumb: None, thumb_rx: None, saving: None, job: None, export: None, edit_now: false, close: false, message: None };
+        if let Some(gpu) = &self.gpu {
+            let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (d, r, e) = (quick.dir.clone(), quick.rec.clone(), quick.edit.clone());
+            std::thread::spawn(move || {
+                let mut comp = crate::render::Compositor::new(device, queue);
+                let t = r.duration * 0.25;
+                let _ = tx.send(crate::export::render_frame(&mut comp, &d, &r, &e, t, 360).ok());
+            });
+            quick.thumb_rx = Some(rx);
+        }
+        self.shared.quick = Some(quick);
+        if let Some(m) = monitor.or_else(|| self.shared.monitors.first().cloned()) {
+            let out = self.output_for(&m.name);
+            self.new_surface(SurfKind::Quick, m, out.as_ref());
+        }
+    }
+
+    fn update_quick_share(&mut self) {
+        let Some(q) = self.shared.quick.as_mut() else { return };
+        if q.edit_now {
+            self.result = Some(Some(q.dir.clone()));
+            return;
+        }
+        if q.close {
+            // The recording stays with the unsaved projects.
+            self.result = Some(None);
+            return;
+        }
+        if let Some((out, clipboard)) = q.export.take() {
+            if let Some(gpu) = &self.gpu {
+                let (device, queue) = (gpu.device.clone(), gpu.queue.clone());
+                let s = &self.shared.settings;
+                let opts = crate::export::ExportOptions {
+                    out: out.clone(),
+                    height: s.height.unwrap_or(q.rec.height.clamp(720, 2160)),
+                    fps: s.fps,
+                    format: s.format,
+                    quality: s.quality,
+                    prores: s.prores,
+                };
+                let progress = Arc::new(crate::export::Progress::default());
+                let (tx, rx) = std::sync::mpsc::channel();
+                let (d, r, e, p) = (q.dir.clone(), q.rec.clone(), q.edit.clone(), progress.clone());
+                std::thread::spawn(move || {
+                    let mut comp = crate::render::Compositor::new(device, queue);
+                    let mut res = crate::export::export(&mut comp, &d, &r, &e, &opts, &p).map_err(|e| format!("{e:#}"));
+                    if res.is_ok() && clipboard {
+                        res = crate::clipboard::copy("text/uri-list", format!("file://{}\n", opts.out.display()).as_bytes());
+                    }
+                    let _ = tx.send(res);
+                });
+                q.job = Some(QuickJob { progress, rx, clipboard, out });
+                q.message = None;
+            }
+        }
+        for s in &mut self.surfaces {
+            s.redraw_at.get_or_insert(Instant::now() + std::time::Duration::from_millis(100));
         }
     }
 
@@ -791,6 +888,7 @@ impl Rt {
                     self.draw(i);
                 }
                 match r.stop() {
+                    Ok(dir) if self.shared.settings.quick_share => self.finished = Some(dir),
                     Ok(dir) => self.result = Some(Some(dir)),
                     Err(e) => self.error = Some(format!("{e:#}")),
                 }
@@ -836,6 +934,7 @@ impl Rt {
             SurfKind::Countdown => 2,
             SurfKind::Dim => 3,
             SurfKind::Notes => 4,
+            SurfKind::Quick => 5,
         };
         let shared = &mut self.shared;
         let out = surf.ctx.run_ui(raw, |ui| match kind {
@@ -843,6 +942,7 @@ impl Rt {
             2 => countdown_ui(ui, shared, &monitor),
             3 => dim_ui(ui, shared, &monitor),
             4 => notes_ui(ui, shared),
+            5 => quick_ui(ui, shared),
             _ => overlay_ui(ui, shared, &monitor),
         });
         // Cursor shape for this surface.
@@ -1308,7 +1408,7 @@ fn shortcut_row(ui: &mut egui::Ui, icon: Icon, label: &str, value: &mut String, 
 }
 
 fn gear_menu_rect(bar: Rect) -> Rect {
-    Rect::from_min_size(pos2(bar.right() - 360.0, bar.top() - 552.0), vec2(360.0, 540.0))
+    Rect::from_min_size(pos2(bar.right() - 360.0, bar.top() - 612.0), vec2(360.0, 600.0))
 }
 
 /// Title, subtitle and a "Start recording" button centred on `c`, drawn at
@@ -1832,6 +1932,7 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
         });
         ui.label(egui::RichText::new(help).size(12.0).color(BAR_DIM));
     };
+    toggle(ui, "Quick share after recording", "Save or copy the video right away; Edit opens the editor.", &mut sh.settings.quick_share);
     toggle(ui, "Show speaker notes", "Your notes and a teleprompter, seen only by you.  Ctrl+Alt+/", &mut sh.settings.show_notes);
     toggle(ui, "Highlight recorded area", "Dims the part of the screen that isn't being recorded.", &mut sh.settings.highlight_recorded_area);
     toggle(ui, "Create zooms automatically", "Zooms are made from your clicks in every new project.", &mut sh.settings.auto_zooms);
@@ -2145,6 +2246,172 @@ fn mic_level(sh: &mut Shared) -> Option<f32> {
         sh.mic_meter_for = Some(mic);
     }
     Some(sh.mic_meter.as_ref()?.level())
+}
+
+/// Quick share widget size.
+const QUICK_W: u32 = 440;
+const QUICK_H: u32 = 300;
+
+/// The quick share widget's state.
+struct Quick {
+    dir: PathBuf,
+    rec: crate::project::Recording,
+    edit: crate::edit::EditConfig,
+    thumb: Option<egui::TextureHandle>,
+    thumb_rx: Option<std::sync::mpsc::Receiver<Option<image::RgbaImage>>>,
+    /// Save dialog open.
+    saving: Option<std::sync::mpsc::Receiver<Vec<PathBuf>>>,
+    job: Option<QuickJob>,
+    /// Export asked for: to this file, and whether to copy it after.
+    export: Option<(PathBuf, bool)>,
+    edit_now: bool,
+    close: bool,
+    /// "Saved", "Copied" or what went wrong.
+    message: Option<String>,
+}
+
+struct QuickJob {
+    progress: Arc<crate::export::Progress>,
+    rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    clipboard: bool,
+    out: PathBuf,
+}
+
+/// "Will export MP4 • 1080p • 60fps • Social Media".
+fn quick_summary(s: &Settings, native_height: u32) -> String {
+    let h = s.height.unwrap_or(native_height.clamp(720, 2160));
+    let res = if h == 2160 { "4K".to_string() } else { format!("{h}p") };
+    let what = match s.format {
+        crate::settings::Format::Mp4 => s.quality.label().to_string(),
+        crate::settings::Format::Gif => "GIF palette".to_string(),
+        crate::settings::Format::ProRes => format!("ProRes {}", s.prores.label()),
+    };
+    let fmt = match s.format {
+        crate::settings::Format::Mp4 => "MP4",
+        crate::settings::Format::Gif => "GIF",
+        crate::settings::Format::ProRes => "MOV",
+    };
+    format!("Will export {fmt} • {res} • {}fps • {what}", s.fps)
+}
+
+fn quick_ui(ui: &mut egui::Ui, sh: &mut Shared) {
+    let summary = sh.quick.as_ref().map(|q| quick_summary(&sh.settings, q.rec.height));
+    let Some(q) = sh.quick.as_mut() else { return };
+    let r = ui.max_rect().shrink(6.0);
+    let p = ui.painter().clone();
+    p.add(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(140) }.as_shape(r, CornerRadius::same(18)));
+    p.rect_filled(r, 18.0, BAR_BG);
+    // The recording's frame, dimmed under the buttons.
+    if let Some(rx) = &q.thumb_rx {
+        if let Ok(img) = rx.try_recv() {
+            q.thumb_rx = None;
+            if let Some(img) = img {
+                let c = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+                q.thumb = Some(ui.ctx().load_texture("quick-thumb", c, Default::default()));
+            }
+        }
+    }
+    let pic = r.shrink2(vec2(14.0, 14.0));
+    let pic = Rect::from_min_max(pic.min, pos2(pic.max.x, pic.max.y - 30.0));
+    if let Some(t) = &q.thumb {
+        let size = t.size_vec2();
+        let s = (pic.width() / size.x).min(pic.height() / size.y);
+        let img = Rect::from_center_size(pic.center(), size * s);
+        p.image(t.id(), img, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+        p.rect_filled(img, 0.0, Color32::from_black_alpha(130));
+    }
+    // Save dialog answered.
+    if let Some(rx) = &q.saving {
+        match rx.try_recv() {
+            Ok(files) => {
+                q.saving = None;
+                if let Some(mut f) = files.into_iter().next() {
+                    let ext = sh.settings.format.extension();
+                    if f.extension().is_none_or(|e| !e.eq_ignore_ascii_case(ext)) {
+                        f.set_extension(ext);
+                    }
+                    if let Some(parent) = f.parent() {
+                        sh.settings.export_dir = parent.to_path_buf();
+                        sh.settings.save();
+                    }
+                    q.export = Some((f, false));
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => q.saving = None,
+            Err(_) => {}
+        }
+    }
+    // Export running or finished.
+    let mut busy = None;
+    if let Some(job) = &q.job {
+        match job.rx.try_recv() {
+            Ok(res) => {
+                q.message = Some(match res {
+                    Ok(()) if job.clipboard => "Copied — paste it anywhere".to_string(),
+                    Ok(()) => format!("Saved to {}", crate::util::tilde(&job.out)),
+                    Err(e) => format!("Export failed: {e}"),
+                });
+                q.job = None;
+            }
+            Err(_) => busy = Some(job.progress.permille.load(Ordering::Relaxed) as f32 / 1000.0),
+        }
+    }
+    // Double-click opens the editor, as in Screen Studio (under the buttons,
+    // which take their own clicks).
+    let dbl = ui.interact(pic, ui.scope_id().with("quick-pic"), Sense::click());
+    if dbl.double_clicked() && busy.is_none() {
+        q.edit_now = true;
+    }
+    // Save..., Copy, Edit.
+    let bw = 150.0;
+    let grid = Rect::from_center_size(pic.center(), vec2(bw * 2.0 + 12.0, 52.0 * 2.0 + 12.0));
+    let cell = |i: usize| {
+        let (cx, cy) = (i % 2, i / 2);
+        Rect::from_min_size(grid.min + vec2(cx as f32 * (bw + 12.0), cy as f32 * 64.0), vec2(bw, 52.0))
+    };
+    let button = |ui: &mut egui::Ui, at: Rect, icon: Icon, label: &str, enabled: bool| {
+        let resp = ui.interact(at, ui.scope_id().with(label), Sense::click());
+        let resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
+        let fill = if enabled && resp.hovered() { Color32::from_rgb(0x4a, 0x4a, 0x50) } else { Color32::from_rgb(0x38, 0x38, 0x3d) };
+        ui.painter().rect_filled(at, 12.0, fill);
+        let col = if enabled { Color32::WHITE } else { Color32::from_white_alpha(90) };
+        icons::paint_with_text(ui.painter(), at, Some(icon), 20.0, label, FontId::proportional(17.0), col);
+        enabled && resp.clicked()
+    };
+    let idle = busy.is_none() && q.saving.is_none();
+    if button(ui, cell(0), Icon::Export, "Save…", idle) {
+        let name = format!("{}.{}", crate::project::ProjectPaths::new(&q.dir).name(), sh.settings.format.extension());
+        let _ = std::fs::create_dir_all(&sh.settings.export_dir);
+        q.saving = Some(crate::dialogs::save_file(ui.ctx().clone(), "Save video", &sh.settings.export_dir, &name));
+    }
+    if button(ui, cell(1), Icon::Clipboard, "Copy", idle) {
+        let tmp = std::env::temp_dir().join("open-studio-exports");
+        let _ = std::fs::create_dir_all(&tmp);
+        let name = format!("{}.{}", crate::project::ProjectPaths::new(&q.dir).name(), sh.settings.format.extension());
+        q.export = Some((tmp.join(name), true));
+    }
+    if button(ui, Rect::from_center_size(pos2(grid.center().x, cell(2).center().y), vec2(bw, 52.0)), Icon::Pencil, "Edit", busy.is_none()) {
+        q.edit_now = true;
+    }
+    // Close.
+    let x = Rect::from_center_size(pos2(r.right() - 22.0, r.top() + 22.0), vec2(26.0, 26.0));
+    let xr = ui.interact(x, ui.scope_id().with("quick-close"), Sense::click()).on_hover_text("Close").on_hover_cursor(egui::CursorIcon::PointingHand);
+    p.circle_filled(x.center(), 13.0, Color32::from_black_alpha(if xr.hovered() { 200 } else { 140 }));
+    icons::paint(&p, x.shrink(8.0), Icon::Close, Color32::WHITE);
+    if (xr.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))) && busy.is_none() {
+        q.close = true;
+    }
+    // What a save or copy makes, and how it's going.
+    let line = q.message.clone().or(summary).unwrap_or_default();
+    p.text(pos2(r.left() + 18.0, r.bottom() - 22.0), Align2::LEFT_CENTER, line, FontId::proportional(13.0), BAR_DIM);
+    if let Some(f) = busy {
+        let bar = Rect::from_min_size(pos2(r.left() + 18.0, r.bottom() - 8.0), vec2((r.width() - 36.0) * f.max(0.02), 3.0));
+        p.rect_filled(bar, 1.5, theme::KNOB);
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
+    if q.thumb_rx.is_some() || q.saving.is_some() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+    }
 }
 
 /// Speaker notes panel size, and its layer namespace (kept out of capture).
@@ -2462,6 +2729,7 @@ impl LayerShellHandler for Rt {
                 SurfKind::Widget => (WIDGET_W, WIDGET_H),
                 SurfKind::Overlay | SurfKind::Countdown | SurfKind::Dim => (m.rect[2] as u32, m.rect[3] as u32),
                 SurfKind::Notes => (NOTES_W, NOTES_H),
+                SurfKind::Quick => (QUICK_W, QUICK_H),
             };
         }
         self.surfaces[i].size = (w, h);
@@ -2670,6 +2938,7 @@ mod tests {
             paused: false,
             can_pause: true,
             flags: 0,
+            quick: None,
             prompting: false,
             prompter_offset: 0.0,
             notes_menu: false,
@@ -2918,6 +3187,76 @@ mod tests {
         // The edge not being dragged doesn't snap.
         let (s, _) = snap_area(Rect::from_min_max(pos2(4.0, 100.0), pos2(700.0, 500.0)), screen, AreaDrag::Handle(1, 0));
         assert_eq!(s.left(), 4.0);
+    }
+
+    #[test]
+    fn quick_share_widget_buttons() {
+        isolate_config();
+        let mut h = Harness::new(false);
+        h.size = vec2(QUICK_W as f32, QUICK_H as f32);
+        let mut sh = shared();
+        sh.settings.format = crate::settings::Format::Mp4;
+        sh.settings.quality = crate::settings::Quality::Social;
+        sh.settings.fps = 60;
+        sh.settings.height = Some(2160);
+        let rec = crate::project::Recording {
+            version: 1,
+            video: "screen.mp4".into(),
+            width: 3840,
+            height: 2160,
+            fps: 60,
+            duration: 5.0,
+            cursor_embedded: false,
+            source: Default::default(),
+            events: Default::default(),
+            custom_cursors: vec![],
+            audio: vec![],
+            camera: None,
+            dir: "/tmp/Recording 1".into(),
+            transcript: None,
+        };
+        assert_eq!(quick_summary(&sh.settings, rec.height), "Will export MP4 • 4K • 60fps • Social Media");
+        let fresh = |rec: &crate::project::Recording| Quick {
+            dir: rec.dir.clone(),
+            rec: rec.clone(),
+            edit: Default::default(),
+            thumb: None,
+            thumb_rx: None,
+            saving: None,
+            job: None,
+            export: None,
+            edit_now: false,
+            close: false,
+            message: None,
+        };
+        sh.quick = Some(fresh(&rec));
+        let draw = |h: &mut Harness, sh: &mut Shared, events: Vec<egui::Event>| {
+            h.t += 0.05;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)), time: Some(h.t), events, ..Default::default() };
+            let mut out = h.ctx.run_ui(raw, |ui| quick_ui(ui, sh));
+            out.textures_delta.clear();
+        };
+        let m = egui::Modifiers::default();
+        let click = |h: &mut Harness, sh: &mut Shared, pos: Pos2| {
+            draw(h, sh, vec![egui::Event::PointerMoved(pos)]);
+            draw(h, sh, vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
+            draw(h, sh, vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
+        };
+        // Same layout as quick_ui: a 2x2 grid in the middle of the picture.
+        let r = Rect::from_min_size(Pos2::ZERO, h.size).shrink(6.0);
+        let pic = r.shrink2(vec2(14.0, 14.0));
+        let pic = Rect::from_min_max(pic.min, pos2(pic.max.x, pic.max.y - 30.0));
+        let grid = Rect::from_center_size(pic.center(), vec2(312.0, 116.0));
+        let copy = grid.min + vec2(162.0 + 75.0, 26.0);
+        let edit = pos2(grid.center().x, grid.min.y + 64.0 + 26.0);
+        click(&mut h, &mut sh, copy);
+        let (out, clip) = sh.quick.as_ref().unwrap().export.clone().expect("Copy didn't export");
+        assert!(clip && out.extension().unwrap() == "mp4" && out.file_stem().unwrap() == "Recording 1");
+        click(&mut h, &mut sh, edit);
+        assert!(sh.quick.as_ref().unwrap().edit_now);
+        sh.quick = Some(fresh(&rec));
+        click(&mut h, &mut sh, pos2(r.right() - 22.0, r.top() + 22.0));
+        assert!(sh.quick.as_ref().unwrap().close);
     }
 
     #[test]
