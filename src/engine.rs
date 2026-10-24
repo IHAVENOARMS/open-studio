@@ -207,6 +207,60 @@ pub struct Tracks {
     face: Option<crate::face::FaceTrack>,
     /// Hide sensitive data and Hide faces covers.
     covers: std::sync::Arc<Vec<crate::privacy::Cover>>,
+    /// Recording time <-> edited (output) time; the camera runs on the
+    /// edited video's clock.
+    time: TimeMap,
+}
+
+/// Maps recording time to the edited video's time and back, through cuts,
+/// trims and slice speeds.
+#[derive(Clone, Debug)]
+pub struct TimeMap {
+    /// Kept stretches: recording start, end, speed, and where each starts in
+    /// the edited video.
+    segs: Vec<(f64, f64, f64, f64)>,
+    total: f64,
+}
+
+impl TimeMap {
+    pub fn new(edit: &EditConfig, duration: f64) -> Self {
+        let mut segs = vec![];
+        let mut out = 0.0;
+        for (a, b, speed) in edit.segments(duration) {
+            segs.push((a, b, speed, out));
+            out += (b - a) / speed;
+        }
+        if segs.is_empty() {
+            segs.push((0.0, duration, 1.0, 0.0));
+            out = duration;
+        }
+        Self { segs, total: out }
+    }
+
+    /// Edited-video time of recording time `t`. Times inside a cut or trim
+    /// map to where the video carries on after it.
+    pub fn to_out(&self, t: f64) -> f64 {
+        for &(a, b, speed, o) in &self.segs {
+            if t < a {
+                return o;
+            }
+            if t < b {
+                return o + (t - a) / speed;
+            }
+        }
+        self.total
+    }
+
+    /// Recording time shown at edited-video time `o`.
+    pub fn to_rec(&self, o: f64) -> f64 {
+        for &(a, b, speed, start) in &self.segs {
+            let end = start + (b - a) / speed;
+            if o < end {
+                return a + (o - start).max(0.0) * speed;
+            }
+        }
+        self.segs.last().map_or(0.0, |s| s.1)
+    }
 }
 
 impl Tracks {
@@ -275,9 +329,15 @@ impl Tracks {
         let mut ls = 0.0f64; // ln(scale): zoom feels linear in log space
         let mut follow = (cam.cx, cam.cy);
         let mut active: Option<usize> = None;
-        let mut cameras = Vec::with_capacity(n);
-        for i in 0..n {
-            let t = i as f64 * DT;
+        // The camera moves on the edited video's clock: a cut doesn't cut a
+        // zoom's animation short, it plays out after the cut, still keyed to
+        // the zoom bars.
+        let time = TimeMap::new(edit, rec.duration);
+        let n_out = (time.total / DT).ceil() as usize + 2;
+        let mut cameras = Vec::with_capacity(n_out);
+        for i in 0..n_out {
+            let t_out = i as f64 * DT;
+            let t = time.to_rec(t_out);
             let seg_idx = edit.zoom_segments.iter().position(|s| s.kind == crate::edit::ZoomKind::Zoom && t >= s.start && t < s.end);
             let (target, target_scale) = match seg_idx {
                 Some(si) => {
@@ -328,11 +388,11 @@ impl Tracks {
                 }
                 ZoomCurve::Bezier { x1, y1, x2, y2, duration } => {
                     if segment_changed || (target_scale - bez_target_scale).abs() > 1e-9 || bez.is_none() {
-                        bez = Some(((cam.cx, cam.cy, ls), t));
+                        bez = Some(((cam.cx, cam.cy, ls), t_out));
                         bez_target_scale = target_scale;
                     }
                     let ((fx, fy, fl), t0) = bez.unwrap();
-                    let p = ((t - t0) / duration.max(0.05)).clamp(0.0, 1.0);
+                    let p = ((t_out - t0) / duration.max(0.05)).clamp(0.0, 1.0);
                     if p < 1.0 {
                         let e = crate::edit::cubic_bezier(x1, y1, x2, y2, p);
                         cam.cx = fx + (target.0 - fx) * e;
@@ -366,7 +426,7 @@ impl Tracks {
         let speech = if edit.camera.hide_during_silence && rec.camera.is_some() { crate::voice::speech_spans(rec) } else { vec![] };
         let face = if edit.camera.face_tracking { crate::face::FaceTrack::load(&rec.dir) } else { None };
         let covers = crate::privacy::covers(rec, &edit.privacy);
-        Self { layout, cameras, cursor, duration: rec.duration, shortcuts, captions, speech, face, covers }
+        Self { layout, cameras, cursor, duration: rec.duration, shortcuts, captions, speech, face, covers, time }
     }
 
     fn index(&self, t: f64) -> (usize, f64) {
@@ -375,9 +435,11 @@ impl Tracks {
         (i, (f - i as f64).clamp(0.0, 1.0))
     }
 
+    /// Camera at recording time `t` (simulated on the edited video's clock).
     pub fn camera(&self, t: f64) -> Camera {
-        let (i, f) = self.index(t);
-        Camera::lerp(self.cameras[i], self.cameras[i + 1], f)
+        let f = (self.time.to_out(t) / DT).max(0.0);
+        let i = (f.floor() as usize).min(self.cameras.len() - 2);
+        Camera::lerp(self.cameras[i], self.cameras[i + 1], (f - i as f64).clamp(0.0, 1.0))
     }
 
     /// Smoothed cursor position in video pixels.
@@ -1037,6 +1099,65 @@ mod tests {
         };
         let tracks = Tracks::build(&rec(), &edit);
         (0..=60).map(|i| tracks.camera(1.0 + i as f64 * 0.025).scale).collect()
+    }
+
+    /// A cut that ends a zoom early (its bar runs into the cut) mustn't jump
+    /// the camera: in the edited video the zoom-out plays smoothly from the
+    /// cut on, and the zoom is still in place right up to the cut.
+    #[test]
+    fn cuts_dont_cut_zoom_animations() {
+        let mut r = rec();
+        r.duration = 20.0;
+        let mut edit = EditConfig {
+            zoom_segments: vec![
+                ZoomSegment::new(2.0, 4.9, 1.6, crate::edit::ZoomKind::Zoom),
+                ZoomSegment::new(8.1, 17.7, 1.6, crate::edit::ZoomKind::Zoom),
+            ],
+            ..Default::default()
+        };
+        edit.add_cut(4.4, 7.5);
+        let tracks = Tracks::build(&r, &edit);
+        // The edited video's frames at 60 fps, as the exporter makes them.
+        let mut times = vec![];
+        let mut acc = 0.0;
+        for (a, b, speed) in edit.segments(r.duration) {
+            let len = (b - a) / speed;
+            let (n0, n1) = ((acc * 60.0f64).ceil() as u64, ((acc + len) * 60.0).ceil() as u64);
+            times.extend((n0..n1).map(|n| a + (n as f64 / 60.0 - acc) * speed));
+            acc += len;
+        }
+        let step = |tr: &Tracks, w: &[f64]| (tr.camera(w[1]).scale - tr.camera(w[0]).scale).abs();
+        let biggest = times.windows(2).map(|w| step(&tracks, w)).fold(0.0, f64::max);
+        // No bigger than the fastest frame-to-frame change of an ordinary
+        // zoom without any cut.
+        let plain = EditConfig { cuts: vec![], splits: vec![], ..edit.clone() };
+        let t2 = Tracks::build(&r, &plain);
+        let all: Vec<f64> = (0..1200).map(|n| n as f64 / 60.0).collect();
+        let normal = all.windows(2).map(|w| step(&t2, w)).fold(0.0, f64::max);
+        assert!(biggest <= normal * 1.05, "the camera jumps by {biggest:.3} between frames (a normal zoom moves at most {normal:.3})");
+        // Zoomed in up to the cut, and still zoomed just after it (on its way out).
+        assert!(tracks.camera(4.39).scale > 1.55);
+        assert!(tracks.camera(7.51).scale > 1.3, "already out at the cut: {}", tracks.camera(7.51).scale);
+        // The second zoom is unaffected.
+        assert!((tracks.camera(12.0).scale - 1.6).abs() < 0.01);
+        // Without the cut, nothing changes.
+        assert!((t2.camera(6.0).scale - 1.0).abs() < 0.05 && (t2.camera(3.5).scale - 1.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn time_map_round_trips() {
+        let mut edit = EditConfig::default();
+        edit.add_cut(4.0, 6.0);
+        edit.set_slice_props(8.0, 10.0, |p| p.speed = 2.0);
+        let m = TimeMap::new(&edit, 12.0);
+        assert_eq!(m.to_out(3.0), 3.0);
+        assert_eq!(m.to_out(5.0), 4.0, "inside the cut: where it carries on");
+        assert_eq!(m.to_out(7.0), 5.0);
+        assert_eq!(m.to_out(9.0), 6.5, "sped up 2x");
+        assert_eq!(m.to_out(12.0), 9.0);
+        for t in [1.0, 3.9, 6.1, 8.5, 9.9, 11.0] {
+            assert!((m.to_rec(m.to_out(t)) - t).abs() < 1e-9, "{t}");
+        }
     }
 
     #[test]
