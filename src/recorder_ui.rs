@@ -3362,7 +3362,7 @@ mod tests {
         h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
         let m = gear_menu_rect(b).shrink(18.0);
         let find = |h: &mut Harness, sh: &mut Shared, done: &dyn Fn(&Shared) -> bool| {
-            for dy in (200..470).step_by(5) {
+            for dy in (200..590).step_by(5) {
                 for dx in [20, 45, 70, 95, 120] {
                     if done(sh) {
                         return;
