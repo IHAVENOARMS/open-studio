@@ -105,6 +105,10 @@ pub struct Events {
     pub keys: Vec<Key>,
     #[serde(default)]
     pub shapes: Vec<ShapeEvent>,
+    /// Recording flags (Ctrl+Alt+F while recording): moments marked to find
+    /// again in the editor, in seconds.
+    #[serde(default)]
+    pub flags: Vec<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug)]

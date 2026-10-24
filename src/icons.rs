@@ -60,6 +60,7 @@ pub enum Icon {
     StopCircle,
     PauseCircle,
     Keyboard,
+    Flag,
     Mic,
     // Editor rail.
     RailBackground,
@@ -547,6 +548,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.rrect(7.5, 2.5, 12.5, 11.5, 2.5);
             pen.line(&[(4.5, 9.0), (4.5, 10.0), (6.0, 13.5), (10.0, 15.0), (14.0, 13.5), (15.5, 10.0), (15.5, 9.0)]);
             pen.line(&[(10.0, 15.0), (10.0, 17.5)]);
+        }
+        Icon::Flag => {
+            // Pole and a waving flag (Screen Studio's recording flag).
+            pen.line(&[(5.0, 2.5), (5.0, 18.5)]);
+            pen.closed(&[(5.0, 3.5), (8.5, 2.6), (11.5, 4.2), (15.5, 3.4), (15.5, 11.0), (11.5, 11.8), (8.5, 10.2), (5.0, 11.1)]);
         }
         Icon::Keyboard => {
             pen.rrect(2.0, 5.0, 18.0, 15.0, 2.0);

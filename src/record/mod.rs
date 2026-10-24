@@ -47,6 +47,8 @@ pub struct RecordOptions {
     pub gpu_encoding: bool,
     /// Source with a mirrored phone's sound, recorded as its own track.
     pub device_audio: Option<String>,
+    /// Global shortcut that marks a recording flag ("Ctrl+Alt+F").
+    pub flag_shortcut: Option<String>,
 }
 
 /// Camera frames being encoded to camera.mp4 during a recording.
@@ -73,7 +75,21 @@ pub struct DirectRequest {
 
 impl Default for RecordOptions {
     fn default() -> Self {
-        Self { out_dir: None, fps: 60, show_system_cursor: false, reuse_selection: false, test_source: false, direct: None, microphone: None, system_audio: false, camera: None, gpu_encoding: crate::settings::Settings::load().gpu_encoding, device_audio: None }
+        let s = crate::settings::Settings::load();
+        Self {
+            out_dir: None,
+            fps: 60,
+            show_system_cursor: false,
+            reuse_selection: false,
+            test_source: false,
+            direct: None,
+            microphone: None,
+            system_audio: false,
+            camera: None,
+            gpu_encoding: s.gpu_encoding,
+            device_audio: None,
+            flag_shortcut: Some(s.flag_shortcut),
+        }
     }
 }
 
@@ -85,6 +101,8 @@ pub struct Recorder {
     /// Where the captured window's top-left was, over time (window capture).
     window_track: Arc<Mutex<Vec<(i64, [f64; 2])>>>,
     shapes: Arc<Mutex<Vec<ShapeChange>>>,
+    /// Recording flags, monotonic ns.
+    flags: Arc<Mutex<Vec<i64>>>,
     input_rx: Receiver<InputEvent>,
     source: Source,
     show_system_cursor: bool,
@@ -212,6 +230,21 @@ impl Recorder {
         if !opts.test_source && input::spawn(stop.clone(), tx) == 0 {
             eprintln!("open-studio: no readable input devices; clicks won't be tracked (add yourself to the `input` group)");
         }
+        // Recording flags from the global shortcut.
+        let flags: Arc<Mutex<Vec<i64>>> = Arc::default();
+        if let Some(sc) = opts.flag_shortcut.as_deref().and_then(input::Shortcut::parse).filter(|_| !opts.test_source) {
+            let hit = Arc::new(AtomicBool::new(false));
+            input::watch_shortcut(sc, hit.clone(), stop.clone());
+            let (flags, stop) = (flags.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if hit.swap(false, Ordering::Relaxed) {
+                        flags.lock().unwrap().push(crate::util::monotonic_ns());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+        }
         Ok(Self {
             dir,
             capture,
@@ -219,6 +252,7 @@ impl Recorder {
             moves,
             window_track,
             shapes,
+            flags,
             input_rx,
             source,
             show_system_cursor: opts.show_system_cursor,
@@ -252,6 +286,16 @@ impl Recorder {
 
     pub fn is_paused(&self) -> bool {
         self.clock.is_paused()
+    }
+
+    /// Marks this moment with a recording flag (shown on the timeline).
+    /// Flags made while paused are dropped, as nothing is recorded then.
+    pub fn flag(&self) {
+        self.flags.lock().unwrap().push(crate::util::monotonic_ns());
+    }
+
+    pub fn flag_count(&self) -> usize {
+        self.flags.lock().unwrap().len()
     }
 
     pub fn error(&self) -> Option<String> {
@@ -339,7 +383,7 @@ impl Recorder {
             duration,
             cursor_embedded: self.show_system_cursor,
             source,
-            events: Events { moves, clicks: vec![], keys: vec![], shapes: vec![] },
+            events: Events { moves, clicks: vec![], keys: vec![], shapes: vec![], flags: self.flags.lock().unwrap().iter().filter_map(|&t| secs(t)).collect() },
             custom_cursors: vec![],
             audio: vec![],
             camera: None,
@@ -541,4 +585,34 @@ pub fn direct_window(address: &str) -> Result<DirectRequest> {
         logical_rect: [c.at[0], c.at[1], c.size[0], c.size[1]],
         window: Some(c.address.clone()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Flags made while recording land in recording.json at the moments
+    /// they were made. Opt-in (records a test pattern):
+    /// `cargo test -- --ignored flags_are_saved`.
+    #[test]
+    #[ignore]
+    fn flags_are_saved_at_their_time() {
+        let dir = std::env::temp_dir().join("open-studio-flag-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let r = Recorder::start(RecordOptions { out_dir: Some(dir.clone()), test_source: true, gpu_encoding: false, ..Default::default() }).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let first = r.elapsed();
+        r.flag();
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        r.flag();
+        assert_eq!(r.flag_count(), 2);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let out = r.stop().unwrap();
+        let rec = Recording::load(&out).unwrap();
+        let f = &rec.events.flags;
+        assert_eq!(f.len(), 2);
+        assert!((f[0] - first).abs() < 0.3, "first flag at {:.2}s, made at {first:.2}s", f[0]);
+        assert!((f[1] - f[0] - 0.7).abs() < 0.1, "flags {f:?} should be 0.7s apart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

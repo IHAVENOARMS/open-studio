@@ -382,6 +382,7 @@ pub fn show(
     has_system: bool,
     has_device: bool,
     shortcuts: &[crate::shortcuts::Shortcut],
+    flags: &[f64],
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
@@ -456,6 +457,26 @@ pub fn show(
             p.circle_filled(pos2(half, ruler.bottom() - 6.0), 1.5, Color32::from_rgb(0x4a, 0x4c, 0x52));
         }
         t += step;
+    }
+
+    // Recording flags: a flag on the ruler at each marked moment; click to
+    // go there.
+    for (n, &t) in flags.iter().enumerate() {
+        let x = geo.x(t);
+        if x < full.left() - 8.0 || x > full.right() + 8.0 {
+            continue;
+        }
+        let icon = Rect::from_min_size(pos2(x - 2.5, ruler.top() + 1.0), vec2(16.0, 16.0));
+        let r = ui
+            .interact(icon.expand(3.0), ui.scope_id().with(("flag", n)), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text(format!("Recording flag at {}", format_time_precise(t)));
+        let col = if r.hovered() { Color32::WHITE } else { FLAG };
+        p.line_segment([pos2(x, ruler.top() + 14.0), pos2(x, ruler.bottom())], Stroke::new(1.2, col.gamma_multiply(0.6)));
+        icons::paint(&p, icon, Icon::Flag, col);
+        if r.clicked() {
+            out.seek = Some(t);
+        }
     }
 
     // Clip track (trimmed region bright, the rest dimmed).
@@ -1002,6 +1023,8 @@ const MASK_STOPS: [(f32, Color32); 4] = [
 const MASK_EDGE: Color32 = Color32::from_rgb(0x8f, 0x24, 0x56);
 const MASK_BORDER: Color32 = Color32::from_rgb(0xe0, 0x86, 0xb2);
 
+/// Recording flags on the ruler.
+const FLAG: Color32 = Color32::from_rgb(0xf5, 0xc4, 0x51);
 const CLIP_STOPS: [(f32, Color32); 5] = [
     (0.0, Color32::from_rgb(0x8e, 0x65, 0x24)),
     (0.3, Color32::from_rgb(0xa4, 0x75, 0x2a)),

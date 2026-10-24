@@ -978,6 +978,7 @@ impl Editor {
                     self.rec.audio.iter().any(|a| a.kind == "system"),
                     self.rec.audio.iter().any(|a| a.kind == "device"),
                     &shortcuts,
+                    &self.rec.events.flags,
                 );
                 if let Some(t) = out.seek {
                     self.seek(t);

@@ -109,6 +109,11 @@ pub fn detect(rec: &Recording, single_keys: bool, custom: &[String]) -> Vec<Shor
             continue;
         }
         let Some(name) = key_name(k.code) else { continue };
+        // The recording flag shortcut marks a moment; it isn't part of the
+        // demo.
+        if (held[0] || held[1] || held[3]) && rec.events.flags.iter().any(|f| (f - k.t).abs() < 0.15) {
+            continue;
+        }
         let pressed: Vec<&'static str> = (0..4).filter(|m| held[*m]).map(|m| MOD_NAMES[m]).chain([name]).collect();
         let combo = held[0] || held[1] || held[3];
         if custom.contains(&pressed.join("+")) {
@@ -166,5 +171,11 @@ mod custom_tests {
         assert!(detect(&rec, false, &[]).is_empty());
         let found = detect(&rec, false, &["Enter".into(), "shift+tab".into()]);
         assert_eq!(found.iter().map(|s| s.label()).collect::<Vec<_>>(), vec!["Enter", "Shift + Tab"]);
+        // Ctrl+Alt+F that made a recording flag isn't shown; another
+        // Ctrl+Alt+F is.
+        rec.events.keys = vec![key(1.0, 29, true), key(1.0, 56, true), key(1.02, 33, true), key(1.1, 33, false), key(2.0, 33, true), key(2.1, 33, false), key(2.2, 29, false), key(2.2, 56, false)];
+        rec.events.flags = vec![1.03];
+        let found = detect(&rec, false, &[]);
+        assert_eq!(found.iter().map(|s| s.t).collect::<Vec<_>>(), vec![2.0]);
     }
 }

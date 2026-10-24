@@ -104,6 +104,7 @@ impl App {
         let control = self.control.clone();
         if let Some(c) = &control {
             c.take_stop();
+            c.take_flags();
         }
         std::thread::spawn(move || {
             // On Hyprland the floating recording bar (direct capture) is used;
@@ -312,6 +313,9 @@ fn supervise(
         }
         if stop.load(Ordering::Relaxed) || control.as_ref().is_some_and(|c| c.take_stop()) {
             break;
+        }
+        for _ in 0..control.as_ref().map_or(0, |c| c.take_flags()) {
+            recorder.flag();
         }
     }
     drop(tray);

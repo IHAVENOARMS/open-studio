@@ -75,6 +75,8 @@ pub struct Settings {
     pub destination: Destination,
     /// Global shortcut that stops a recording.
     pub stop_shortcut: String,
+    /// Global shortcut that marks a recording flag (Screen Studio: ⌘⌥⌃F).
+    pub flag_shortcut: String,
     /// Draw the system cursor into the video instead of re-rendering it.
     pub bake_cursor: bool,
     /// Microphone to record (Pulse source name), or None.
@@ -174,6 +176,7 @@ impl Default for Settings {
             quality: Quality::Social,
             destination: Destination::File,
             stop_shortcut: "Ctrl+Alt+Enter".into(),
+            flag_shortcut: "Ctrl+Alt+F".into(),
             bake_cursor: false,
             microphone: None,
             system_audio: false,

@@ -83,6 +83,8 @@ enum Cmd {
     },
     /// Stop the recording in progress.
     Stop,
+    /// Mark a recording flag in the recording in progress.
+    Flag,
     /// Show the floating recording bar (Display / Window / Area), record,
     /// and print the project directory when done.
     RecordUi,
@@ -205,6 +207,7 @@ fn main() -> Result<()> {
                 test_source: test,
                 gpu_encoding: settings::Settings::load().gpu_encoding,
                 device_audio: None,
+                flag_shortcut: Some(settings::Settings::load().flag_shortcut),
                 camera: match camera.as_deref() {
                     None => None,
                     Some("list") => {
@@ -223,6 +226,7 @@ fn main() -> Result<()> {
             println!("{}", dir.display());
         }
         Some(Cmd::Stop) => control::send_stop()?,
+        Some(Cmd::Flag) => control::send_flag()?,
         Some(Cmd::RecordUi) => match recorder_ui::run()? {
             recorder_ui::Outcome::Recorded(dir) => println!("{}", dir.display()),
             recorder_ui::Outcome::Cancelled => std::process::exit(2),
@@ -454,6 +458,9 @@ fn record_blocking(opts: record::RecordOptions, duration: Option<f64>) -> Result
         }
         if SIGINT.load(Ordering::Relaxed) || control.take_stop() {
             break;
+        }
+        for _ in 0..control.take_flags() {
+            rec.flag();
         }
         if duration.is_some_and(|d| rec.elapsed() >= d) {
             break;

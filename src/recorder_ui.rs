@@ -106,6 +106,7 @@ struct Shared {
     settings: Settings,
     gear_open: bool,
     capturing_shortcut: bool,
+    capturing_flag: bool,
     start: Option<DirectRequest>,
     cancel: bool,
     /// Folder button: leave and show the projects list.
@@ -135,6 +136,8 @@ struct Shared {
     elapsed: f64,
     paused: bool,
     can_pause: bool,
+    /// Recording flags made so far.
+    flags: usize,
     saving: bool,
     action: Option<WidgetAction>,
 }
@@ -254,6 +257,7 @@ pub fn run() -> Result<Outcome> {
             settings,
             gear_open: false,
             capturing_shortcut: false,
+            capturing_flag: false,
             start: None,
             cancel: false,
             open_projects: false,
@@ -273,6 +277,7 @@ pub fn run() -> Result<Outcome> {
             elapsed: 0.0,
             paused: false,
             can_pause: false,
+            flags: 0,
             saving: false,
             action: None,
         },
@@ -296,6 +301,12 @@ pub fn run() -> Result<Outcome> {
         event_loop.dispatch(std::time::Duration::from_millis(16), &mut rt)?;
         if control.as_ref().is_some_and(|c| c.take_stop()) {
             rt.shortcut_hit.store(true, Ordering::Relaxed);
+        }
+        let flags = control.as_ref().map_or(0, |c| c.take_flags());
+        if let Some(r) = rt.recording.as_ref().and_then(|r| r.recorder.as_ref()) {
+            for _ in 0..flags {
+                r.flag();
+            }
         }
         rt.tick();
     }
@@ -520,6 +531,7 @@ impl Rt {
         let recorded = req.name.clone().unwrap_or_default();
         self.shared.elapsed = 0.0;
         self.shared.paused = false;
+        self.shared.flags = 0;
         match start_recorder(&req, &self.shared.settings, self.shared.camera.clone(), self.shared.mirror.as_ref().and_then(|m| m.audio_source())) {
             Ok(r) => {
                 self.shared.can_pause = r.can_pause();
@@ -555,6 +567,7 @@ impl Rt {
         if let Some(r) = &rec.recorder {
             self.shared.elapsed = r.elapsed();
             self.shared.paused = r.is_paused();
+            self.shared.flags = r.flag_count();
             if let Some(e) = r.error() {
                 self.error = Some(format!("recording failed: {e}"));
                 return;
@@ -1044,8 +1057,59 @@ fn bar_rect(screen: Rect) -> Rect {
     Rect::from_center_size(pos2(screen.center().x, screen.bottom() - 70.0 - BAR_H / 2.0), vec2(w, BAR_H))
 }
 
+/// A settings row for a global shortcut: click the button, press keys.
+fn shortcut_row(ui: &mut egui::Ui, icon: Icon, label: &str, value: &mut String, capturing: &mut bool) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let (ir, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+        icons::paint(ui.painter(), ir, icon, BAR_TEXT);
+        ui.label(egui::RichText::new(label).size(13.5).color(BAR_TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let text = if *capturing { "Press keys…".to_string() } else { value.clone() };
+            let b = egui::Button::new(egui::RichText::new(text).size(13.0).color(BAR_TEXT))
+                .fill(Color32::from_white_alpha(16))
+                .corner_radius(CornerRadius::same(7));
+            if ui.add(b).on_hover_text("Click, then press a key combination").clicked() {
+                *capturing = !*capturing;
+            }
+        });
+    });
+    if *capturing {
+        let combo = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key, pressed: true, modifiers, .. } if *key != egui::Key::Escape => {
+                    let mut parts = vec![];
+                    if modifiers.ctrl {
+                        parts.push("Ctrl".to_string());
+                    }
+                    if modifiers.alt {
+                        parts.push("Alt".to_string());
+                    }
+                    if modifiers.shift {
+                        parts.push("Shift".to_string());
+                    }
+                    if modifiers.mac_cmd || modifiers.command && !modifiers.ctrl {
+                        parts.push("Super".to_string());
+                    }
+                    parts.push(key.name().to_string());
+                    Some(parts.join("+"))
+                }
+                _ => None,
+            })
+        });
+        if let Some(c) = combo {
+            if record::input::Shortcut::parse(&c).is_some() {
+                *value = c;
+                changed = true;
+            }
+            *capturing = false;
+        }
+    }
+    changed
+}
+
 fn gear_menu_rect(bar: Rect) -> Rect {
-    Rect::from_min_size(pos2(bar.right() - 330.0, bar.top() - 264.0), vec2(330.0, 252.0))
+    Rect::from_min_size(pos2(bar.right() - 330.0, bar.top() - 294.0), vec2(330.0, 282.0))
 }
 
 /// Title, subtitle and a "Start recording" button centred on `c`, drawn at
@@ -1231,6 +1295,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         sh.menu = None;
         sh.gear_open = !sh.gear_open;
         sh.capturing_shortcut = false;
+        sh.capturing_flag = false;
     }
     if sh.gear_open {
         gear_menu(ui, sh, gear_menu_rect(bar));
@@ -1529,50 +1594,13 @@ fn gear_menu(ui: &mut egui::Ui, sh: &mut Shared, r: Rect) {
     ui.label(
         egui::RichText::new("Off records the cursor separately so it can be smoothed and resized.").size(12.0).color(BAR_DIM),
     );
-    ui.horizontal(|ui| {
-        let (ir, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-        icons::paint(ui.painter(), ir, Icon::Keyboard, BAR_TEXT);
-        ui.label(egui::RichText::new("Stop recording").size(13.5).color(BAR_TEXT));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = if sh.capturing_shortcut { "Press keys…".to_string() } else { sh.settings.stop_shortcut.clone() };
-            let b = egui::Button::new(egui::RichText::new(label).size(13.0).color(BAR_TEXT))
-                .fill(Color32::from_white_alpha(16))
-                .corner_radius(CornerRadius::same(7));
-            if ui.add(b).on_hover_text("Click, then press a key combination").clicked() {
-                sh.capturing_shortcut = !sh.capturing_shortcut;
-            }
-        });
-    });
+    changed |= shortcut_row(ui, Icon::Keyboard, "Stop recording", &mut sh.settings.stop_shortcut, &mut sh.capturing_shortcut);
     if sh.capturing_shortcut {
-        let combo = ui.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Key { key, pressed: true, modifiers, .. } if *key != egui::Key::Escape => {
-                    let mut parts = vec![];
-                    if modifiers.ctrl {
-                        parts.push("Ctrl".to_string());
-                    }
-                    if modifiers.alt {
-                        parts.push("Alt".to_string());
-                    }
-                    if modifiers.shift {
-                        parts.push("Shift".to_string());
-                    }
-                    if modifiers.mac_cmd || modifiers.command && !modifiers.ctrl {
-                        parts.push("Super".to_string());
-                    }
-                    parts.push(key.name().to_string());
-                    Some(parts.join("+"))
-                }
-                _ => None,
-            })
-        });
-        if let Some(c) = combo {
-            if record::input::Shortcut::parse(&c).is_some() {
-                sh.settings.stop_shortcut = c;
-                changed = true;
-            }
-            sh.capturing_shortcut = false;
-        }
+        sh.capturing_flag = false;
+    }
+    changed |= shortcut_row(ui, Icon::Flag, "Create recording flag", &mut sh.settings.flag_shortcut, &mut sh.capturing_flag);
+    if sh.capturing_flag {
+        sh.capturing_shortcut = false;
     }
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Encode on the GPU").size(13.5).color(BAR_TEXT));
@@ -1829,8 +1857,16 @@ fn widget_ui(ui: &mut egui::Ui, sh: &mut Shared) {
     if fr.clicked() {
         sh.action = Some(WidgetAction::Finish);
     }
+    let mut note_x = finish.left() + 46.0;
     if sh.paused {
-        p.text(pos2(finish.left() + 46.0, r.bottom() - 10.0), Align2::LEFT_BOTTOM, "Paused", FontId::proportional(10.5), BAR_DIM);
+        let g = p.text(pos2(note_x, r.bottom() - 10.0), Align2::LEFT_BOTTOM, "Paused", FontId::proportional(10.5), BAR_DIM);
+        note_x = g.right() + 8.0;
+    }
+    if sh.flags > 0 {
+        // Each flag press shows here, so it's clear it was caught.
+        let y = r.bottom() - 15.5;
+        icons::paint(&p, Rect::from_center_size(pos2(note_x + 5.0, y), vec2(11.0, 11.0)), Icon::Flag, BAR_DIM);
+        p.text(pos2(note_x + 12.0, r.bottom() - 10.0), Align2::LEFT_BOTTOM, sh.flags.to_string(), FontId::proportional(10.5), BAR_DIM);
     }
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
 }
@@ -2060,6 +2096,7 @@ mod tests {
             settings: Settings::default(),
             gear_open: false,
             capturing_shortcut: false,
+            capturing_flag: false,
             start: None,
             cancel: false,
             open_projects: false,
@@ -2079,6 +2116,7 @@ mod tests {
             elapsed: 3.0,
             paused: false,
             can_pause: true,
+            flags: 0,
             saving: false,
             action: None,
         }
@@ -2265,6 +2303,28 @@ mod tests {
         h.frame(&mut sh, vec![egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: mods }]);
         assert_eq!(sh.settings.stop_shortcut, "Ctrl+Shift+S");
         assert!(!sh.capturing_shortcut);
+    }
+
+    #[test]
+    fn flag_shortcut_can_be_changed() {
+        isolate_config();
+        let (mut h, mut sh) = (Harness::new(false), shared());
+        assert_eq!(sh.settings.flag_shortcut, "Ctrl+Alt+F");
+        let b = bar();
+        h.click(&mut sh, pos2(b.right() - 64.0 + 26.0, b.center().y));
+        let m = gear_menu_rect(b).shrink(18.0);
+        for dy in (60..190).step_by(4) {
+            h.click(&mut sh, pos2(m.right() - 30.0, m.top() + dy as f32));
+            if sh.capturing_flag {
+                break;
+            }
+        }
+        assert!(sh.capturing_flag, "flag shortcut button not found");
+        assert!(!sh.capturing_shortcut, "only one shortcut listens at a time");
+        let mods = egui::Modifiers { alt: true, shift: true, ..Default::default() };
+        h.frame(&mut sh, vec![egui::Event::Key { key: egui::Key::M, physical_key: None, pressed: true, repeat: false, modifiers: mods }]);
+        assert_eq!(sh.settings.flag_shortcut, "Alt+Shift+M");
+        assert_eq!(sh.settings.stop_shortcut, "Ctrl+Alt+Enter", "the stop shortcut is untouched");
     }
 
     #[test]

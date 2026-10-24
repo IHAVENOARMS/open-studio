@@ -1,15 +1,17 @@
-//! A tiny control socket so a running recording can be stopped from a
-//! keybinding (`open-studio stop`), e.g. `bind = SUPER SHIFT, R, exec, open-studio stop`.
+//! A tiny control socket so a running recording can be stopped or flagged
+//! from a keybinding (`open-studio stop`, `open-studio flag`), e.g.
+//! `bind = SUPER SHIFT, R, exec, open-studio stop`.
 
 use crate::util::{control_socket, runtime_dir};
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub struct ControlServer {
     pub stop_requested: Arc<AtomicBool>,
+    flags_requested: Arc<AtomicUsize>,
 }
 
 impl ControlServer {
@@ -20,21 +22,32 @@ impl ControlServer {
         let listener = UnixListener::bind(&path).context("binding control socket")?;
         let flag = Arc::new(AtomicBool::new(false));
         let f = flag.clone();
+        let flags = Arc::new(AtomicUsize::new(0));
+        let fl = flags.clone();
         std::thread::spawn(move || {
             for mut conn in listener.incoming().flatten() {
                 let mut buf = String::new();
                 let _ = conn.read_to_string(&mut buf);
-                if buf.trim() == "stop" {
-                    f.store(true, Ordering::Relaxed);
-                    let _ = conn.write_all(b"ok");
+                match buf.trim() {
+                    "stop" => f.store(true, Ordering::Relaxed),
+                    "flag" => {
+                        fl.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => continue,
                 }
+                let _ = conn.write_all(b"ok");
             }
         });
-        Ok(Self { stop_requested: flag })
+        Ok(Self { stop_requested: flag, flags_requested: flags })
     }
 
     pub fn take_stop(&self) -> bool {
         self.stop_requested.swap(false, Ordering::Relaxed)
+    }
+
+    /// Flags asked for since the last call.
+    pub fn take_flags(&self) -> usize {
+        self.flags_requested.swap(0, Ordering::Relaxed)
     }
 }
 
@@ -45,8 +58,16 @@ impl Drop for ControlServer {
 }
 
 pub fn send_stop() -> Result<()> {
+    send("stop")
+}
+
+pub fn send_flag() -> Result<()> {
+    send("flag")
+}
+
+fn send(msg: &str) -> Result<()> {
     let mut s = UnixStream::connect(control_socket()).context("no recording in progress")?;
-    s.write_all(b"stop")?;
+    s.write_all(msg.as_bytes())?;
     s.shutdown(std::net::Shutdown::Write)?;
     Ok(())
 }
