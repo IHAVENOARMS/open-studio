@@ -1730,7 +1730,7 @@ impl Editor {
                 Ok(files) => {
                     dlg.saving = None;
                     if let Some(mut f) = files.into_iter().next() {
-                        let ext = if dlg.settings.format == Format::Gif { "gif" } else { "mp4" };
+                        let ext = dlg.settings.format.extension();
                         if f.extension().is_none_or(|e| !e.eq_ignore_ascii_case(ext)) {
                             f.set_extension(ext);
                         }
@@ -1775,21 +1775,27 @@ impl Editor {
                         ui.spacing_mut().item_spacing.x = 32.0;
                         ui.vertical(|ui| {
                             ui.set_width(col_w);
-                            header(ui, Icon::Video, "Format");
-                            widgets::segmented(ui, &mut s.format, &[(Format::Mp4, "MP4"), (Format::Gif, "GIF")]);
+                            header(ui, Icon::Video, "Export as");
+                            widgets::segmented(ui, &mut s.format, &[(Format::Mp4, "MP4"), (Format::Gif, "GIF"), (Format::ProRes, "ProRes")]);
                         });
                         ui.vertical(|ui| {
                             ui.set_width(col_w);
                             header(ui, Icon::Aperture, "Frame rate");
-                            let opts: Vec<(u32, &str)> = if s.format == Format::Gif {
-                                vec![(15, "15 FPS"), (24, "24 FPS"), (30, "30 FPS")]
-                            } else {
-                                vec![(24, "24 FPS"), (30, "30 FPS"), (60, "60 FPS")]
-                            };
-                            if !opts.iter().any(|(f, _)| *f == s.fps) {
-                                s.fps = opts.last().unwrap().0;
+                            let opts: &[u32] = if s.format == Format::Gif { &[10, 15, 24, 30] } else { &[24, 25, 30, 50, 60] };
+                            if !opts.contains(&s.fps) {
+                                s.fps = *opts.last().unwrap();
                             }
-                            widgets::segmented(ui, &mut s.fps, &opts);
+                            let label = format!("{} FPS", s.fps);
+                            let resp = icons::button(ui, Icon::ChevronDown, &label, egui::FontId::proportional(14.0), theme::TEXT, Some(theme::SURFACE), egui::vec2(110.0, 38.0));
+                            egui::Popup::menu(&resp).show(|ui| {
+                                ui.set_min_width(140.0);
+                                for f in opts {
+                                    if menu_item(ui, &format!("{f} FPS"), "", s.fps == *f).clicked() {
+                                        s.fps = *f;
+                                        ui.close();
+                                    }
+                                }
+                            });
                         });
                     });
                     ui.add_space(18.0);
@@ -1797,7 +1803,7 @@ impl Editor {
                         ui.spacing_mut().item_spacing.x = 32.0;
                         ui.vertical(|ui| {
                             ui.set_width(col_w);
-                            header(ui, Icon::Resolution, "Resolution");
+                            header(ui, Icon::Resolution, "Output Size");
                             let mut h = height;
                             let mut opts: Vec<(u32, &str)> = vec![(720, "720p"), (1080, "1080p"), (1440, "1440p"), (2160, "4K")];
                             if !opts.iter().any(|(x, _)| *x == native) {
@@ -1811,16 +1817,30 @@ impl Editor {
                         });
                         ui.vertical(|ui| {
                             ui.set_width(col_w);
-                            header(ui, Icon::Film, "Quality");
-                            if s.format == Format::Gif {
-                                ui.label(
-                                    egui::RichText::new("GIFs use an optimised 256-colour palette. Keep them short; they get large quickly.")
-                                        .color(theme::TEXT_DIM),
-                                );
-                            } else {
-                                let opts: Vec<(Quality, &str)> = Quality::ALL.iter().map(|q| (*q, q.label())).collect();
-                                widgets::segmented(ui, &mut s.quality, &opts);
-                                ui.label(egui::RichText::new(s.quality.description()).color(theme::TEXT_DIM));
+                            match s.format {
+                                Format::Gif => {
+                                    header(ui, Icon::Film, "Quality");
+                                    ui.label(
+                                        egui::RichText::new("GIFs use an optimised 256-colour palette. Keep them short; they get large quickly.")
+                                            .color(theme::TEXT_DIM),
+                                    );
+                                }
+                                Format::ProRes => {
+                                    header(ui, Icon::Film, "ProRes");
+                                    let opts: Vec<(crate::settings::ProRes, &str)> = crate::settings::ProRes::ALL.iter().map(|p| (*p, p.label())).collect();
+                                    widgets::segmented(ui, &mut s.prores, &opts);
+                                    ui.label(
+                                        egui::RichText::new("A .mov with uncompressed audio, for editing in Final Cut Pro, DaVinci Resolve or Premiere Pro.")
+                                            .color(theme::TEXT_DIM),
+                                    );
+                                }
+                                Format::Mp4 => {
+                                    header(ui, Icon::Film, "Quality (Compression level)");
+                                    let opts: Vec<(Quality, &str)> = Quality::ALL.iter().map(|q| (*q, q.label())).collect();
+                                    widgets::segmented(ui, &mut s.quality, &opts);
+                                    ui.label(egui::RichText::new(s.quality.description()).color(theme::TEXT_DIM));
+                                    ui.label(egui::RichText::new("Quality setting does not impact export speed.").color(theme::TEXT_DIM));
+                                }
                             }
                         });
                     });
@@ -1829,60 +1849,48 @@ impl Editor {
                         privacy_ui::review_note(ui);
                     }
                     ui.add_space(26.0);
-                    ui.label(egui::RichText::new("Export to").size(15.0));
+                    // Export to file (Enter) or copy to the clipboard (Ctrl+Enter).
+                    let (to_file_key, to_clip_key) = ui.input_mut(|i| {
+                        (i.consume_key(egui::Modifiers::NONE, Key::Enter), i.consume_key(egui::Modifiers::COMMAND, Key::Enter))
+                    });
+                    let mut go: Option<Destination> = None;
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        let dest_chip = |ui: &mut egui::Ui, d: Destination, icon: Icon, label: &str, cur: &mut Destination| {
-                            let fill = if *cur == d { theme::SURFACE_HOVER } else { theme::SURFACE };
-                            let r = icons::button(ui, icon, label, egui::FontId::proportional(14.0), theme::TEXT, Some(fill), egui::vec2(0.0, 42.0));
-                            if *cur == d {
-                                ui.painter().rect_stroke(r.rect, CornerRadius::same(8), egui::Stroke::new(1.0, Color32::from_rgb(0x3a, 0x3c, 0x44)), egui::StrokeKind::Inside);
-                            }
-                            if r.clicked() {
-                                *cur = d;
-                            }
-                        };
-                        dest_chip(ui, Destination::File, Icon::File, "File", &mut s.destination);
-                        dest_chip(ui, Destination::Clipboard, Icon::Clipboard, "Clipboard", &mut s.destination);
-                        let folder = icons::button(ui, Icon::Folder, "", egui::FontId::proportional(14.0), theme::TEXT, Some(theme::SURFACE), egui::vec2(42.0, 42.0))
-                            .on_hover_text("Choose export folder");
-                        if folder.clicked() && dlg.picking_dir.is_none() {
-                            dlg.picking_dir = Some(dialogs::open_folder(ctx.clone(), "Choose export folder", Some(s.export_dir.clone())));
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        if icons::button(ui, Icon::Export, "Export to file  ↵", theme::semibold(14.0), Color32::WHITE, Some(theme::ACCENT), egui::vec2(0.0, 42.0)).clicked() || to_file_key {
+                            go = Some(Destination::File);
+                        }
+                        if icons::button(ui, Icon::Clipboard, "Copy to clipboard  Ctrl+↵", theme::semibold(14.0), theme::KNOB, Some(theme::SURFACE), egui::vec2(0.0, 42.0)).clicked() || to_clip_key {
+                            go = Some(Destination::Clipboard);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let (icon, label) = match s.destination {
-                                Destination::File => (Icon::Export, "Export to file"),
-                                Destination::Clipboard => (Icon::Clipboard, "Export to clipboard"),
-                            };
-                            let go = icons::button(ui, icon, label, theme::semibold(14.0), Color32::WHITE, Some(theme::ACCENT), egui::vec2(0.0, 42.0));
-                            if go.clicked() && dlg.saving.is_none() {
-                                let ext = if s.format == Format::Gif { "gif" } else { "mp4" };
-                                let name = format!("{}.{ext}", self.name);
-                                match s.destination {
-                                    Destination::File => {
-                                        let _ = std::fs::create_dir_all(&s.export_dir);
-                                        dlg.saving = Some(dialogs::save_file(ctx.clone(), "Export video", &s.export_dir, &name));
-                                    }
-                                    Destination::Clipboard => {
-                                        let dir = std::env::temp_dir().join("open-studio-exports");
-                                        let _ = std::fs::create_dir_all(&dir);
-                                        start = Some(dir.join(name));
-                                    }
-                                }
-                            }
-                            if ui.button("Cancel").clicked() {
+                            if icons::button(ui, Icon::Close, "Cancel", egui::FontId::proportional(14.0), theme::TEXT, Some(theme::SURFACE), egui::vec2(0.0, 42.0)).clicked() {
                                 close = true;
                             }
                         });
                     });
-                    let where_ = match s.destination {
-                        Destination::File => format!("The save dialog opens in {}", crate::util::tilde(&s.export_dir)),
-                        Destination::Clipboard => "The video is copied as a file you can paste into chats, email or your file manager.".to_string(),
-                    };
-                    ui.label(egui::RichText::new(where_).size(12.0).color(theme::TEXT_DIM));
-                    if s.height.is_none() {
-                        s.height = None;
+                    if let (Some(d), true) = (go, dlg.saving.is_none()) {
+                        s.destination = d;
+                        let name = format!("{}.{}", self.name, s.format.extension());
+                        match d {
+                            Destination::File => {
+                                let _ = std::fs::create_dir_all(&s.export_dir);
+                                dlg.saving = Some(dialogs::save_file(ctx.clone(), "Export video", &s.export_dir, &name));
+                            }
+                            Destination::Clipboard => {
+                                let dir = std::env::temp_dir().join("open-studio-exports");
+                                let _ = std::fs::create_dir_all(&dir);
+                                start = Some(dir.join(name));
+                            }
+                        }
                     }
+                    // Screen Studio's estimates under the buttons.
+                    let secs: f64 = self.edit.segments(self.rec.duration).iter().map(|(a, b, sp)| (b - a) / sp).sum();
+                    let size = export::output_size(self.tracks.layout.aspect, height);
+                    let audio = !self.edit.audio.mute && !self.rec.audio.is_empty();
+                    let (t, bytes) = export::estimate(s.format, s.quality, s.prores, size, s.fps, secs, export::measured_speed(), audio);
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(format!("Estimated export time — {}", export::format_duration(t))).size(12.5).color(theme::TEXT_DIM));
+                    ui.label(egui::RichText::new(format!("Estimated max output size — {}", export::format_size(bytes))).size(12.5).color(theme::TEXT_DIM));
                 }
                 Some(job) => {
                     let done = job.result.lock().unwrap().clone();
@@ -1951,7 +1959,7 @@ fn spawn_export(dlg: &mut ExportDialog, out: PathBuf, height: u32, dir: &std::pa
     let (p, r) = (progress.clone(), result.clone());
     let (dir, rec, edit) = (dir.to_path_buf(), rec.clone(), edit.clone());
     let s = &dlg.settings;
-    let opts = ExportOptions { out: out.clone(), height, fps: s.fps, format: s.format, quality: s.quality };
+    let opts = ExportOptions { out: out.clone(), height, fps: s.fps, format: s.format, quality: s.quality, prores: s.prores };
     let destination = s.destination;
     let (device, queue) = (comp.device().clone(), comp.queue().clone());
     let ctx2 = ctx.clone();

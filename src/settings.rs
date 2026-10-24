@@ -7,6 +7,57 @@ use std::path::PathBuf;
 pub enum Format {
     Mp4,
     Gif,
+    /// Apple ProRes in a .mov, for editing in Final Cut, Resolve or Premiere.
+    ProRes,
+}
+
+impl Format {
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Gif => "gif",
+            Self::ProRes => "mov",
+        }
+    }
+}
+
+/// ProRes flavours, as Screen Studio offers them.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProRes {
+    Lt,
+    Standard,
+    Hq,
+    P4444,
+}
+
+impl ProRes {
+    pub const ALL: [ProRes; 4] = [Self::Lt, Self::Standard, Self::Hq, Self::P4444];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lt => "422 LT",
+            Self::Standard => "422",
+            Self::Hq => "422 HQ",
+            Self::P4444 => "4444",
+        }
+    }
+    /// ffmpeg prores_ks profile number and pixel format.
+    pub fn ffmpeg(self) -> (u32, &'static str) {
+        match self {
+            Self::Lt => (1, "yuv422p10le"),
+            Self::Standard => (2, "yuv422p10le"),
+            Self::Hq => (3, "yuv422p10le"),
+            Self::P4444 => (4, "yuv444p10le"),
+        }
+    }
+    /// Apple's published data rate at 1920x1080, 29.97 fps, in Mbit/s.
+    pub fn mbps_1080p30(self) -> f64 {
+        match self {
+            Self::Lt => 102.0,
+            Self::Standard => 147.0,
+            Self::Hq => 220.0,
+            Self::P4444 => 330.0,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +124,8 @@ pub struct Settings {
     pub height: Option<u32>,
     pub quality: Quality,
     pub destination: Destination,
+    /// ProRes flavour when exporting as ProRes.
+    pub prores: ProRes,
     /// Global shortcut that stops a recording.
     pub stop_shortcut: String,
     /// Global shortcut that marks a recording flag (Screen Studio: ⌘⌥⌃F).
@@ -190,6 +243,7 @@ impl Default for Settings {
             height: None,
             quality: Quality::Social,
             destination: Destination::File,
+            prores: ProRes::Hq,
             stop_shortcut: "Ctrl+Alt+Enter".into(),
             flag_shortcut: "Ctrl+Alt+F".into(),
             auto_zooms: true,

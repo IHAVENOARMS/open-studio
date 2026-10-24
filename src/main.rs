@@ -159,7 +159,7 @@ enum Cmd {
         height: u32,
         #[arg(long, default_value_t = 60)]
         fps: u32,
-        /// mp4 or gif
+        /// mp4, gif or prores
         #[arg(long, default_value = "mp4")]
         format: String,
         /// studio, social, web or web-low
@@ -296,6 +296,7 @@ fn main() -> Result<()> {
             let format = match format.as_str() {
                 "gif" => settings::Format::Gif,
                 "mp4" => settings::Format::Mp4,
+                "prores" | "mov" => settings::Format::ProRes,
                 f => anyhow::bail!("unknown format {f}"),
             };
             let quality = match quality.as_str() {
@@ -318,6 +319,7 @@ fn main() -> Result<()> {
                     fps,
                     format,
                     quality,
+                    prores: settings::Settings::load().prores,
                 }, &progress)?;
             eprintln!("open-studio: exported in {:.1}s", started.elapsed().as_secs_f64());
             if clipboard {

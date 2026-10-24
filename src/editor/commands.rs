@@ -7,7 +7,7 @@ use super::{Editor, ExportDialog, spawn_export};
 use crate::dialogs;
 use crate::icons::{self, Icon};
 use crate::presets::{self, Preset};
-use crate::settings::{Destination, Format, Settings};
+use crate::settings::{Destination, Settings};
 use crate::theme;
 use egui::{Color32, CornerRadius, FontId, Key, Rect, Sense, Stroke, pos2, vec2};
 use std::path::PathBuf;
@@ -298,7 +298,7 @@ impl Editor {
                     return;
                 }
                 let mut dlg = ExportDialog { settings, job: None, picking_dir: None, saving: None };
-                let ext = if dlg.settings.format == Format::Gif { "gif" } else { "mp4" };
+                let ext = dlg.settings.format.extension();
                 let name = format!("{}.{ext}", self.name);
                 if matches!(cmd, Cmd::ExportClipboard) {
                     dlg.settings.destination = Destination::Clipboard;

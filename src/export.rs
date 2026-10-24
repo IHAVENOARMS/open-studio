@@ -20,6 +20,8 @@ pub struct ExportOptions {
     pub fps: u32,
     pub format: crate::settings::Format,
     pub quality: crate::settings::Quality,
+    /// ProRes flavour, for `Format::ProRes`.
+    pub prores: crate::settings::ProRes,
 }
 
 #[derive(Default)]
@@ -45,6 +47,7 @@ pub fn export(
 ) -> Result<()> {
     let paths = ProjectPaths::new(dir);
     crate::privacy::ensure(rec, &edit.privacy)?;
+    let began = std::time::Instant::now();
     let tracks = Tracks::build(rec, edit);
     let (w, h) = output_size(tracks.layout.aspect, opts.height);
     let (start, end) = edit.trim_range(rec.duration);
@@ -72,12 +75,20 @@ pub fn export(
     let gif = opts.format == crate::settings::Format::Gif;
     let video_out = if gif { opts.out.with_extension("tmp.mp4") } else { opts.out.clone() };
     let (crf, preset) = if gif { (12, "veryfast") } else { opts.quality.x264() };
-    // GIFs go through a throwaway intermediate; keep that on x264.
-    let gpu = if gif || !crate::settings::Settings::load().gpu_encoding { None } else { crate::hwenc::detect() };
+    let prores = opts.format == crate::settings::Format::ProRes;
+    // GIFs go through a throwaway intermediate; keep that on x264. ProRes
+    // is encoded on the CPU.
+    let gpu = if gif || prores || !crate::settings::Settings::load().gpu_encoding { None } else { crate::hwenc::detect() };
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
     let input = ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{w}x{h}"), "-r", &opts.fps.to_string(), "-i", "-"].map(String::from);
-    if let Some(gpu) = gpu {
+    if prores {
+        let (profile, pix) = opts.prores.ffmpeg();
+        cmd.args(input)
+            .args(["-vf", "scale=out_color_matrix=bt709:out_range=tv"])
+            .args(["-c:v", "prores_ks", "-profile:v", &profile.to_string(), "-vendor", "apl0", "-pix_fmt", pix])
+            .args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]);
+    } else if let Some(gpu) = gpu {
         cmd.args(gpu.input_args()).args(input).args(gpu.output_args(opts.quality.gpu_qp(), opts.fps * 2));
     } else {
         cmd.args(input)
@@ -202,7 +213,124 @@ pub fn export(
             bail!("GIF conversion failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
     }
+    // Remember this machine's pace for the next estimate (GIFs and ProRes
+    // differ, so only plain MP4s set it).
+    if opts.format == crate::settings::Format::Mp4 {
+        let mpx = w as f64 * h as f64 * total as f64 / 1e6;
+        let secs = began.elapsed().as_secs_f64();
+        if secs > 0.5 {
+            let _ = std::fs::create_dir_all(crate::util::config_dir());
+            let _ = std::fs::write(speed_file(), format!("{}", mpx / secs));
+        }
+    }
     Ok(())
+}
+
+fn speed_file() -> PathBuf {
+    crate::util::config_dir().join("export-speed")
+}
+
+/// Output megapixels per second the last MP4 export managed here, if known.
+pub fn measured_speed() -> Option<f64> {
+    std::fs::read_to_string(speed_file()).ok()?.trim().parse().ok().filter(|v: &f64| *v > 0.0)
+}
+
+/// Estimated export time (seconds) and largest likely file size (bytes)
+/// for `secs` of output at `size` and `fps`, as Screen Studio shows under
+/// its export buttons. `speed`: output megapixels per second (measured, or
+/// a cautious guess).
+pub fn estimate(
+    format: crate::settings::Format,
+    quality: crate::settings::Quality,
+    prores: crate::settings::ProRes,
+    size: (u32, u32),
+    fps: u32,
+    secs: f64,
+    speed: Option<f64>,
+    audio: bool,
+) -> (f64, f64) {
+    use crate::settings::{Format, Quality};
+    let px = size.0 as f64 * size.1 as f64;
+    let frames = secs * fps as f64;
+    let speed = speed.unwrap_or(40.0);
+    let mut time = px * frames / 1e6 / speed + 1.0;
+    let video_bits = match format {
+        // Screen recordings compress well; these are generous ceilings.
+        Format::Mp4 => {
+            let bpp = match quality {
+                Quality::Studio => 0.15,
+                Quality::Social => 0.08,
+                Quality::Web => 0.045,
+                Quality::WebLow => 0.025,
+            };
+            bpp * px * frames
+        }
+        Format::ProRes => {
+            time *= 1.3;
+            prores.mbps_1080p30() * 1e6 * (px * fps as f64) / (1920.0 * 1080.0 * 29.97) * secs
+        }
+        Format::Gif => {
+            time *= 2.5;
+            0.25 * 8.0 * px * frames
+        }
+    };
+    let audio_bits = match (audio, format) {
+        (false, _) | (_, Format::Gif) => 0.0,
+        (_, Format::ProRes) => 48_000.0 * 2.0 * 16.0 * secs,
+        _ => 192_000.0 * secs,
+    };
+    (time, (video_bits + audio_bits) / 8.0)
+}
+
+/// "6 seconds", "2 minutes", "1 hour 5 minutes".
+pub fn format_duration(secs: f64) -> String {
+    let s = secs.round().max(1.0) as u64;
+    let plural = |n: u64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    match s {
+        0..=59 => plural(s, "second"),
+        60..=3599 => plural((s + 30) / 60, "minute"),
+        _ => format!("{} {}", plural(s / 3600, "hour"), plural((s % 3600 + 30) / 60, "minute")),
+    }
+}
+
+/// "20.8MB", "1.4GB".
+pub fn format_size(bytes: f64) -> String {
+    if bytes >= 1e9 { format!("{:.1}GB", bytes / 1e9) } else { format!("{:.1}MB", (bytes / 1e6).max(0.1)) }
+}
+
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+    use crate::settings::{Format, ProRes, Quality};
+
+    #[test]
+    fn estimates_grow_with_what_costs() {
+        let base = estimate(Format::Mp4, Quality::Social, ProRes::Hq, (1920, 1080), 60, 30.0, Some(60.0), true);
+        // 30 s of 1080p60 at 60 MP/s: about 62 s, plus a second.
+        assert!((base.0 - (1920.0 * 1080.0 * 1800.0 / 1e6 / 60.0 + 1.0)).abs() < 1e-6);
+        // Quality changes the size, not the time (as Screen Studio says).
+        let studio = estimate(Format::Mp4, Quality::Studio, ProRes::Hq, (1920, 1080), 60, 30.0, Some(60.0), true);
+        assert_eq!(studio.0, base.0);
+        assert!(studio.1 > base.1);
+        // 4K costs about four times 1080p; half the frames about half.
+        let k4 = estimate(Format::Mp4, Quality::Social, ProRes::Hq, (3840, 2160), 60, 30.0, Some(60.0), true);
+        assert!((k4.0 - 1.0) / (base.0 - 1.0) > 3.9);
+        let fps30 = estimate(Format::Mp4, Quality::Social, ProRes::Hq, (1920, 1080), 30, 30.0, Some(60.0), true);
+        assert!(fps30.0 < base.0 * 0.6 && fps30.1 < base.1 * 0.6);
+        // ProRes HQ at 1080p30: about Apple's 220 Mbit/s plus PCM audio.
+        let pr = estimate(Format::ProRes, Quality::Social, ProRes::Hq, (1920, 1080), 30, 10.0, Some(60.0), true);
+        let expect = (220e6 * 30.0 / 29.97 * 10.0 + 1_536_000.0 * 10.0) / 8.0;
+        assert!((pr.1 / expect - 1.0).abs() < 1e-6);
+        assert!(estimate(Format::ProRes, Quality::Social, ProRes::Lt, (1920, 1080), 30, 10.0, None, false).1 < pr.1);
+        // GIFs take longer.
+        assert!(estimate(Format::Gif, Quality::Social, ProRes::Hq, (1920, 1080), 30, 30.0, Some(60.0), false).0 > fps30.0 * 2.0);
+        assert_eq!(format_duration(6.2), "6 seconds");
+        assert_eq!(format_duration(1.0), "1 second");
+        assert_eq!(format_duration(130.0), "2 minutes");
+        assert_eq!(format_duration(3900.0), "1 hour 5 minutes");
+        assert_eq!(format_size(20.8e6), "20.8MB");
+        assert_eq!(format_size(1.43e9), "1.4GB");
+    }
 }
 
 /// An offscreen render target with a buffer to read it back.
@@ -362,7 +490,9 @@ pub fn audio_tracks(rec: &Recording, edit: &EditConfig, clicks: Option<&Path>) -
 /// trimmed to the edited range, filtered and gain-adjusted.
 #[allow(clippy::too_many_arguments)]
 fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f64, segments: &[(f64, f64, f64)], slices: &[crate::edit::SliceProps]) -> Result<()> {
-    let tmp = video.with_extension("audio.mp4");
+    // ProRes .mov files carry uncompressed audio, as editors expect.
+    let mov = video.extension().is_some_and(|e| e.eq_ignore_ascii_case("mov"));
+    let tmp = video.with_extension(if mov { "audio.mov" } else { "audio.mp4" });
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(video);
     let mut filters = vec![];
@@ -418,7 +548,13 @@ fn mux_audio(_dir: &Path, tracks: &[MixTrack], video: &Path, start: f64, end: f6
         filters.push(format!("{joined}concat=n={}:v=0:a=1,apad[aout]", segs.len()));
     }
     cmd.args(["-filter_complex", &filters.join(";")]);
-    cmd.args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"]);
+    cmd.args(["-map", "0:v", "-map", "[aout]", "-c:v", "copy"]);
+    if mov {
+        cmd.args(["-c:a", "pcm_s16le"]);
+    } else {
+        cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+    }
+    cmd.args(["-shortest", "-movflags", "+faststart"]);
     cmd.arg(&tmp);
     let out = cmd.output().context("muxing audio")?;
     if !out.status.success() {
