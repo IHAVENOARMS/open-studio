@@ -51,6 +51,14 @@ pub struct Capture {
     pub fps: u32,
 }
 
+impl Drop for Capture {
+    /// A capture dropped without `stop` (a failed recording) still shuts its
+    /// pipeline down.
+    fn drop(&mut self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
 pub struct CaptureResult {
     pub frames: u64,
     pub first_frame_ns: i64,
@@ -68,7 +76,7 @@ impl Capture {
             ),
             CaptureSource::Direct(info) => format!(
                 "appsrc name=src is-live=true format=time do-timestamp=false \
-                 caps=video/x-raw,format={},width={},height={},framerate=0/1 ! queue max-size-buffers=16",
+                 caps=video/x-raw,format={},width={},height={},framerate=0/1",
                 info.gst_format, info.width, info.height
             ),
             CaptureSource::Test { width, height } => format!(
@@ -77,9 +85,14 @@ impl Capture {
         };
         // For the GPU, any packed RGB format passes through untouched.
         let format = if gpu.is_some() { "format={BGRx,BGRA,RGBx,RGBA}" } else { "format=Y444,colorimetry=bt709" };
+        // Few frames held anywhere: a 4K frame is 25-33 MB. When the encoder
+        // can't keep up (a busy CPU), the leaky queue drops the oldest
+        // captured frame; videorate then repeats one by timestamp, so the
+        // recording keeps its length and stays in sync with sound and cursor.
         let desc = format!(
-            "{src} ! videorate ! video/x-raw,framerate={fps}/1 ! videoconvert n-threads=0 \
-             ! video/x-raw,{format} ! appsink name=sink sync=false max-buffers=16"
+            "{src} ! queue max-size-buffers=3 max-size-bytes=0 max-size-time=0 leaky=downstream \
+             ! videorate ! video/x-raw,framerate={fps}/1 ! videoconvert n-threads=0 \
+             ! video/x-raw,{format} ! appsink name=sink sync=false max-buffers=3"
         );
         let pipeline = gst::parse::launch(&desc)
             .context("building GStreamer pipeline")?
@@ -192,7 +205,10 @@ fn spawn_encoder(out: &PathBuf, w: u32, h: u32, fps: u32, format: gst_video::Vid
         cmd.args(["-f", "rawvideo", "-pix_fmt", "yuv444p"])
             .args(["-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"])
             .args(["-s", &format!("{w}x{h}"), "-r", &fps.to_string(), "-i", "-"])
-            .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-g", &fps.to_string()])
+            // zerolatency: no lookahead or B-frames, so x264 holds a handful
+            // of frames instead of dozens (gigabytes at 4K 4:4:4, enough to
+            // run the machine out of memory while it's busy streaming).
+            .args(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-crf", "14", "-g", &fps.to_string()])
             .args(["-pix_fmt", "yuv444p"]);
     }
     let child = cmd
