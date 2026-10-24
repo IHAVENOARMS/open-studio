@@ -44,6 +44,7 @@ pub fn export(
     progress: &Progress,
 ) -> Result<()> {
     let paths = ProjectPaths::new(dir);
+    crate::privacy::ensure(rec, &edit.privacy)?;
     let tracks = Tracks::build(rec, edit);
     let (w, h) = output_size(tracks.layout.aspect, opts.height);
     let (start, end) = edit.trim_range(rec.duration);
@@ -282,6 +283,7 @@ pub fn frame_png(comp: &mut Compositor, dir: &Path, rec: &Recording, edit: &Edit
 /// The edited frame at recording time `t`, `height` pixels tall.
 pub fn render_frame(comp: &mut Compositor, dir: &Path, rec: &Recording, edit: &EditConfig, t: f64, height: u32) -> Result<image::RgbaImage> {
     let paths = ProjectPaths::new(dir);
+    crate::privacy::ensure(rec, &edit.privacy)?;
     let tracks = Tracks::build(rec, edit);
     let (w, h) = output_size(tracks.layout.aspect, height);
     let target = Target::new(comp, w, h);

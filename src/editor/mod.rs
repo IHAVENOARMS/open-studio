@@ -9,6 +9,7 @@ mod curve;
 mod guide;
 mod mask_overlay;
 pub mod player;
+mod privacy_ui;
 pub use widgets::toggle;
 mod scrub;
 mod shuttle;
@@ -891,6 +892,10 @@ impl Editor {
         }
 
         self.handle_keys(&ctx);
+        // Hide sensitive data / Hide faces: a finished pass brings new covers.
+        if privacy_ui::tick(&mut self.sidebar.privacy, &self.edit, &self.rec, &ctx) {
+            self.tracks = Tracks::build(&self.rec, &self.edit);
+        }
         // Track set changed (music, mutes, click sounds): rebuild the player.
         if !self.audio.is_current(&self.edit) {
             self.audio = audio::AudioPreview::new(&self.rec, &self.edit);
@@ -1620,8 +1625,13 @@ impl Editor {
         );
         // Background removal runs for a while: show it on the preview, from
         // whatever tab is open, until the cutout can be shown.
-        if let Some(p) = self.sidebar.camera.poll_cutout(ui.ctx()) {
-            let text = if p == 0.0 { "Preparing background removal…".to_string() } else { format!("Removing background…  {:.0}%", p * 100.0) };
+        let busy = self
+            .sidebar
+            .camera
+            .poll_cutout(ui.ctx())
+            .map(|p| (if p == 0.0 { "Preparing background removal…".to_string() } else { format!("Removing background…  {:.0}%", p * 100.0) }, p))
+            .or_else(|| privacy_ui::status(&self.sidebar.privacy));
+        if let Some((text, p)) = busy {
             let font = egui::FontId::proportional(13.0);
             let g = ui.painter().layout_no_wrap(text, font, Color32::WHITE);
             let size = egui::vec2(g.size().x + 28.0, 34.0);
@@ -1814,6 +1824,10 @@ impl Editor {
                             }
                         });
                     });
+                    if self.edit.privacy.hide_sensitive || self.edit.privacy.hide_faces {
+                        ui.add_space(18.0);
+                        privacy_ui::review_note(ui);
+                    }
                     ui.add_space(26.0);
                     ui.label(egui::RichText::new("Export to").size(15.0));
                     ui.horizontal(|ui| {

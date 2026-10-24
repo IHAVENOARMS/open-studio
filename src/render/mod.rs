@@ -29,9 +29,9 @@ struct SceneUniform {
     /// x = number of masks.
     mask_info: [f32; 4],
     /// Per mask: video uv x0, y0, x1, y1.
-    mask_rects: [[f32; 4]; 8],
-    /// Per mask: kind (0 blur, 1 highlight), amount, unused, unused.
-    mask_params: [[f32; 4]; 8],
+    mask_rects: [[f32; 4]; crate::engine::MAX_MASKS],
+    /// Per mask: kind (0 blur, 1 highlight, 2 cover, 3 face), amount, unused, unused.
+    mask_params: [[f32; 4]; crate::engine::MAX_MASKS],
     bg: [[f32; 4]; 4],
     params: [f32; 4],
     /// Card rect (screen plus inset), canvas units.
@@ -774,6 +774,8 @@ impl Compositor {
                     let kind = match m.kind {
                         crate::edit::MaskKind::Blur => 0.0,
                         crate::edit::MaskKind::Highlight => 1.0,
+                        crate::edit::MaskKind::Cover => 2.0,
+                        crate::edit::MaskKind::Face => 3.0,
                     };
                     [kind, m.amount as f32, 0.0, 0.0]
                 })
@@ -1049,4 +1051,17 @@ fn blur_samples(layout: &Layout, frame: &FrameState, edit: &EditConfig, out_h: f
         max_px = max_px.max((dx * dx + dy * dy).sqrt() * frame.camera.scale * out_h);
     }
     if max_px < 1.0 { 1 } else { (max_px.ceil() as u32).clamp(2, 48) }
+}
+
+#[cfg(test)]
+mod shader_tests {
+    /// The compositor shader parses and validates (wgpu only finds out when
+    /// the app starts).
+    #[test]
+    fn shader_is_valid_wgsl() {
+        let module = naga::front::wgsl::parse_str(include_str!("shader.wgsl")).unwrap_or_else(|e| panic!("{}", e.emit_to_string(include_str!("shader.wgsl"))));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+    }
 }

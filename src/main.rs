@@ -22,6 +22,7 @@ mod gpu;
 mod hwenc;
 mod icons;
 mod presets;
+mod privacy;
 mod project;
 mod record;
 mod recorder_ui;

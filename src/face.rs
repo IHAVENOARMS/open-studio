@@ -46,7 +46,7 @@ fn model_path() -> PathBuf {
 }
 
 /// Downloads the face model on first use (about 1 MB).
-fn ensure_model() -> Result<PathBuf> {
+pub(crate) fn ensure_model() -> Result<PathBuf> {
     let p = model_path();
     if p.is_file() {
         return Ok(p);

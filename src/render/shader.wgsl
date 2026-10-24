@@ -8,8 +8,8 @@ struct Scene {
     next_cam: vec4f,     // shutter end camera: cx, cy, scale, unused
     blur: vec4f,         // zoom blur strength, pan blur strength, unused, unused
     mask_info: vec4f,    // mask count
-    mask_rects: array<vec4f, 8>,   // video uv x0, y0, x1, y1
-    mask_params: array<vec4f, 8>,  // kind (0 blur, 1 highlight), amount
+    mask_rects: array<vec4f, 64>,   // video uv x0, y0, x1, y1
+    mask_params: array<vec4f, 64>,  // kind (0 blur, 1 highlight, 2 cover, 3 face), amount
     bg0: vec4f,
     bg1: vec4f,
     bg2: vec4f,
@@ -133,6 +133,79 @@ fn mask_cover(uv: vec2f, r: vec4f) -> f32 {
     return clamp(0.5 - d / 1.5, 0.0, 1.0);
 }
 
+// Hide sensitive data: the colour just outside a rect, which the cover
+// takes so it blends into the page. Samples unlike the rest (neighbouring
+// letters, a border) count less, so the page colour wins.
+fn surround(r: vec4f) -> vec3f {
+    let size = vec2f(textureDimensions(video));
+    let m = vec2f(3.0) / size;
+    let lo = r.xy - m;
+    let hi = r.zw + m;
+    var s: array<vec3f, 18>;
+    for (var i = 0; i < 6; i++) {
+        let f = (f32(i) + 0.5) / 6.0;
+        s[i] = textureSampleLevel(video, samp, vec2f(mix(lo.x, hi.x, f), lo.y), 0.0).rgb;
+        s[6 + i] = textureSampleLevel(video, samp, vec2f(mix(lo.x, hi.x, f), hi.y), 0.0).rgb;
+    }
+    for (var i = 0; i < 3; i++) {
+        let f = (f32(i) + 0.5) / 3.0;
+        s[12 + i] = textureSampleLevel(video, samp, vec2f(lo.x, mix(lo.y, hi.y, f)), 0.0).rgb;
+        s[15 + i] = textureSampleLevel(video, samp, vec2f(hi.x, mix(lo.y, hi.y, f)), 0.0).rgb;
+    }
+    var c = vec3f(0.0);
+    for (var i = 0; i < 18; i++) {
+        c += s[i];
+    }
+    c = c / 18.0;
+    for (var it = 0; it < 3; it++) {
+        var acc = vec3f(0.0);
+        var w = 0.0;
+        for (var i = 0; i < 18; i++) {
+            let d = s[i] - c;
+            let k = exp(-dot(d, d) * 400.0);
+            acc += s[i] * k;
+            w += k;
+        }
+        c = acc / max(w, 1e-4);
+    }
+    return c;
+}
+
+// 0 outside .. 1 inside a cover: a rounded rect with a soft edge.
+fn cover_shape(uv: vec2f, r: vec4f) -> f32 {
+    let size = vec2f(textureDimensions(video));
+    let p = uv * size;
+    let lo = r.xy * size;
+    let hi = r.zw * size;
+    let half = (hi - lo) * 0.5;
+    let d = sd_round_rect(p - (lo + hi) * 0.5, half, min(half.x, half.y) * 0.6);
+    return clamp(0.5 - d / 3.0, 0.0, 1.0);
+}
+
+// 0 outside .. 1 inside a face cover: an oval fading out at its edge.
+fn face_shape(uv: vec2f, r: vec4f) -> f32 {
+    let size = vec2f(textureDimensions(video));
+    let p = uv * size;
+    let c = (r.xy + r.zw) * 0.5 * size;
+    let half = max((r.zw - r.xy) * 0.5 * size, vec2f(1.0));
+    let d = length((p - c) / half);
+    return clamp((1.0 - d) / 0.25, 0.0, 1.0);
+}
+
+// Hide faces: a blur sized to the face, so features don't survive at any size.
+fn sample_face_blur(uv: vec2f, r: vec4f) -> vec3f {
+    let size = vec2f(textureDimensions(video));
+    let face = max((r.z - r.x) * size.x, (r.w - r.y) * size.y);
+    let lod = log2(max(face / 5.0, 8.0));
+    let step = face * 0.18 / size;
+    var c = textureSampleLevel(video, samp, uv, lod).rgb * 2.0;
+    for (var i = 0; i < 8; i++) {
+        let a = f32(i) * 0.7853982;
+        c += textureSampleLevel(video, samp, uv + vec2f(cos(a), sin(a)) * step, lod).rgb;
+    }
+    return c / 10.0;
+}
+
 fn apply_masks(v_in: vec3f, uv: vec2f) -> vec3f {
     var v = v_in;
     let n = i32(u.mask_info.x);
@@ -142,6 +215,29 @@ fn apply_masks(v_in: vec3f, uv: vec2f) -> vec3f {
     for (var i = 0; i < n; i++) {
         let r = u.mask_rects[i];
         let prm = u.mask_params[i];
+        // Cheap rejection: most pixels are far from most masks.
+        let pad = vec2f(0.02);
+        if (any(uv < r.xy - pad) || any(uv > r.zw + pad)) {
+            if (prm.x > 0.5 && prm.x < 1.5) {
+                any_highlight = true;
+                dim = max(dim, prm.y);
+            }
+            continue;
+        }
+        if (prm.x > 2.5) {
+            let f = face_shape(uv, r);
+            if (f > 0.0) {
+                v = mix(v, sample_face_blur(uv, r), f * prm.y);
+            }
+            continue;
+        }
+        if (prm.x > 1.5) {
+            let f = cover_shape(uv, r);
+            if (f > 0.0) {
+                v = mix(v, surround(r), f * prm.y);
+            }
+            continue;
+        }
         let cover = mask_cover(uv, r);
         if (prm.x < 0.5) {
             if (cover > 0.0) {

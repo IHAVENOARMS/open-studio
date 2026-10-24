@@ -187,6 +187,8 @@ pub struct Tracks {
     speech: Vec<(f64, f64)>,
     /// Face positions in the camera, for face tracking.
     face: Option<crate::face::FaceTrack>,
+    /// Hide sensitive data and Hide faces covers.
+    covers: std::sync::Arc<Vec<crate::privacy::Cover>>,
 }
 
 impl Tracks {
@@ -345,7 +347,8 @@ impl Tracks {
         };
         let speech = if edit.camera.hide_during_silence && rec.camera.is_some() { crate::voice::speech_spans(rec) } else { vec![] };
         let face = if edit.camera.face_tracking { crate::face::FaceTrack::load(&rec.dir) } else { None };
-        Self { layout, cameras, cursor, duration: rec.duration, shortcuts, captions, speech, face }
+        let covers = crate::privacy::covers(rec, &edit.privacy);
+        Self { layout, cameras, cursor, duration: rec.duration, shortcuts, captions, speech, face, covers }
     }
 
     fn index(&self, t: f64) -> (usize, f64) {
@@ -491,25 +494,35 @@ pub struct ActiveMask {
     pub amount: f64,
 }
 
+/// Most masks the compositor takes in one frame.
+pub const MAX_MASKS: usize = 64;
+
 /// Masks in effect at `t`. Highlights fade in and out over 0.3s; blurs are
 /// fully on for their whole span so nothing sensitive leaks at the edges.
-fn active_masks(edit: &EditConfig, t: f64) -> Vec<ActiveMask> {
+/// Order: the user's blurs, Hide sensitive data and Hide faces covers, then
+/// highlights, so a crowded frame drops highlights before anything private.
+fn active_masks(edit: &EditConfig, tracks: &Tracks, t: f64) -> Vec<ActiveMask> {
     const FADE: f64 = 0.3;
-    edit.masks
-        .iter()
-        .filter(|m| !m.disabled && t >= m.start && t < m.end)
-        .map(|m| {
+    let user = |blur: bool| {
+        edit.masks.iter().filter(move |m| !m.disabled && t >= m.start && t < m.end && (m.kind == MaskKind::Blur) == blur).map(move |m| {
             let amount = match m.kind {
-                MaskKind::Blur => 1.0,
                 MaskKind::Highlight => {
                     let f = ((t - m.start) / FADE).min((m.end - t) / FADE).clamp(0.0, 1.0);
                     m.opacity * f * f * (3.0 - 2.0 * f)
                 }
+                _ => 1.0,
             };
             ActiveMask { kind: m.kind, rect: m.rect, amount }
         })
-        .take(8)
-        .collect()
+    };
+    let covers = tracks.covers.iter().filter_map(|c| {
+        let kind = match c.kind {
+            crate::privacy::CoverKind::Text => MaskKind::Cover,
+            crate::privacy::CoverKind::Face => MaskKind::Face,
+        };
+        c.at(t).map(|rect| ActiveMask { kind, rect, amount: 1.0 })
+    });
+    user(true).chain(covers).chain(user(false)).take(MAX_MASKS).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -595,7 +608,7 @@ pub fn frame_state(rec: &Recording, edit: &EditConfig, tracks: &Tracks, t: f64, 
         blur_from,
         blur_to,
         cursor,
-        masks: active_masks(edit, t),
+        masks: active_masks(edit, tracks, t),
         click,
         keys: key_overlay(edit, tracks, t),
         caption,
@@ -976,7 +989,7 @@ fn idle_opacity(rec: &Recording, edit: &EditConfig, t: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edit::{EditConfig, ZoomCurve, ZoomFocus, ZoomSegment};
+    use crate::edit::{EditConfig, ZoomCurve, ZoomSegment};
     use crate::project::{Events, Recording, Source};
 
     fn rec() -> Recording {

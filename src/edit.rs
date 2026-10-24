@@ -50,6 +50,22 @@ pub enum MaskKind {
     Blur,
     /// Everything outside the region is dimmed.
     Highlight,
+    /// Hide sensitive data: filled with the colour around it.
+    Cover,
+    /// Hide faces: an oval blur.
+    Face,
+}
+
+/// Automatic covers (see `privacy`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct PrivacySettings {
+    /// Cover emails, phone and card numbers, keys and `phrases` on screen.
+    pub hide_sensitive: bool,
+    /// Blur faces on screen.
+    pub hide_faces: bool,
+    /// Custom phrases to hide too (names, clients).
+    pub phrases: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
@@ -760,6 +776,8 @@ pub struct EditConfig {
     pub slices: Vec<SliceProps>,
     /// Typing suggestions removed (their start times; see `typing`).
     pub typing_removed: Vec<f64>,
+    /// Hide sensitive data and Hide faces.
+    pub privacy: PrivacySettings,
     /// Part of the screen recording kept (Crop): x, y, w, h as fractions.
     pub crop: [f64; 4],
     pub captions: CaptionSettings,
@@ -831,6 +849,7 @@ impl Default for EditConfig {
             splits: vec![],
             slices: vec![],
             typing_removed: vec![],
+            privacy: PrivacySettings::default(),
             crop: [0.0, 0.0, 1.0, 1.0],
             captions: CaptionSettings::default(),
             camera: CameraSettings::default(),

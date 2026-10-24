@@ -1314,6 +1314,7 @@ fn paint_mask(p: &egui::Painter, r: Rect, m: &Mask, selected: bool) {
     let label = match m.kind {
         MaskKind::Blur => "Sensitive data".to_string(),
         MaskKind::Highlight => format!("Highlight {:.0}%", m.opacity * 100.0),
+        MaskKind::Cover | MaskKind::Face => "Hidden".to_string(),
     };
     if r.width() > 80.0 {
         p.text(r.center() - vec2(0.0, 10.0), egui::Align2::CENTER_CENTER, "Mask", egui::FontId::proportional(12.0), Color32::from_white_alpha(150));
