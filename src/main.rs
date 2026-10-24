@@ -12,6 +12,7 @@ mod face;
 mod theme;
 mod voice;
 mod transcript;
+mod typing;
 mod decode;
 mod dialogs;
 mod edit;

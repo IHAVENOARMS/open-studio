@@ -138,6 +138,8 @@ pub struct Editor {
     scrubber: scrub::Scrubber,
     /// Ctrl+K command menu, while open.
     command: Option<commands::CommandMenu>,
+    /// Typing stretches found in the recorded keys (Speed up typing).
+    typing: Vec<crate::typing::Typing>,
     /// Ctrl+/ Shortcuts Guide, while open.
     guide: Option<guide::Guide>,
     presets: Vec<crate::presets::Preset>,
@@ -210,6 +212,7 @@ impl Editor {
             scrubber: Default::default(),
             command: None,
             guide: None,
+            typing: crate::typing::detect(&rec.events.keys, rec.duration),
             presets: vec![],
             preset_name: String::new(),
             preset_menu: None,
@@ -979,6 +982,7 @@ impl Editor {
                     self.rec.audio.iter().any(|a| a.kind == "device"),
                     &shortcuts,
                     &self.rec.events.flags,
+                    &self.typing,
                 );
                 if let Some(t) = out.seek {
                     self.seek(t);

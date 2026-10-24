@@ -5,6 +5,7 @@
 use crate::edit::{CameraLayoutKind, CameraLayoutSegment, EditConfig, Mask, MaskKind, ZoomFocus, ZoomSegment};
 use crate::icons::{self, Icon};
 use crate::theme;
+use crate::typing::{self, Typing};
 use crate::util::format_time;
 use egui::{Color32, CornerRadius, CursorIcon, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
@@ -133,12 +134,27 @@ pub struct State {
     pub fold_cuts: bool,
     /// Scrubber: dragging the playhead plays the sound under it.
     pub scrubber: bool,
+    /// Typing suggestion whose "Speed up typing" popover is open.
+    typing_open: Option<Typing>,
+    /// Speed on that popover's slider.
+    typing_speed: f64,
 }
 
 impl Default for State {
     fn default() -> Self {
         let s = crate::settings::Settings::load();
-        Self { drag: None, split_mode: false, zoom: 1.0, scroll: 0.0, menu_slice: None, waveform: s.timeline_waveform, fold_cuts: s.timeline_fold_cuts, scrubber: s.scrubber }
+        Self {
+            drag: None,
+            split_mode: false,
+            zoom: 1.0,
+            scroll: 0.0,
+            menu_slice: None,
+            waveform: s.timeline_waveform,
+            fold_cuts: s.timeline_fold_cuts,
+            scrubber: s.scrubber,
+            typing_open: None,
+            typing_speed: crate::typing::DEFAULT_SPEED,
+        }
     }
 }
 
@@ -383,6 +399,7 @@ pub fn show(
     has_device: bool,
     shortcuts: &[crate::shortcuts::Shortcut],
     flags: &[f64],
+    typing: &[Typing],
 ) -> Output {
     let mut out = Output::default();
     let full = ui.available_rect_before_wrap();
@@ -764,6 +781,49 @@ pub fn show(
         }
     }
 
+    // Typing suggestions: amber pills just above the clip; a click opens
+    // "Speed up typing".
+    let suggestions = typing::suggestions(typing, edit, duration);
+    for t in &suggestions {
+        let r = Rect::from_x_y_ranges(geo.x(t.start)..=geo.x(t.end), (clip.top() - 21.0)..=(clip.top() - 3.0)).shrink2(vec2(1.0, 0.0));
+        if r.width() < 6.0 || r.right() < full.left() || r.left() > full.right() {
+            continue;
+        }
+        let resp = ui
+            .interact(r, ui.scope_id().with(("typing", (t.start * 1000.0) as i64)), Sense::click())
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .on_hover_text("Typing: click to speed it up");
+        let open = state.typing_open == Some(*t);
+        let fill = if open || resp.hovered() { TYPING_FILL_HOVER } else { TYPING_FILL };
+        p.rect_filled(r, CornerRadius::same(5), fill);
+        p.rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, TYPING_EDGE), StrokeKind::Inside);
+        let font = egui::FontId::proportional(11.5);
+        let g = p.layout_no_wrap("Typing".into(), font, TYPING_TEXT);
+        let content = 14.0 + 5.0 + g.size().x;
+        let clipped = p.with_clip_rect(r.shrink(1.0));
+        if r.width() > content + 12.0 {
+            let x0 = r.center().x - content / 2.0;
+            icons::paint(&clipped, Rect::from_center_size(pos2(x0 + 7.0, r.center().y), vec2(14.0, 14.0)), Icon::Keyboard, TYPING_TEXT);
+            clipped.galley(pos2(x0 + 19.0, r.center().y - g.size().y / 2.0), g, TYPING_TEXT);
+        } else if r.width() > 20.0 {
+            icons::paint(&clipped, Rect::from_center_size(r.center(), vec2(14.0, 14.0)), Icon::Keyboard, TYPING_TEXT);
+        }
+        if resp.clicked() {
+            if open {
+                state.typing_open = None;
+            } else {
+                state.typing_open = Some(*t);
+                state.typing_speed = typing::DEFAULT_SPEED;
+            }
+        }
+        if open {
+            typing_popover(ui, state, edit, &suggestions, duration, r);
+        }
+    }
+    if state.typing_open.is_some_and(|o| !suggestions.contains(&o)) {
+        state.typing_open = None;
+    }
+
     // Shortcuts track (toggled from the Keyboard shortcuts tab).
     let mut line_bottom = bottom;
     if !shortcuts.is_empty() {
@@ -779,6 +839,120 @@ pub fn show(
     p.line_segment([pos2(x, ruler.top() + 4.0), pos2(x, line_bottom)], Stroke::new(1.5, theme::PLAYHEAD));
     p.circle_filled(pos2(x, ruler.top() + 4.0), 6.0, theme::PLAYHEAD);
     out
+}
+
+/// "Speed up typing", over the pill `pill`: a speed slider and Apply
+/// suggestion (Enter), Apply all suggestions (Ctrl+Enter), Remove suggestion.
+fn typing_popover(ui: &Ui, state: &mut State, edit: &mut EditConfig, all: &[Typing], duration: f64, pill: Rect) {
+    let Some(t) = state.typing_open else { return };
+    let ctx = ui.ctx().clone();
+    let w = 360.0;
+    let (enter, all_keys, esc) = ctx.input_mut(|i| {
+        (
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+            i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter),
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+        )
+    });
+    let mut apply_one = enter;
+    let mut apply_all = all_keys;
+    let mut remove = false;
+    let area = egui::Area::new(ui.scope_id().with("typing-popover"))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(pos2(pill.center().x.clamp(w / 2.0 + 8.0, ctx.content_rect().right() - w / 2.0 - 8.0), pill.top() - 6.0))
+        .show(&ctx, |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgb(0x1f, 0x1f, 0x21))
+                .stroke(Stroke::new(1.0, Color32::from_white_alpha(28)))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(egui::Margin::same(18))
+                .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha(140) })
+                .show(ui, |ui| {
+                    ui.set_width(w - 36.0);
+                    ui.horizontal(|ui| {
+                        let (ir, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+                        icons::paint(ui.painter(), ir, Icon::Keyboard, theme::TEXT);
+                        ui.label(egui::RichText::new("Speed up typing").size(15.0).color(theme::TEXT));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(format!("{:.1}×", state.typing_speed)).size(13.0).color(theme::TEXT_DIM));
+                        });
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("You are typing during this part of the recording. Speed it up using options below.")
+                            .size(13.0)
+                            .color(theme::TEXT_DIM),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        let mut speed = state.typing_speed;
+                        ui.scope(|ui| {
+                            ui.set_width(ui.available_width() - 76.0);
+                            super::widgets::slider(ui, &mut speed, typing::MIN_SPEED..=typing::MAX_SPEED, None);
+                        });
+                        state.typing_speed = (speed * 10.0).round() / 10.0;
+                        ui.add_space(8.0);
+                        if popover_button(ui, "Reset", "", 68.0, false).clicked() {
+                            state.typing_speed = typing::DEFAULT_SPEED;
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        let half = (ui.available_width() - 8.0) / 2.0;
+                        apply_all |= popover_button(ui, "Apply all suggestions", "Ctrl+↵", half, false).clicked();
+                        apply_one |= popover_button(ui, "Apply suggestion", "↵", half, true).clicked();
+                    });
+                    ui.add_space(8.0);
+                    let full = ui.available_width();
+                    remove = popover_button(ui, "Remove suggestion", "", full, false).clicked();
+                });
+        });
+    // A click anywhere else closes it (the pill's own click toggles it).
+    let outside = ctx.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| !area.response.rect.contains(p) && !pill.contains(p)));
+    if apply_all {
+        for s in all {
+            typing::apply(edit, *s, state.typing_speed, duration);
+        }
+    } else if apply_one {
+        typing::apply(edit, t, state.typing_speed, duration);
+    } else if remove {
+        typing::remove(edit, t);
+    }
+    if apply_all || apply_one || remove || esc || outside {
+        state.typing_open = None;
+    }
+}
+
+/// A popover button: `label` and a dim key hint; `primary` is filled purple,
+/// the others dark with lavender or white text.
+fn popover_button(ui: &mut Ui, label: &str, hint: &str, w: f32, primary: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(w, 38.0), Sense::click());
+    let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+    let p = ui.painter();
+    let fill = match (primary, resp.hovered()) {
+        (true, false) => theme::ACCENT,
+        (true, true) => Color32::from_rgb(0x5a, 0x42, 0xf5),
+        (false, false) => Color32::from_rgb(0x26, 0x26, 0x29),
+        (false, true) => Color32::from_rgb(0x30, 0x30, 0x34),
+    };
+    p.rect_filled(r, CornerRadius::same(7), fill);
+    if !primary {
+        p.rect_stroke(r, CornerRadius::same(7), Stroke::new(1.0, Color32::from_white_alpha(18)), StrokeKind::Inside);
+    }
+    // Secondary buttons with a key hint read lavender, like Screen Studio's
+    // "Apply all suggestions".
+    let col = if primary || hint.is_empty() { Color32::WHITE } else { theme::KNOB };
+    let font = egui::FontId::proportional(13.5);
+    let g = p.layout_no_wrap(label.to_string(), font.clone(), col);
+    let h = p.layout_no_wrap(hint.to_string(), egui::FontId::proportional(12.0), col.gamma_multiply(0.85));
+    let gap = if hint.is_empty() { 0.0 } else { 8.0 };
+    let total = g.size().x + gap + h.size().x;
+    let x = r.center().x - total / 2.0;
+    p.galley(pos2(x, r.center().y - g.size().y / 2.0), g.clone(), col);
+    p.galley(pos2(x + g.size().x + gap, r.center().y - h.size().y / 2.0), h, col);
+    resp
 }
 
 /// The clip's right-click menu for slice `a..b`, as in Screen Studio.
@@ -1023,6 +1197,11 @@ const MASK_STOPS: [(f32, Color32); 4] = [
 const MASK_EDGE: Color32 = Color32::from_rgb(0x8f, 0x24, 0x56);
 const MASK_BORDER: Color32 = Color32::from_rgb(0xe0, 0x86, 0xb2);
 
+/// Typing suggestion pills.
+const TYPING_FILL: Color32 = Color32::from_rgb(0x4a, 0x35, 0x0e);
+const TYPING_FILL_HOVER: Color32 = Color32::from_rgb(0x63, 0x47, 0x12);
+const TYPING_EDGE: Color32 = Color32::from_rgb(0xd0, 0x92, 0x1e);
+const TYPING_TEXT: Color32 = Color32::from_rgb(0xf3, 0xe6, 0xc8);
 /// Recording flags on the ruler.
 const FLAG: Color32 = Color32::from_rgb(0xf5, 0xc4, 0x51);
 const CLIP_STOPS: [(f32, Color32); 5] = [
@@ -1215,5 +1394,73 @@ mod fold_tests {
             assert!((geo.t(geo.x(t)) - t).abs() < 1e-3, "{t}");
         }
         assert!((geo.t(geo.x(2.0)) - 3.0).abs() < 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+    use crate::project::Key;
+
+    /// Clicking a Typing pill opens "Speed up typing"; Enter applies it to
+    /// that stretch, Ctrl+Enter to all of them.
+    #[test]
+    fn typing_pill_popover_applies() {
+        let dir = std::env::temp_dir().join("open-studio-test-config");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        let duration = 30.0;
+        let typed = |from: f64| (0..20).map(move |i| Key { t: from + i as f64 * 0.15, code: 30, down: true });
+        let found = typing::detect(&typed(2.0).chain(typed(10.0)).chain(typed(20.0)).collect::<Vec<_>>(), duration);
+        assert_eq!(found.len(), 3);
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.fold_cuts = false;
+        let mut edit = EditConfig::default();
+        let mut selected = None;
+        let size = vec2(1200.0, 400.0);
+        let mut time = 0.0;
+        let mut frame = |state: &mut State, edit: &mut EditConfig, events: Vec<egui::Event>| {
+            time += 0.05;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(time), events, ..Default::default() };
+            let mut full = None;
+            let mut out = ctx.run_ui(raw, |ui| {
+                full = Some(ui.available_rect_before_wrap());
+                show(ui, state, duration, edit, 0.0, false, &mut selected, None, false, false, false, &[], &[], &found);
+            });
+            out.textures_delta.clear();
+            full.unwrap()
+        };
+        let full = frame(&mut state, &mut edit, vec![]);
+        // Pill of the first stretch: just above the clip track.
+        let t = found[0];
+        let x = |s: f64| full.left() + 10.0 + (s / duration) as f32 * (full.width() - 20.0);
+        let pill = pos2(x((t.start + t.end) / 2.0), full.top() + 36.0 - 12.0);
+        let m = egui::Modifiers::default();
+        let click = |pos| {
+            vec![
+                vec![egui::Event::PointerMoved(pos)],
+                vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: m }],
+                vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: m }],
+            ]
+        };
+        for ev in click(pill) {
+            frame(&mut state, &mut edit, ev);
+        }
+        assert_eq!(state.typing_open, Some(t), "popover didn't open");
+        let key = |key, modifiers| vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }];
+        frame(&mut state, &mut edit, key(egui::Key::Enter, m));
+        assert_eq!(state.typing_open, None);
+        assert_eq!(edit.slice_props((t.start + t.end) / 2.0).speed, typing::DEFAULT_SPEED);
+        assert_eq!(typing::suggestions(&found, &edit, duration).len(), 2);
+        // The rest at once.
+        frame(&mut state, &mut edit, vec![]);
+        let u = found[1];
+        for ev in click(pos2(x((u.start + u.end) / 2.0), pill.y)) {
+            frame(&mut state, &mut edit, ev);
+        }
+        assert_eq!(state.typing_open, Some(u));
+        frame(&mut state, &mut edit, key(egui::Key::Enter, egui::Modifiers::COMMAND));
+        assert!(typing::suggestions(&found, &edit, duration).is_empty());
+        assert!(found.iter().all(|f| edit.slice_props((f.start + f.end) / 2.0).speed == typing::DEFAULT_SPEED));
     }
 }

@@ -758,6 +758,8 @@ pub struct EditConfig {
     pub splits: Vec<f64>,
     /// Per-slice speed, volume and cursor settings, sorted, non-overlapping.
     pub slices: Vec<SliceProps>,
+    /// Typing suggestions removed (their start times; see `typing`).
+    pub typing_removed: Vec<f64>,
     /// Part of the screen recording kept (Crop): x, y, w, h as fractions.
     pub crop: [f64; 4],
     pub captions: CaptionSettings,
@@ -781,6 +783,7 @@ impl EditConfig {
         self.cuts = keep.cuts;
         self.splits = keep.splits;
         self.slices = keep.slices;
+        self.typing_removed = keep.typing_removed;
         self.trim_start = keep.trim_start;
         self.trim_end = keep.trim_end;
         self.crop = keep.crop;
@@ -827,6 +830,7 @@ impl Default for EditConfig {
             cuts: vec![],
             splits: vec![],
             slices: vec![],
+            typing_removed: vec![],
             crop: [0.0, 0.0, 1.0, 1.0],
             captions: CaptionSettings::default(),
             camera: CameraSettings::default(),
@@ -960,7 +964,7 @@ impl EditConfig {
             let mut t = a;
             for e in edges.into_iter().chain([b]) {
                 if e - t > 1e-4 {
-                    out.push((t, e, self.slice_props((t + e) * 0.5).speed.clamp(0.25, 4.0)));
+                    out.push((t, e, self.slice_props((t + e) * 0.5).speed.clamp(0.25, 16.0)));
                 }
                 t = e;
             }
