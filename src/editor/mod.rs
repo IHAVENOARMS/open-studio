@@ -11,6 +11,8 @@ mod mask_overlay;
 pub mod player;
 mod privacy_ui;
 pub use widgets::{slider, toggle};
+#[cfg(test)]
+pub use timeline::split_zoom as timeline_split_zoom;
 mod scrub;
 mod shuttle;
 mod sidebar;
@@ -1195,9 +1197,19 @@ impl Editor {
                 }
             }
         }
-        // C splits the clip at the playhead (as in Screen Studio); Shift+C crops.
+        // C splits the clip (or the selected zoom) at the playhead; Shift+C crops.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::C)) {
-            self.edit.split_at(self.time, self.rec.duration);
+            // With a zoom selected, C splits that zoom at the playhead.
+            match self.selected {
+                Some(Selection { track: Track::Zoom, index }) if self.edit.zoom_segments.get(index).is_some_and(|z| self.time > z.start && self.time < z.end) => {
+                    if timeline::split_zoom(&mut self.edit, index, self.time) {
+                        self.selected = Some(Selection { track: Track::Zoom, index: index + 1 });
+                    }
+                }
+                _ => {
+                    self.edit.split_at(self.time, self.rec.duration);
+                }
+            }
         }
         if self.crop_tool.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, Key::C)) {
             self.open_crop_tool();

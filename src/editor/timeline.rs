@@ -314,9 +314,9 @@ pub fn playback_bar(ui: &mut Ui, state: &mut State, time: f64, duration: f64, pl
         p.rect_filled(Rect::from_center_size(sc, vec2(34.0, 30.0)), CornerRadius::same(8), Color32::from_rgba_unmultiplied(0x5b, 0x45, 0xf0, 90));
     }
     let r = icon_button(ui, sc, "split", Icon::Scissors, 22.0).on_hover_text(if state.split_mode {
-        "Split tool on: click the clip to split it  (C splits at the playhead)"
+        "Split tool on: click the clip or a zoom to split it  (C splits at the playhead)"
     } else {
-        "Split tool: click the clip to split it, or hold Alt  (C splits at the playhead)"
+        "Split tool: click the clip or a zoom to split it, or hold Alt  (C splits at the playhead)"
     });
     if r.clicked() {
         state.split_mode = !state.split_mode;
@@ -684,6 +684,15 @@ pub fn show(
         p.line_segment([pos2(h.x, clip.top() - 2.0), pos2(h.x, clip.bottom() + 2.0)], Stroke::new(2.0, Color32::WHITE));
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
     }
+    // ...and on a zoom, splits the zoom.
+    let zoom_under = |edit: &EditConfig, x: f32| {
+        let t = geo.t(x);
+        edit.zoom_segments.iter().position(|z| t > z.start && t < z.end)
+    };
+    if splitting && let Some(h) = hover.filter(|h| zoom.contains(*h) && zoom_under(edit, h.x).is_some()) {
+        p.line_segment([pos2(h.x, zoom.top() - 2.0), pos2(h.x, zoom.bottom() + 2.0)], Stroke::new(2.0, Color32::WHITE));
+        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    }
     // Right-click on a slice opens its menu.
     if resp.secondary_clicked() {
         state.menu_slice = resp
@@ -758,6 +767,10 @@ pub fn show(
     if resp.clicked() {
         if let Some(pos) = resp.interact_pointer_pos().filter(|p| splitting && clip.contains(*p)) {
             edit.split_at(geo.t(pos.x), duration);
+        } else if let Some((pos, i)) = resp.interact_pointer_pos().filter(|p| splitting && zoom.contains(*p)).and_then(|p| Some((p, zoom_under(edit, p.x)?))) {
+            if split_zoom(edit, i, geo.t(pos.x)) {
+                *selected = Some(Selection { track: Track::Zoom, index: i + 1 });
+            }
         } else if let Some(pos) = resp.interact_pointer_pos() {
             match hit(pos, edit) {
                 Hit::Item(sel, _) => *selected = Some(sel),
@@ -953,6 +966,21 @@ fn popover_button(ui: &mut Ui, label: &str, hint: &str, w: f32, primary: bool) -
     p.galley(pos2(x, r.center().y - g.size().y / 2.0), g.clone(), col);
     p.galley(pos2(x + g.size().x + gap, r.center().y - h.size().y / 2.0), h, col);
     resp
+}
+
+/// Splits zoom `index` at recording time `t` into two zooms with the same
+/// settings, side by side; each part keeps at least the shortest zoom
+/// length. False when `t` is too close to an end.
+pub fn split_zoom(edit: &mut EditConfig, index: usize, t: f64) -> bool {
+    let Some(z) = edit.zoom_segments.get(index).cloned() else { return false };
+    if t < z.start + MIN_SEG || t > z.end - MIN_SEG {
+        return false;
+    }
+    edit.zoom_segments[index].end = t;
+    let mut second = z;
+    second.start = t;
+    edit.zoom_segments.insert(index + 1, second);
+    true
 }
 
 /// The clip's right-click menu for slice `a..b`, as in Screen Studio.
@@ -1463,5 +1491,68 @@ mod typing_tests {
         frame(&mut state, &mut edit, key(egui::Key::Enter, egui::Modifiers::COMMAND));
         assert!(typing::suggestions(&found, &edit, duration).is_empty());
         assert!(found.iter().all(|f| edit.slice_props((f.start + f.end) / 2.0).speed == typing::DEFAULT_SPEED));
+    }
+}
+
+#[cfg(test)]
+mod split_zoom_tests {
+    use super::*;
+
+    #[test]
+    fn splitting_a_zoom() {
+        let mut edit = EditConfig { zoom_segments: vec![ZoomSegment::new(2.0, 6.0, 1.8, crate::edit::ZoomKind::Zoom), ZoomSegment::new(8.0, 9.0, 1.4, crate::edit::ZoomKind::Zoom)], ..Default::default() };
+        assert!(split_zoom(&mut edit, 0, 4.0));
+        let z = &edit.zoom_segments;
+        assert_eq!(z.len(), 3);
+        assert_eq!((z[0].start, z[0].end, z[1].start, z[1].end), (2.0, 4.0, 4.0, 6.0));
+        assert_eq!((z[0].scale, z[1].scale), (1.8, 1.8), "both halves keep the zoom's settings");
+        assert_eq!(z[2].start, 8.0, "later zooms stay in order");
+        // Too near an end: nothing happens.
+        assert!(!split_zoom(&mut edit, 0, 2.1));
+        assert!(!split_zoom(&mut edit, 1, 5.95));
+        assert!(!split_zoom(&mut edit, 9, 5.0));
+        assert_eq!(edit.zoom_segments.len(), 3);
+    }
+
+    /// With the scissors on, a click on a zoom bar splits it there.
+    #[test]
+    fn scissors_click_splits_a_zoom() {
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", std::env::temp_dir().join("open-studio-test-config")) };
+        let duration = 20.0;
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.fold_cuts = false;
+        state.split_mode = true;
+        let mut edit = EditConfig { zoom_segments: vec![ZoomSegment::new(4.0, 12.0, 1.8, crate::edit::ZoomKind::Zoom)], ..Default::default() };
+        let mut selected = None;
+        let size = vec2(1200.0, 400.0);
+        let mut t = 0.0;
+        let mut frame = |state: &mut State, edit: &mut EditConfig, selected: &mut Option<Selection>, events: Vec<egui::Event>| {
+            t += 0.05;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), events, ..Default::default() };
+            let mut full = None;
+            let mut out = ctx.run_ui(raw, |ui| {
+                full = Some(ui.available_rect_before_wrap());
+                show(ui, state, duration, edit, 0.0, false, selected, None, false, false, false, &[], &[], &[]);
+            });
+            out.textures_delta.clear();
+            full.unwrap()
+        };
+        let full = frame(&mut state, &mut edit, &mut selected, vec![]);
+        let x = full.left() + 10.0 + (8.0 / duration) as f32 * (full.width() - 20.0);
+        let pos = pos2(x, full.top() + 136.0);
+        let m = egui::Modifiers::default();
+        for ev in [
+            vec![egui::Event::PointerMoved(pos)],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: m }],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: m }],
+        ] {
+            frame(&mut state, &mut edit, &mut selected, ev);
+        }
+        let z = &edit.zoom_segments;
+        assert_eq!(z.len(), 2, "not split");
+        assert!((z[0].end - 8.0).abs() < 0.05 && z[1].start == z[0].end && z[1].end == 12.0);
+        assert_eq!(selected, Some(Selection { track: Track::Zoom, index: 1 }));
+        assert!(edit.cuts.is_empty() && edit.splits.is_empty(), "the clip wasn't split");
     }
 }

@@ -354,7 +354,10 @@ impl Tracks {
                         ZoomFocus::Manual { x, y } => layout.uv_to_canvas(x, y),
                     };
                     let (vw, vh) = (layout.aspect / scale, 1.0 / scale);
-                    if active != Some(si) {
+                    // A zoom carrying straight on from the one before (a split
+                    // zoom) keeps its place instead of re-centring.
+                    let continues = active.is_some_and(|a| (edit.zoom_segments[a].end - seg.start).abs() < 1e-6);
+                    if active != Some(si) && !continues {
                         follow = focus;
                     } else {
                         // Edge push: only move once the cursor leaves the
@@ -1142,6 +1145,26 @@ mod tests {
         assert!((tracks.camera(12.0).scale - 1.6).abs() < 0.01);
         // Without the cut, nothing changes.
         assert!((t2.camera(6.0).scale - 1.0).abs() < 0.05 && (t2.camera(3.5).scale - 1.6).abs() < 0.01);
+    }
+
+    /// A split zoom looks like the zoom it came from: the camera doesn't
+    /// move at the split.
+    #[test]
+    fn split_zoom_keeps_the_camera_still() {
+        let mut r = rec();
+        r.duration = 10.0;
+        // The cursor wanders inside the zoom, so the view has drifted from
+        // the cursor's position by the split point.
+        r.events.moves = (0..=100).map(|i| [i as f64 * 0.1, 960.0 + 200.0 * (i as f64 * 0.3).sin(), 540.0]).collect();
+        let whole = EditConfig { zoom_segments: vec![ZoomSegment::new(1.0, 8.0, 2.0, crate::edit::ZoomKind::Zoom)], ..Default::default() };
+        let mut split = whole.clone();
+        assert!(crate::editor::timeline_split_zoom(&mut split, 0, 4.0));
+        let (a, b) = (Tracks::build(&r, &whole), Tracks::build(&r, &split));
+        for i in 0..=600 {
+            let t = 1.0 + i as f64 * 0.01;
+            let (ca, cb) = (a.camera(t), b.camera(t));
+            assert!((ca.cx - cb.cx).abs() < 1e-9 && (ca.scale - cb.scale).abs() < 1e-9, "differs at {t:.2}s");
+        }
     }
 
     #[test]
