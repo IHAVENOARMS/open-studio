@@ -741,13 +741,19 @@ pub fn show(
             Drag::ResizeStart(sel) => {
                 let (lo, _) = neighbours(edit, sel, duration);
                 let (_, e0) = spans(edit, sel.track)[sel.index];
-                set_span(edit, sel, t.clamp(lo, e0 - MIN_SEG), e0);
+                let start = t.clamp(lo, e0 - MIN_SEG);
+                set_span(edit, sel, start, e0);
+                // The playhead follows the edge being dragged, so the
+                // preview shows the frame there.
+                out.seek = Some(start);
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
             Drag::ResizeEnd(sel) => {
                 let (_, hi) = neighbours(edit, sel, duration);
                 let (s0, _) = spans(edit, sel.track)[sel.index];
-                set_span(edit, sel, s0, t.clamp(s0 + MIN_SEG, hi));
+                let end = t.clamp(s0 + MIN_SEG, hi);
+                set_span(edit, sel, s0, end);
+                out.seek = Some(end);
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
             Drag::TrimStart => {
@@ -1554,5 +1560,46 @@ mod split_zoom_tests {
         assert!((z[0].end - 8.0).abs() < 0.05 && z[1].start == z[0].end && z[1].end == 12.0);
         assert_eq!(selected, Some(Selection { track: Track::Zoom, index: 1 }));
         assert!(edit.cuts.is_empty() && edit.splits.is_empty(), "the clip wasn't split");
+    }
+
+    /// Dragging a zoom's edge moves the playhead along with it.
+    #[test]
+    fn resizing_a_zoom_moves_the_playhead() {
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", std::env::temp_dir().join("open-studio-test-config")) };
+        let duration = 20.0;
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.fold_cuts = false;
+        let mut edit = EditConfig { zoom_segments: vec![ZoomSegment::new(4.0, 12.0, 1.8, crate::edit::ZoomKind::Zoom)], ..Default::default() };
+        let mut selected = None;
+        let size = vec2(1200.0, 400.0);
+        let mut t = 0.0;
+        let mut frame = |state: &mut State, edit: &mut EditConfig, selected: &mut Option<Selection>, events: Vec<egui::Event>| {
+            t += 0.05;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)), time: Some(t), events, ..Default::default() };
+            let (mut full, mut seek) = (None, None);
+            let mut out = ctx.run_ui(raw, |ui| {
+                full = Some(ui.available_rect_before_wrap());
+                seek = show(ui, state, duration, edit, 0.0, false, selected, None, false, false, false, &[], &[], &[]).seek;
+            });
+            out.textures_delta.clear();
+            (full.unwrap(), seek)
+        };
+        let (full, _) = frame(&mut state, &mut edit, &mut selected, vec![]);
+        let x = |s: f64| full.left() + 10.0 + (s / duration) as f32 * (full.width() - 20.0);
+        let y = full.top() + 136.0;
+        let m = egui::Modifiers::default();
+        let from = pos2(x(12.0) - 2.0, y);
+        frame(&mut state, &mut edit, &mut selected, vec![egui::Event::PointerMoved(from)]);
+        frame(&mut state, &mut edit, &mut selected, vec![egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
+        let mut last = None;
+        for k in 1..=10 {
+            let p = pos2(x(12.0 + k as f64 * 0.4), y);
+            last = frame(&mut state, &mut edit, &mut selected, vec![egui::Event::PointerMoved(p)]).1.or(last);
+        }
+        frame(&mut state, &mut edit, &mut selected, vec![egui::Event::PointerButton { pos: pos2(x(16.0), y), button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
+        let end = edit.zoom_segments[0].end;
+        assert!((end - 16.0).abs() < 0.1, "zoom end at {end}");
+        assert_eq!(last, Some(end), "the playhead didn't follow the edge");
     }
 }
