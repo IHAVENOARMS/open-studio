@@ -72,11 +72,51 @@ pub struct State {
     /// Cursor theme UI state.
     pub cursors: super::cursors::State,
     picking_music: Option<Receiver<Vec<std::path::PathBuf>>>,
+    /// "Play <track>": the background audio alone, while previewing.
+    music_preview: Option<MusicPreview>,
     pub captions: super::captions_ui::State,
     /// Waiting for a key combination to add as a custom shortcut.
     capturing_shortcut: bool,
     pub camera: super::camera_ui::State,
     pub privacy: super::privacy_ui::State,
+}
+
+/// Plays a background audio file by itself (the "Play <track>" button).
+struct MusicPreview {
+    path: String,
+    pipeline: gstreamer::Element,
+}
+
+impl MusicPreview {
+    fn start(path: &str, volume: f64) -> Option<Self> {
+        use gstreamer::prelude::*;
+        gstreamer::init().ok()?;
+        let uri = gstreamer::glib::filename_to_uri(path, None).ok()?;
+        let pipeline = gstreamer::ElementFactory::make("playbin").property("uri", uri.as_str()).property("volume", volume).build().ok()?;
+        pipeline.set_state(gstreamer::State::Playing).ok()?;
+        Some(Self { path: path.to_string(), pipeline })
+    }
+
+    fn set_volume(&self, v: f64) {
+        use gstreamer::prelude::*;
+        if (self.pipeline.property::<f64>("volume") - v).abs() > 1e-3 {
+            self.pipeline.set_property("volume", v);
+        }
+    }
+
+    /// Played to the end (or failed).
+    fn finished(&self) -> bool {
+        use gstreamer::prelude::*;
+        let Some(bus) = self.pipeline.bus() else { return true };
+        bus.pop_filtered(&[gstreamer::MessageType::Eos, gstreamer::MessageType::Error]).is_some()
+    }
+}
+
+impl Drop for MusicPreview {
+    fn drop(&mut self) {
+        use gstreamer::prelude::*;
+        let _ = self.pipeline.set_state(gstreamer::State::Null);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -177,6 +217,10 @@ pub fn show(
                             }
                             _ => *selected = None,
                         }
+                    }
+                    // The track preview only plays while the Audio tab is open.
+                    if *tab != Tab::Audio {
+                        state.music_preview = None;
                     }
                     match tab {
                         Tab::Background => {
@@ -588,7 +632,7 @@ fn audio(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording)
         help(ui, "This recording has no microphone or system audio. Choose a microphone or system audio in the recording bar next time.");
         widgets::divider(ui);
     }
-    theme::section(ui, "Background music");
+    theme::section(ui, "Background audio");
     if let Some(rx) = &state.picking_music {
         match rx.try_recv() {
             Ok(files) => {
@@ -603,23 +647,40 @@ fn audio(ui: &mut Ui, state: &mut State, edit: &mut EditConfig, rec: &Recording)
     }
     match a.music.clone() {
         None => {
+            state.music_preview = None;
             help(ui, "Your own MP3, WAV, OGG or video file. It loops to fit the video.");
-            if widgets::wide_button_icon(ui, Some(Icon::Plus), "Add background music").clicked() && state.picking_music.is_none() {
+            if widgets::wide_button_icon(ui, Some(Icon::Plus), "Add background audio").clicked() && state.picking_music.is_none() {
                 let filter = ashpd::desktop::file_chooser::FileFilter::new("Audio")
                     .mimetype("audio/*")
                     .mimetype("video/mp4")
                     .mimetype("video/webm");
-                state.picking_music = Some(dialogs::open_files(ui.ctx().clone(), "Add background music", Some(filter), false));
+                state.picking_music = Some(dialogs::open_files(ui.ctx().clone(), "Add background audio", Some(filter), false));
             }
         }
         Some(path) => {
-            let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            ui.label(RichText::new(name).size(13.5));
-            toggle_help(ui, "Mute background music", "", &mut a.mute_music);
-            theme::section(ui, &format!("Background music volume  ·  {:.0}%", a.music_volume * 100.0));
+            let file = std::path::Path::new(&path);
+            let name = file.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            ui.label(RichText::new(&name).size(13.5));
+            ui.add_space(4.0);
+            // Hear the track on its own, as in Screen Studio.
+            if state.music_preview.as_ref().is_some_and(|m| m.path != path || m.finished()) {
+                state.music_preview = None;
+            }
+            let playing = state.music_preview.is_some();
+            let label = if playing { format!("Stop {name}") } else { format!("Play {name}") };
+            if widgets::wide_button_icon(ui, Some(if playing { Icon::Stop } else { Icon::Play }), &label).clicked() {
+                state.music_preview = if playing { None } else { MusicPreview::start(&path, a.music_volume) };
+            }
+            if let Some(m) = &state.music_preview {
+                m.set_volume(a.music_volume);
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            toggle_help(ui, "Mute background audio", "", &mut a.mute_music);
+            theme::section(ui, &format!("Background audio volume  ·  {:.0}%", a.music_volume * 100.0));
             widgets::slider(ui, &mut a.music_volume, 0.0..=1.0, Some(0.35));
-            if widgets::wide_button_icon(ui, Some(Icon::Trash), "Remove background music").clicked() {
+            if widgets::wide_button_icon(ui, Some(Icon::Trash), "Remove background audio").clicked() {
                 a.music = None;
+                state.music_preview = None;
             }
         }
     }
@@ -1138,4 +1199,38 @@ fn position_pad(ui: &mut Ui, v: &mut [f64; 2]) {
     p.circle_stroke(h, 8.0, egui::Stroke::new(2.0, theme::KNOB));
     p.circle_filled(h, 3.0, theme::KNOB);
     resp.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("Double-click to centre");
+}
+
+#[cfg(test)]
+mod music_preview_tests {
+    use super::MusicPreview;
+
+    /// "Play <track>" plays the file and notices when it ends. Opt-in
+    /// (opens an audio output, silently): `cargo test -- --ignored music_preview`.
+    #[test]
+    #[ignore]
+    fn music_preview_plays_to_the_end() {
+        let dir = std::env::temp_dir().join("open-studio-music-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("tone.wav");
+        assert!(std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.4"])
+            .arg(&file)
+            .status()
+            .unwrap()
+            .success());
+        let m = MusicPreview::start(file.to_str().unwrap(), 0.0).expect("couldn't play");
+        assert!(!m.finished());
+        m.set_volume(0.0);
+        let start = std::time::Instant::now();
+        while !m.finished() {
+            assert!(start.elapsed().as_secs_f64() < 5.0, "never finished");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(start.elapsed().as_secs_f64() > 0.2, "ended too soon to have played");
+        assert!(MusicPreview::start("/nonexistent/file.mp3", 0.0).is_none_or(|m| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            m.finished()
+        }));
+    }
 }
