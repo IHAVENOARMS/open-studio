@@ -42,7 +42,18 @@ impl Decoder {
         };
         cmd.args(["-vf", &filter]);
         cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"]);
-        let mut child = cmd.stdout(Stdio::piped()).stdin(Stdio::null()).spawn().context("launching ffmpeg")?;
+        // Its own process group: Ctrl+C in the terminal stops the app, not
+        // the decoders, which then just end with it. (Interrupted, they
+        // printed "Error writing trailer: Broken pipe".) Their stderr goes
+        // too: a decoder that fails shows up as frames that don't come.
+        use std::os::unix::process::CommandExt;
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .context("launching ffmpeg")?;
         let stdout = child.stdout.take().unwrap();
         Ok(Self { child, stdout, width, height })
     }
