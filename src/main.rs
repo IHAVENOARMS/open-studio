@@ -142,7 +142,6 @@ enum Cmd {
         #[arg(long)]
         srt: Option<PathBuf>,
     },
-    /// Render a project to MP4 without opening the editor.
     /// Save one frame of the edited video as a PNG image.
     Frame {
         project: PathBuf,
@@ -154,6 +153,7 @@ enum Cmd {
         #[arg(long, default_value_t = 1080)]
         height: u32,
     },
+    /// Render a project to MP4, GIF or ProRes without opening the editor.
     Export {
         project: PathBuf,
         #[arg(short, long)]

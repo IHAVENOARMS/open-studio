@@ -2,6 +2,11 @@
 name = "open-studio"
 version = "0.1.0"
 edition = "2024"
+description = "Screen recorder for Linux with automatic zoom, a smooth cursor and polished exports"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/IHAVENOARMS/open-studio"
+keywords = ["screen-recorder", "wayland", "linux", "video"]
+categories = ["multimedia::video"]
 
 [dependencies]
 ab_glyph = "0.2.32"
