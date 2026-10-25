@@ -153,6 +153,7 @@ impl SettingsWindow {
         let mut c = false;
         c |= row(ui, "Highlight recorded area during recording", "The part of the screen not being recorded is slightly dimmed.", |ui| widgets::toggle(ui, &mut s.highlight_recorded_area).changed());
         c |= row(ui, "Create zooms automatically", "Your clicks become zooms in every new project.", |ui| widgets::toggle(ui, &mut s.auto_zooms).changed());
+        c |= row(ui, "Show recording widget", "Controls to finish, pause or restart while recording. Without them, use the stop shortcut.", |ui| widgets::toggle(ui, &mut s.show_recording_widget).changed());
         c |= row(ui, "Show quick share widget after recording", "Save or copy the video right away. If off, the editor opens.", |ui| widgets::toggle(ui, &mut s.quick_share).changed());
         c |= row(ui, "Show system cursor in video", "Off records the cursor separately so it can be smoothed and resized.", |ui| widgets::toggle(ui, &mut s.bake_cursor).changed());
         c |= row(ui, "Encode on the GPU", "Far less CPU while recording. Off keeps full colour detail.", |ui| widgets::toggle(ui, &mut s.gpu_encoding).changed());
@@ -164,19 +165,24 @@ impl SettingsWindow {
     }
 
     fn editing(&mut self, ui: &mut Ui) -> bool {
-        row(
+        let s = &mut self.settings;
+        let mut c = row(
             ui,
             "Use last project settings as default for new recordings",
             "New recordings start with the look of the last project you edited (desktop and phone recordings each keep their own).",
-            |ui| widgets::toggle(ui, &mut self.settings.use_last_project_settings).changed(),
-        )
+            |ui| widgets::toggle(ui, &mut s.use_last_project_settings).changed(),
+        );
+        c |= row(ui, "Use autosave", "Saves your project changes automatically every 30 seconds.", |ui| widgets::toggle(ui, &mut s.autosave).changed());
+        c
     }
 
     fn quick_export(&mut self, ui: &mut Ui) -> bool {
         let s = &mut self.settings;
         ui.label(RichText::new("These settings are used by the quick share widget, quick export and exporting several projects.").size(12.5).color(theme::TEXT_DIM));
         ui.add_space(12.0);
-        let mut c = false;
+        let mut c = row(ui, "Always save project when using quick share widget", "After Save or Copy, the recording is kept with your saved projects.", |ui| {
+            widgets::toggle(ui, &mut s.quick_share_saves).changed()
+        });
         c |= row(ui, "Format", "", |ui| widgets::segmented(ui, &mut s.format, &[(Format::Mp4, "MP4"), (Format::Gif, "GIF"), (Format::ProRes, "ProRes")]));
         let fps: &[(u32, &str)] = if s.format == Format::Gif { &[(10, "10"), (15, "15"), (24, "24"), (30, "30")] } else { &[(24, "24"), (25, "25"), (30, "30"), (50, "50"), (60, "60")] };
         if !fps.iter().any(|f| f.0 == s.fps) {

@@ -81,6 +81,9 @@ pub enum Leaving {
     Quit,
 }
 
+/// Autosave interval, as in Screen Studio.
+const AUTOSAVE_SECS: u64 = 30;
+
 pub struct Editor {
     pub dir: PathBuf,
     name: String,
@@ -143,6 +146,8 @@ pub struct Editor {
     command: Option<commands::CommandMenu>,
     /// Typing stretches found in the recorded keys (Speed up typing).
     typing: Vec<crate::typing::Typing>,
+    /// When autosave last looked (every 30 s).
+    autosaved: Instant,
     /// Settings window (Ctrl+,), while open.
     settings_window: Option<crate::settings_ui::SettingsWindow>,
     /// Ctrl+/ Shortcuts Guide, while open.
@@ -218,6 +223,7 @@ impl Editor {
             command: None,
             guide: None,
             settings_window: None,
+            autosaved: Instant::now(),
             typing: crate::typing::detect(&rec.events.keys, rec.duration),
             presets: vec![],
             preset_name: String::new(),
@@ -497,6 +503,8 @@ impl Editor {
     }
 
     pub fn has_unsaved_changes(&self) -> bool {
+        // A new recording stays "unsaved" (not in the projects folder) even
+        // when autosave has written its edits.
         self.is_new() || self.edit != self.saved
     }
 
@@ -652,6 +660,27 @@ impl Editor {
             self.status = None;
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+
+    /// "Use autosave" (Settings): every 30 seconds, changes are saved. A new
+    /// recording keeps its place with the unsaved projects (so it can still
+    /// be saved or deleted) but its edits are written too, so a crash
+    /// doesn't lose them.
+    fn autosave(&mut self) {
+        if self.autosaved.elapsed().as_secs() < AUTOSAVE_SECS || self.edit != self.committed {
+            return;
+        }
+        self.autosaved = Instant::now();
+        if !Settings::load().autosave || self.edit == self.saved {
+            return;
+        }
+        if self.is_new() {
+            if self.edit.save(&self.dir).is_ok() {
+                self.saved = self.edit.clone();
+            }
+        } else if let Err(e) = self.save() {
+            self.notify(format!("Saving failed: {e:#}"));
+        }
     }
 
     /// Ctrl+S: writes the project; a new recording moves into the projects
@@ -1099,6 +1128,8 @@ impl Editor {
             }
             self.future.clear();
         }
+
+        self.autosave();
 
         // Rebuild motion tracks when edits change. Nothing is written to
         // disk until the project is saved.

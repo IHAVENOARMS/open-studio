@@ -843,7 +843,9 @@ impl Rt {
             .or(others.first())
             .cloned()
             .or_else(|| self.shared.monitors.first().cloned());
-        if let Some(m) = widget_mon {
+        // Without the widget, the stop shortcut (or `open-studio stop`) ends
+        // the recording.
+        if let (Some(m), true) = (widget_mon, self.shared.settings.show_recording_widget) {
             let out = self.output_for(&m.name);
             self.new_surface(SurfKind::Widget, m, out.as_ref());
         }
@@ -2299,6 +2301,19 @@ struct QuickJob {
     out: PathBuf,
 }
 
+/// Moves a new recording into the projects folder (what Ctrl+S does in the
+/// editor). The new folder, or None when it couldn't be moved or already
+/// was saved.
+fn save_project(dir: &std::path::Path) -> Option<PathBuf> {
+    if !dir.starts_with(crate::util::unsaved_dir()) {
+        return None;
+    }
+    let name = crate::project::ProjectPaths::new(dir).name();
+    let target = crate::util::unique_path(&crate::util::projects_dir(), &name);
+    crate::util::move_dir(dir, &target).ok()?;
+    Some(target)
+}
+
 /// "Will export MP4 • 1080p • 60fps • Social Media".
 fn quick_summary(s: &Settings, native_height: u32) -> String {
     let h = s.height.unwrap_or(native_height.clamp(720, 2160));
@@ -2374,6 +2389,14 @@ fn quick_ui(ui: &mut egui::Ui, sh: &mut Shared) {
                     Err(e) => format!("Export failed: {e}"),
                 });
                 q.job = None;
+                // "Always save project when using quick share": keep it with
+                // the saved projects.
+                if q.message.as_deref().is_some_and(|m| !m.starts_with("Export failed")) && sh.settings.quick_share_saves {
+                    if let Some(dir) = save_project(&q.dir) {
+                        q.rec.dir = dir.clone();
+                        q.dir = dir;
+                    }
+                }
             }
             Err(_) => busy = Some(job.progress.permille.load(Ordering::Relaxed) as f32 / 1000.0),
         }
@@ -3210,6 +3233,29 @@ mod tests {
         // The edge not being dragged doesn't snap.
         let (s, _) = snap_area(Rect::from_min_max(pos2(4.0, 100.0), pos2(700.0, 500.0)), screen, AreaDrag::Handle(1, 0));
         assert_eq!(s.left(), 4.0);
+    }
+
+    /// "Always save project when using quick share": a new recording moves
+    /// into the projects folder; a saved one stays put.
+    #[test]
+    fn quick_share_saves_the_project() {
+        let tmp = std::env::temp_dir().join("open-studio-quick-save-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", tmp.join("config"));
+            std::env::set_var("XDG_DATA_HOME", tmp.join("data"));
+        }
+        let mut s = Settings::default();
+        s.projects_dir = tmp.join("projects");
+        s.save();
+        let rec = crate::util::unsaved_dir().join("Recording 1");
+        std::fs::create_dir_all(&rec).unwrap();
+        std::fs::write(rec.join("recording.json"), "{}").unwrap();
+        let saved = save_project(&rec).expect("not moved");
+        assert_eq!(saved, tmp.join("projects").join("Recording 1"));
+        assert!(saved.join("recording.json").exists() && !rec.exists());
+        assert_eq!(save_project(&saved), None, "already saved");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

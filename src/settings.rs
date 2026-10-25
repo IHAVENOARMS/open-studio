@@ -140,6 +140,12 @@ pub struct Settings {
     pub max_camera_height: u32,
     /// After recording, show the quick share widget instead of the editor.
     pub quick_share: bool,
+    /// Save the project when exporting from the quick share widget.
+    pub quick_share_saves: bool,
+    /// Floating recording controls while recording.
+    pub show_recording_widget: bool,
+    /// Save project changes every 30 seconds.
+    pub autosave: bool,
     /// Speaker notes: shown, their text, and the prompter's look.
     pub show_notes: bool,
     pub notes: String,
@@ -253,6 +259,9 @@ impl Default for Settings {
             countdown: 0,
             max_camera_height: 1080,
             quick_share: true,
+            quick_share_saves: false,
+            show_recording_widget: true,
+            autosave: false,
             show_notes: false,
             notes: String::new(),
             prompter_speed: 40.0,
