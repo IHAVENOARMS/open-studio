@@ -356,7 +356,8 @@ impl Recorder {
 
         let mut source = self.source;
         if source.logical_rect.is_none() {
-            source.logical_rect = guess_monitor_rect(result.width, result.height, &self.moves.lock().unwrap());
+            let monitors = desktop::monitors().unwrap_or_default();
+            source.logical_rect = guess_monitor_rect(&monitors, result.width, result.height, &self.moves.lock().unwrap());
         }
         // A followed window may have moved: use its position at each moment
         // (the size stays the first one's, like the video).
@@ -479,21 +480,14 @@ fn retime(path: &std::path::Path, k: f64) -> Result<()> {
 /// When the portal doesn't report where the stream sits in the layout, pick
 /// the monitor whose pixel size matches the video, preferring the one the
 /// cursor was on at the start.
-fn guess_monitor_rect(w: u32, h: u32, moves: &[(i64, f64, f64)]) -> Option<[f64; 4]> {
-    let monitors = hyprland::monitors().ok()?;
-    let matching: Vec<_> = monitors
-        .iter()
-        .filter(|m| {
-            let (pw, ph) = m.pixel_size();
-            (pw as u32, ph as u32) == (w, h)
-        })
-        .collect();
+fn guess_monitor_rect(monitors: &[desktop::Monitor], w: u32, h: u32, moves: &[(i64, f64, f64)]) -> Option<[f64; 4]> {
+    let matching: Vec<_> = monitors.iter().filter(|m| m.pixels == (w, h)).collect();
     let first = moves.first().map(|&(_, x, y)| (x, y));
     let pick = match first {
         Some((x, y)) => matching.iter().find(|m| m.contains(x, y)).or(matching.first()),
         None => matching.first(),
     };
-    pick.map(|m| m.logical_rect())
+    pick.map(|m| m.rect)
 }
 
 /// Records where window `addr` is, 30 times a second, while it moves.
@@ -550,8 +544,8 @@ fn spawn_fake_cursor(stop: Arc<AtomicBool>, moves: Arc<Mutex<Vec<(i64, f64, f64)
 
 /// Direct capture of a monitor, or of an area of it (logical, global coords).
 pub fn direct_monitor(name: &str, area: Option<[f64; 4]>) -> Result<DirectRequest> {
-    let mon = hyprland::monitors()?.into_iter().find(|m| m.name == name).ok_or_else(|| anyhow::anyhow!("no monitor {name}"))?;
-    let r = mon.logical_rect();
+    let mon = desktop::monitors()?.into_iter().find(|m| m.name == name).ok_or_else(|| anyhow::anyhow!("no monitor {name}"))?;
+    let r = mon.rect;
     match area {
         None => Ok(DirectRequest {
             target: direct::Target::Output { name: name.into(), crop: None },
@@ -566,7 +560,7 @@ pub fn direct_monitor(name: &str, area: Option<[f64; 4]>) -> Result<DirectReques
             let y0 = a[1].max(r[1]);
             let x1 = (a[0] + a[2]).min(r[0] + r[2]);
             let y1 = (a[1] + a[3]).min(r[1] + r[3]);
-            let s = mon.scale;
+            let s = mon.scale();
             let crop = [((x0 - r[0]) * s) as u32, ((y0 - r[1]) * s) as u32, ((x1 - x0) * s) as u32, ((y1 - y0) * s) as u32];
             // Keep the logical rect consistent with the (even-sized) crop.
             let (cw, ch) = ((crop[2] & !1) as f64 / s, (crop[3] & !1) as f64 / s);
@@ -596,6 +590,18 @@ pub fn direct_window(address: &str) -> Result<DirectRequest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_monitor_is_guessed_by_size_and_cursor() {
+        let mon = |name: &str, x: f64| desktop::Monitor { name: name.into(), description: String::new(), rect: [x, 0.0, 1920.0, 1080.0], pixels: (1920, 1080), refresh: 60.0 };
+        let hidpi = desktop::Monitor { name: "C".into(), description: String::new(), rect: [3840.0, 0.0, 2560.0, 1440.0], pixels: (3840, 2160), refresh: 60.0 };
+        let ms = [mon("A", 0.0), mon("B", 1920.0), hidpi];
+        assert_eq!(guess_monitor_rect(&ms, 1920, 1080, &[(0, 2000.0, 10.0)]), Some([1920.0, 0.0, 1920.0, 1080.0]));
+        assert_eq!(guess_monitor_rect(&ms, 1920, 1080, &[]), Some([0.0, 0.0, 1920.0, 1080.0]));
+        assert_eq!(guess_monitor_rect(&ms, 3840, 2160, &[]), Some([3840.0, 0.0, 2560.0, 1440.0]));
+        assert_eq!(guess_monitor_rect(&ms, 800, 600, &[]), None);
+        assert_eq!(ms[2].scale(), 1.5);
+    }
 
     /// Flags made while recording land in recording.json at the moments
     /// they were made. Opt-in (records a test pattern):

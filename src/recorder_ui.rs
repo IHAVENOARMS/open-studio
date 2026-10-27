@@ -63,17 +63,13 @@ enum Mode {
     Device,
 }
 
-#[derive(Clone, Debug)]
-struct Monitor {
-    name: String,
-    description: String,
-    /// Logical rect in the global layout.
-    rect: [f64; 4],
-    pixels: (u32, u32),
-    refresh: f64,
+use crate::desktop::Monitor;
+
+trait GlobalRect {
+    fn global(&self) -> Rect;
 }
 
-impl Monitor {
+impl GlobalRect for Monitor {
     fn global(&self) -> Rect {
         Rect::from_min_size(pos2(self.rect[0] as f32, self.rect[1] as f32), vec2(self.rect[2] as f32, self.rect[3] as f32))
     }
@@ -400,24 +396,7 @@ fn request_blur() {
 }
 
 fn load_monitors() -> Result<Vec<Monitor>> {
-    let infos = hyprland::monitor_infos().unwrap_or_default();
-    Ok(hyprland::monitors()?
-        .into_iter()
-        .map(|m| {
-            let info = infos.iter().find(|i| i.name == m.name);
-            let (pw, ph) = m.pixel_size();
-            let desc = info.map(|i| i.description.clone()).unwrap_or_default();
-            // Hyprland descriptions end with serial and connector; keep make and model.
-            let short = desc.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
-            Monitor {
-                name: m.name.clone(),
-                description: if short.is_empty() { m.name.clone() } else { short },
-                rect: m.logical_rect(),
-                pixels: (pw as u32, ph as u32),
-                refresh: info.map(|i| i.refresh_rate).unwrap_or(60.0),
-            }
-        })
-        .collect())
+    desktop::monitors()
 }
 
 /// Mapped windows on each monitor's visible workspace, most recently focused first.

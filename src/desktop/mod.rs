@@ -3,6 +3,7 @@
 //! picks its best mechanism and falls back where it is missing.
 
 pub mod hyprland;
+mod wayland;
 
 use std::sync::OnceLock;
 use wayland_client::protocol::wl_registry::WlRegistry;
@@ -70,6 +71,61 @@ impl Caps {
     pub fn window_geometry(&self) -> bool {
         self.hyprland_ipc
     }
+}
+
+/// A monitor in the global layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Monitor {
+    pub name: String,
+    /// Make and model, for showing to people.
+    pub description: String,
+    /// Logical x, y, width, height in the global layout.
+    pub rect: [f64; 4],
+    /// Size in pixels as shown (after rotation).
+    pub pixels: (u32, u32),
+    pub refresh: f64,
+}
+
+impl Monitor {
+    /// Pixels per logical unit.
+    pub fn scale(&self) -> f64 {
+        self.pixels.0 as f64 / self.rect[2].max(1.0)
+    }
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        let r = self.rect;
+        x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]
+    }
+}
+
+/// The monitor layout, from Hyprland IPC there and from wl_output and
+/// xdg_output elsewhere.
+pub fn monitors() -> anyhow::Result<Vec<Monitor>> {
+    if !caps().hyprland_ipc {
+        return wayland::monitors();
+    }
+    let infos = hyprland::monitor_infos().unwrap_or_default();
+    Ok(hyprland::monitors()?
+        .into_iter()
+        .map(|m| {
+            let info = infos.iter().find(|i| i.name == m.name);
+            let (pw, ph) = m.pixel_size();
+            let desc = info.map(|i| i.description.clone()).unwrap_or_default();
+            // Hyprland descriptions end with serial and connector; keep make and model.
+            let short = desc.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+            Monitor {
+                name: m.name.clone(),
+                description: if short.is_empty() { m.name.clone() } else { short },
+                rect: m.logical_rect(),
+                pixels: (pw as u32, ph as u32),
+                refresh: info.map(|i| i.refresh_rate).unwrap_or(60.0),
+            }
+        })
+        .collect())
+}
+
+/// Monitors from the standard protocols even on Hyprland, to compare.
+pub fn wayland_monitors() -> anyhow::Result<Vec<Monitor>> {
+    wayland::monitors()
 }
 
 /// The capabilities of this session, probed on first use.
