@@ -168,6 +168,7 @@ impl Recorder {
             });
         }
         let moves = Arc::new(Mutex::new(Vec::new()));
+        let shapes = Arc::new(Mutex::new(Vec::new()));
         let window_track = Arc::new(Mutex::new(Vec::new()));
         // Cursor positions: from a cursor capture session on the captured
         // source where the compositor supports it (already in video pixels),
@@ -186,7 +187,12 @@ impl Recorder {
                 _ => !desktop::caps().pointer_poll(),
             };
             if let Some(req) = opts.direct.as_ref().filter(|_| prefer_session) {
-                match direct::spawn_cursor_tracker(&req.target, stop.clone(), moves.clone()) {
+                let scale = match &req.target {
+                    direct::Target::Output { name, .. } => desktop::monitors().ok().and_then(|ms| ms.into_iter().find(|m| &m.name == name)).map_or(1.0, |m| m.scale()),
+                    direct::Target::Window { .. } => 1.0,
+                };
+                let shapes = (!opts.show_system_cursor).then(|| shapes.clone());
+                match direct::spawn_cursor_tracker(&req.target, scale, stop.clone(), moves.clone(), shapes) {
                     Ok(()) => stream_cursor = true,
                     Err(e) => eprintln!("open-studio: no cursor capture session: {e:#}"),
                 }
@@ -200,8 +206,7 @@ impl Recorder {
                 eprintln!("open-studio: this desktop doesn't report the pointer position, cursor tracking disabled");
             }
         }
-        let shapes = Arc::new(Mutex::new(Vec::new()));
-        if !opts.test_source && !opts.show_system_cursor && desktop::caps().pointer_poll() && desktop::caps().wlr_screencopy {
+        if !opts.test_source && !opts.show_system_cursor && !stream_cursor && desktop::caps().pointer_poll() && desktop::caps().wlr_screencopy {
             if let Err(e) = cursor_shape::spawn(stop.clone(), shapes.clone()) {
                 eprintln!("open-studio: cursor shapes won't be tracked: {e:#}");
             }

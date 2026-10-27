@@ -154,8 +154,33 @@ pub struct Rgb {
     rgb: Vec<u8>,
 }
 
+/// Names the shape of a cursor image (premultiplied BGRA, as wl_shm
+/// ARGB8888) with its hotspot, captured at `scale` pixels per logical unit.
+/// A fully transparent image is a hidden cursor.
+pub fn classify_image(classifier: &mut Classifier, bgra: &[u8], w: u32, h: u32, hotspot: (f64, f64), scale: f64) -> Shape {
+    // Composite over a flat background, which gives the classifier the same
+    // with/without pair a screen capture does.
+    const BG: u32 = 128;
+    let n = (w * h) as usize;
+    let bare = Rgb { w, h, rgb: vec![BG as u8; n * 3] };
+    let mut with = Rgb { w, h, rgb: vec![0; n * 3] };
+    let mut any = false;
+    for i in 0..n {
+        let a = bgra[i * 4 + 3] as u32;
+        any |= a > 24;
+        for c in 0..3 {
+            with.rgb[i * 3 + c] = (bgra[i * 4 + 2 - c] as u32 + BG * (255 - a) / 255).min(255) as u8;
+        }
+    }
+    if !any {
+        return Shape::Hidden;
+    }
+    let size = (xcursor::base_size() as f64 * scale).round() as u32;
+    classifier.classify(&bare, &with, hotspot, size, scale)
+}
+
 #[derive(Default)]
-struct Classifier {
+pub struct Classifier {
     /// Candidates per nominal size: (canonical name, image).
     by_size: HashMap<u32, Vec<(&'static str, XImage)>>,
 }
@@ -509,3 +534,25 @@ delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_buffer::WlBuffer);
 delegate_noop!(State: manager::ZwlrScreencopyManagerV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A theme cursor image, as a cursor capture session would deliver it,
+    /// is named. Skipped when no cursor theme is installed.
+    #[test]
+    fn cursor_images_are_named() {
+        let size = xcursor::base_size();
+        let mut classifier = Classifier::default();
+        for name in ["default", "text", "pointer"] {
+            let Some(img) = xcursor::load_named(name, size) else { return };
+            // RGBA to BGRA, both premultiplied.
+            let bgra: Vec<u8> = img.rgba.chunks(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
+            let hot = (img.hotspot.0 as f64, img.hotspot.1 as f64);
+            let shape = classify_image(&mut classifier, &bgra, img.width, img.height, hot, img.size as f64 / size as f64);
+            assert_eq!(shape, Shape::Named(name));
+        }
+        assert_eq!(classify_image(&mut classifier, &[0; 16 * 16 * 4], 16, 16, (0.0, 0.0), 1.0), Shape::Hidden);
+    }
+}

@@ -104,6 +104,7 @@ struct CursorSink {
     moves: Moves,
     last: Option<(f64, f64)>,
     last_push: i64,
+    hotspot: (i32, i32),
 }
 
 impl CursorSink {
@@ -148,7 +149,14 @@ fn connect(target: &Target) -> Result<(Connection, EventQueue<State>, State, ext
 /// own thread, until `stop`. The compositor reports positions relative to
 /// the captured image, so they need no layout or window geometry. Returns
 /// an error when the compositor doesn't support it.
-pub fn spawn_cursor_tracker(target: &Target, stop: Arc<AtomicBool>, moves: Moves) -> Result<()> {
+/// With `shapes`, the cursor's image is captured too and named.
+pub fn spawn_cursor_tracker(
+    target: &Target,
+    scale: f64,
+    stop: Arc<AtomicBool>,
+    moves: Moves,
+    shapes: Option<Arc<Mutex<Vec<super::cursor_shape::ShapeChange>>>>,
+) -> Result<()> {
     let (conn, mut queue, mut st, source) = connect(target)?;
     let qh = queue.handle();
     let cap = st.cap.clone().ok_or_else(|| anyhow!("compositor lacks ext-image-copy-capture"))?;
@@ -158,13 +166,61 @@ pub fn spawn_cursor_tracker(target: &Target, stop: Arc<AtomicBool>, moves: Moves
         Target::Output { crop: Some(c), .. } => (c[0] as f64, c[1] as f64),
         _ => (0.0, 0.0),
     };
-    st.cursor = Some(CursorSink { origin, moves, last: None, last_push: 0 });
+    st.cursor = Some(CursorSink { origin, moves, last: None, last_push: 0, hotspot: (0, 0) });
     let session = cap.create_pointer_cursor_session(&source, &pointer, &qh, ());
+    let images = shapes.map(|s| (session.get_capture_session(&qh, ()), s));
     // An unsupported request ends the connection with a protocol error.
     queue.roundtrip(&mut st).context("cursor session refused")?;
     std::thread::spawn(move || {
-        let _keep = (conn, source, pointer, session);
+        let _keep = (&conn, &source, &pointer, &session);
+        let mut classifier = super::cursor_shape::Classifier::default();
+        let mut shm: Option<Shm> = None;
+        let mut frame: Option<frame::ExtImageCopyCaptureFrameV1> = None;
+        let mut last_image: Option<(Vec<u8>, (i32, i32))> = None;
+        let mut seen_image = false;
         while !stop.load(Ordering::Relaxed) {
+            if let Some((img_session, sink)) = &images {
+                if frame.is_none() && st.constraints_done && !st.stopped {
+                    let (w, h) = st.size;
+                    let format = wl_shm::Format::Argb8888;
+                    if shm.as_ref().is_none_or(|s| s.len != (w * h * 4) as usize) && st.formats.contains(&format) && w > 0 {
+                        shm = make_shm(st.shm.as_ref().unwrap(), w, h, format, &qh).ok();
+                    }
+                    if let Some(s) = &shm {
+                        st.ready = false;
+                        st.failed = false;
+                        let f = img_session.create_frame(&qh, ());
+                        f.attach_buffer(&s.buffer);
+                        f.damage_buffer(0, 0, w as i32, h as i32);
+                        f.capture();
+                        frame = Some(f);
+                    }
+                }
+                if st.ready || st.failed {
+                    frame.take().unwrap().destroy();
+                    if st.ready {
+                        if let Some(s) = &shm {
+                            let (w, h) = st.size;
+                            let data = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
+                            let hot = st.cursor.as_ref().unwrap().hotspot;
+                            if last_image.as_ref().is_none_or(|(d, hs)| d != data || *hs != hot) {
+                                let shape = super::cursor_shape::classify_image(&mut classifier, data, w, h, (hot.0 as f64, hot.1 as f64), scale);
+                                // Some compositors (Hyprland) send blank cursor
+                                // images; blank only means hidden once real ones
+                                // have been seen.
+                                seen_image |= shape != super::cursor_shape::Shape::Hidden;
+                                let mut v = sink.lock().unwrap();
+                                if seen_image && v.last().is_none_or(|c| c.shape != shape) {
+                                    v.push(super::cursor_shape::ShapeChange { t_ns: crate::util::monotonic_ns(), shape });
+                                }
+                                last_image = Some((data.to_vec(), hot));
+                            }
+                        }
+                    }
+                    st.ready = false;
+                    st.failed = false;
+                }
+            }
             if queue.dispatch_pending(&mut st).is_err() {
                 return;
             }
@@ -425,8 +481,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for State {
 impl Dispatch<cursor_session::ExtImageCopyCaptureCursorSessionV1, ()> for State {
     fn event(st: &mut Self, _: &cursor_session::ExtImageCopyCaptureCursorSessionV1, ev: cursor_session::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         let Some(c) = st.cursor.as_mut() else { return };
-        if let cursor_session::Event::Position { x, y } = ev {
-            c.push((x as f64 - c.origin.0, y as f64 - c.origin.1));
+        match ev {
+            cursor_session::Event::Position { x, y } => c.push((x as f64 - c.origin.0, y as f64 - c.origin.1)),
+            cursor_session::Event::Hotspot { x, y } => c.hotspot = (x, y),
+            _ => {}
         }
     }
 }
