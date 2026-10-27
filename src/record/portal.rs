@@ -13,6 +13,9 @@ pub struct PortalStream {
     pub position: Option<(i32, i32)>,
     pub size: Option<(i32, i32)>,
     pub kind: String,
+    /// The cursor comes as metadata on the stream's buffers, and this second
+    /// connection to the stream's PipeWire remote reads it.
+    pub cursor_fd: Option<OwnedFd>,
     // Dropping these ends the cast, so they live as long as the recording.
     pub _proxy: Screencast,
     pub session: Session<Screencast>,
@@ -26,7 +29,16 @@ pub async fn open(show_cursor: bool, reuse_selection: bool) -> Result<PortalStre
     let proxy = Screencast::new().await.context("ScreenCast portal unavailable")?;
     let session = proxy.create_session(Default::default()).await?;
     let token = if reuse_selection { std::fs::read_to_string(token_path()).ok() } else { None };
-    let cursor = if show_cursor { CursorMode::Embedded } else { CursorMode::Hidden };
+    // A separate cursor (metadata) where the portal offers it, so it can be
+    // smoothed; Hyprland's portal doesn't.
+    let metadata = !show_cursor && proxy.available_cursor_modes().await.is_ok_and(|m| m.contains(CursorMode::Metadata));
+    let cursor = if show_cursor {
+        CursorMode::Embedded
+    } else if metadata {
+        CursorMode::Metadata
+    } else {
+        CursorMode::Hidden
+    };
     proxy
         .select_sources(
             &session,
@@ -51,6 +63,7 @@ pub async fn open(show_cursor: bool, reuse_selection: bool) -> Result<PortalStre
         let _ = std::fs::write(token_path(), t);
     }
     let fd = proxy.open_pipe_wire_remote(&session, Default::default()).await?;
+    let cursor_fd = if metadata { proxy.open_pipe_wire_remote(&session, Default::default()).await.ok() } else { None };
     let kind = match stream.source_type() {
         Some(SourceType::Window) => "window",
         Some(SourceType::Virtual) => "virtual",
@@ -62,6 +75,7 @@ pub async fn open(show_cursor: bool, reuse_selection: bool) -> Result<PortalStre
         position: stream.position(),
         size: stream.size(),
         kind: kind.into(),
+        cursor_fd,
         _proxy: proxy,
         session,
     })

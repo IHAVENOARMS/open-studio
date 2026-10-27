@@ -6,6 +6,7 @@ pub mod camera;
 pub mod capture;
 pub mod clock;
 pub mod direct;
+pub mod cursor_meta;
 pub mod cursor_shape;
 pub mod device;
 pub mod input;
@@ -132,7 +133,7 @@ impl Recorder {
         let stop = Arc::new(AtomicBool::new(false));
         let direct_error = Arc::new(Mutex::new(None));
         let mut direct_capture = None;
-        let (capture_source, portal) = if let Some(req) = &opts.direct {
+        let (capture_source, mut portal) = if let Some(req) = &opts.direct {
             let d = direct::Direct::open(&req.target, opts.show_system_cursor)?;
             source.kind = req.kind.clone();
             source.name = req.name.clone();
@@ -155,6 +156,8 @@ impl Recorder {
             (cs, Some((rt, stream)))
         };
 
+        // Portal streams with the cursor as metadata: read on a second stream.
+        let portal_cursor = portal.as_mut().and_then(|(_, s)| s.cursor_fd.take().map(|fd| (fd, s.node_id)));
         let gpu = if opts.gpu_encoding { crate::hwenc::detect() } else { None };
         let capture = Capture::start(capture_source, &dir.join(VIDEO_FILE), opts.fps, gpu)?;
         let paused_clock = direct_capture.is_some();
@@ -186,6 +189,18 @@ impl Recorder {
                 "ipc" => false,
                 _ => !desktop::caps().pointer_poll(),
             };
+            if let Some((fd, node)) = portal_cursor {
+                // Pixels per logical unit, from the monitor the stream shows.
+                let scale = source
+                    .logical_rect
+                    .and_then(|r| desktop::monitors().ok()?.into_iter().find(|m| m.rect[0] == r[0] && m.rect[1] == r[1]))
+                    .map_or(1.0, |m| m.scale());
+                let shapes = (!opts.show_system_cursor).then(|| shapes.clone());
+                match cursor_meta::spawn(fd, node, scale, stop.clone(), moves.clone(), shapes) {
+                    Ok(()) => stream_cursor = true,
+                    Err(e) => eprintln!("open-studio: no cursor from the portal stream: {e:#}"),
+                }
+            }
             if let Some(req) = opts.direct.as_ref().filter(|_| prefer_session) {
                 let scale = match &req.target {
                     direct::Target::Output { name, .. } => desktop::monitors().ok().and_then(|ms| ms.into_iter().find(|m| &m.name == name)).map_or(1.0, |m| m.scale()),
