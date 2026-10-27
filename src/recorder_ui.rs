@@ -151,6 +151,8 @@ struct Shared {
     /// The notes are on the recorded screen with nothing keeping them out
     /// of the recording.
     notes_recorded: bool,
+    /// Why clicks, keys and shortcuts can't be read, if they can't.
+    input_problem: Option<String>,
     /// Level of the chosen microphone, while the bar is showing.
     mic_meter: Option<record::audio::MicMeter>,
     /// Microphone the meter was started for.
@@ -326,6 +328,7 @@ pub fn run() -> Result<Outcome> {
             prompter_offset: 0.0,
             notes_menu: false,
             notes_recorded: false,
+            input_problem: record::input::access_problem(),
             mic_meter: None,
             mic_meter_for: None,
             countdown: None,
@@ -1938,6 +1941,9 @@ fn gear_menu_items(ui: &mut egui::Ui, sh: &mut Shared) {
     if sh.capturing_flag {
         sh.capturing_shortcut = false;
     }
+    if let Some(problem) = &sh.input_problem {
+        ui.label(egui::RichText::new(problem).size(12.0).color(Color32::from_rgb(0xff, 0x8a, 0x80)));
+    }
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Encode on the GPU").size(13.5).color(BAR_TEXT));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2990,6 +2996,7 @@ mod tests {
             prompter_offset: 0.0,
             notes_menu: false,
             notes_recorded: false,
+            input_problem: None,
             mic_meter: None,
             mic_meter_for: None,
             countdown: None,

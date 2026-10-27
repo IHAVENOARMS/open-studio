@@ -1,5 +1,5 @@
 //! Click and key logging straight from evdev. Requires read access to
-//! /dev/input/event* (membership in the `input` group).
+//! /dev/input/event* (usually membership in the group that owns them).
 
 use crate::util::monotonic_ns;
 use evdev::{Device, EventSummary, KeyCode};
@@ -31,6 +31,53 @@ pub fn spawn(stop: Arc<AtomicBool>, tx: Sender<InputEvent>) -> usize {
         std::thread::spawn(move || read_loop(dev, stop, tx));
     }
     count
+}
+
+/// Why clicks, keys and shortcuts can't be read, with the fix, or None when
+/// they can. The group owning the devices is looked up, not assumed.
+pub fn access_problem() -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let nodes: Vec<_> = std::fs::read_dir("/dev/input")
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("event")))
+        .collect();
+    if nodes.is_empty() || nodes.iter().any(|p| std::fs::File::open(p).is_ok()) {
+        return None;
+    }
+    let gid = std::fs::metadata(&nodes[0]).ok()?.gid();
+    let (group, member) = group_info(gid)?;
+    Some(access_message(&group, member))
+}
+
+fn access_message(group: &str, member: bool) -> String {
+    if member {
+        format!("Clicks, keys and shortcuts can't be recorded until you log out and back in (you were added to the \"{group}\" group).")
+    } else {
+        format!("Clicks, keys and shortcuts can't be recorded: input devices aren't readable. Add yourself to the \"{group}\" group (sudo usermod -aG {group} $USER), then log out and back in.")
+    }
+}
+
+/// The group's name, and whether the current user is listed in it.
+fn group_info(gid: u32) -> Option<(String, bool)> {
+    let mut buf = vec![0 as libc::c_char; 16384];
+    let mut grp: libc::group = unsafe { std::mem::zeroed() };
+    let mut out = std::ptr::null_mut();
+    let r = unsafe { libc::getgrgid_r(gid, &mut grp, buf.as_mut_ptr(), buf.len(), &mut out) };
+    if r != 0 || out.is_null() {
+        return None;
+    }
+    let cstr = |p: *const libc::c_char| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned();
+    let name = cstr(grp.gr_name);
+    let user = std::env::var("USER").unwrap_or_default();
+    let mut member = false;
+    let mut m = grp.gr_mem;
+    while !m.is_null() && unsafe { !(*m).is_null() } {
+        member |= cstr(unsafe { *m }) == user;
+        m = unsafe { m.add(1) };
+    }
+    Some((name, member))
 }
 
 fn read_loop(mut dev: Device, stop: Arc<AtomicBool>, tx: Sender<InputEvent>) {
@@ -178,5 +225,16 @@ fn watch_device(mut dev: Device, sc: Shortcut, hit: Arc<AtomicBool>, stop: Arc<A
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn message_names_the_group() {
+        let m = super::access_message("plugdev", false);
+        assert!(m.contains("\"plugdev\"") && m.contains("usermod -aG plugdev"));
+        assert!(super::access_message("input", true).contains("log out"));
+        assert_eq!(super::group_info(0).map(|g| g.0).as_deref(), Some("root"));
     }
 }

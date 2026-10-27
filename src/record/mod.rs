@@ -228,7 +228,7 @@ impl Recorder {
         });
         let (tx, input_rx) = channel();
         if !opts.test_source && input::spawn(stop.clone(), tx) == 0 {
-            eprintln!("open-studio: no readable input devices; clicks won't be tracked (add yourself to the `input` group)");
+            eprintln!("open-studio: {}", input::access_problem().unwrap_or_else(|| "no mouse or keyboard found; clicks won't be tracked".into()));
         }
         // Recording flags from the global shortcut.
         let flags: Arc<Mutex<Vec<i64>>> = Arc::default();

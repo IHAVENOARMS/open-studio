@@ -46,6 +46,8 @@ pub struct App {
     projects: Vec<ProjectEntry>,
     options: RecordOptions,
     hide_while_recording: bool,
+    /// Why clicks, keys and shortcuts can't be read, if they can't.
+    input_problem: Option<String>,
     error: Option<String>,
     control: Option<Arc<ControlServer>>,
     /// The unsaved-changes prompt has been answered; let the window close.
@@ -87,6 +89,7 @@ impl App {
             projects: scan_projects(),
             options: RecordOptions::default(),
             hide_while_recording: true,
+            input_problem: crate::record::input::access_problem(),
             error: None,
             control: ControlServer::start().ok().map(Arc::new),
             may_close: false,
@@ -223,6 +226,10 @@ impl App {
                             .color(theme::TEXT_DIM)
                             .size(12.0),
                     );
+                    if let Some(p) = &self.input_problem {
+                        ui.add_space(4.0);
+                        ui.colored_label(theme::RECORD, RichText::new(p).size(12.0));
+                    }
                     if let Some(e) = &self.error {
                         ui.add_space(8.0);
                         ui.colored_label(theme::RECORD, e);
