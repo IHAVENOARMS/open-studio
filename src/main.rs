@@ -240,7 +240,6 @@ fn main() -> Result<()> {
             println!("recording bar: {}", c.recording_bar());
             println!("cursor tracking: {}", c.pointer_poll());
             println!("window following: {}", c.window_geometry());
-            println!("hide own window: {}", c.hide_own_window());
         }
         Some(Cmd::Flag) => control::send_flag()?,
         Some(Cmd::RecordUi) => match recorder_ui::run()? {

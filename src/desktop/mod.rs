@@ -70,11 +70,6 @@ impl Caps {
     pub fn window_geometry(&self) -> bool {
         self.hyprland_ipc
     }
-
-    /// Our own window can be put away while recording and brought back.
-    pub fn hide_own_window(&self) -> bool {
-        self.hyprland_ipc
-    }
 }
 
 /// The capabilities of this session, probed on first use.

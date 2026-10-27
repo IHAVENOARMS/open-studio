@@ -86,7 +86,7 @@ impl App {
             mode: Mode::Home,
             projects: scan_projects(),
             options: RecordOptions::default(),
-            hide_while_recording: desktop::caps().hide_own_window(),
+            hide_while_recording: true,
             error: None,
             control: ControlServer::start().ok().map(Arc::new),
             may_close: false,
@@ -202,9 +202,7 @@ impl App {
                         ui.add_space((ui.available_width() - 470.0).max(0.0) / 2.0);
                         ui.checkbox(&mut self.options.reuse_selection, "Reuse last screen");
                         ui.checkbox(&mut self.options.show_system_cursor, "Bake in system cursor");
-                        if desktop::caps().hide_own_window() {
-                            ui.checkbox(&mut self.hide_while_recording, "Hide this window");
-                        }
+                        ui.checkbox(&mut self.hide_while_recording, "Hide this window");
                     });
                     ui.horizontal(|ui| {
                         ui.add_space((ui.available_width() - 360.0).max(0.0) / 2.0);
@@ -434,16 +432,12 @@ impl App {
 /// process with this window moved out of the way, and returns the project it
 /// recorded. A cancelled recording is reported as an empty error.
 fn supervise_bar(ctx: &egui::Context) -> anyhow::Result<PathBuf> {
-    let pid = std::process::id();
-    let _ = hyprland::move_window_to_workspace(pid, "special:open-studio", false);
+    set_window_hidden(ctx, true);
     let out = std::process::Command::new(std::env::current_exe()?)
         .arg("record-ui")
         .stdin(std::process::Stdio::null())
         .output();
-    if let Ok(ws) = hyprland::active_workspace() {
-        let _ = hyprland::move_window_to_workspace(pid, &ws.to_string(), true);
-    }
-    ctx.request_repaint();
+    set_window_hidden(ctx, false);
     let out = out?;
     match out.status.code() {
         Some(0) => {
@@ -454,6 +448,29 @@ fn supervise_bar(ctx: &egui::Context) -> anyhow::Result<PathBuf> {
         Some(2) | Some(3) => anyhow::bail!(""),
         _ => anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim()),
     }
+}
+
+/// Puts this window out of the way while recording, and brings it back.
+/// Hyprland parks it on a special workspace. Elsewhere it is minimized;
+/// Wayland clients can't unminimize themselves, so afterwards the window
+/// asks for attention (the desktop highlights it or shows a notice) and X11
+/// restores it.
+fn set_window_hidden(ctx: &egui::Context, hidden: bool) {
+    let pid = std::process::id();
+    if desktop::caps().hyprland_ipc {
+        if hidden {
+            let _ = hyprland::move_window_to_workspace(pid, "special:open-studio", false);
+        } else if let Ok(ws) = hyprland::active_workspace() {
+            let _ = hyprland::move_window_to_workspace(pid, &ws.to_string(), true);
+        }
+    } else if hidden {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+    } else {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational));
+    }
+    ctx.request_repaint();
 }
 
 /// Runs a whole recording on a worker thread: portal selection, capture,
@@ -471,9 +488,8 @@ fn supervise(
     *phase.lock().unwrap() = RecPhase::Recording { since: Instant::now() };
     ctx.request_repaint();
     let tray = control.as_ref().and_then(|c| c.tray());
-    let pid = std::process::id();
     if hide {
-        let _ = hyprland::move_window_to_workspace(pid, "special:open-studio", false);
+        set_window_hidden(ctx, true);
     }
     let mut failure = None;
     loop {
@@ -492,9 +508,7 @@ fn supervise(
     drop(tray);
     *phase.lock().unwrap() = RecPhase::Saving;
     if hide {
-        if let Ok(ws) = hyprland::active_workspace() {
-            let _ = hyprland::move_window_to_workspace(pid, &ws.to_string(), true);
-        }
+        set_window_hidden(ctx, false);
     }
     ctx.request_repaint();
     let dir = recorder.stop();
