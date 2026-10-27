@@ -590,7 +590,11 @@ fn animation(ui: &mut Ui, edit: &mut EditConfig, rec: &Recording, selected: &mut
         edit.zoom_segments = crate::engine::auto_zoom_segments(rec, edit.default_zoom);
         *selected = None;
     }
-    help(ui, &format!("Zooms are created from your clicks ({clicks} recorded). This replaces the current zooms."));
+    if rec.events.moves.is_empty() {
+        help(ui, "This recording has no cursor track, so zooms can't be created from clicks. Add them on the timeline.");
+    } else {
+        help(ui, &format!("Zooms are created from your clicks ({clicks} recorded). This replaces the current zooms."));
+    }
     if widgets::wide_button(ui, "Remove all zooms").clicked() {
         edit.zoom_segments.clear();
         *selected = None;

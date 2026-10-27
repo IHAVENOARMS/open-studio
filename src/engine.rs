@@ -20,7 +20,11 @@ const END_MARGIN: f64 = 0.8;
 
 /// Clicks are grouped into bursts; each burst becomes one zoom segment that
 /// starts a little before the first click and lingers after the last.
+/// Without a cursor track a zoom has nothing to aim at, so none are made.
 pub fn auto_zoom_segments(rec: &Recording, scale: f64) -> Vec<ZoomSegment> {
+    if rec.events.moves.is_empty() {
+        return Vec::new();
+    }
     let mut times: Vec<f64> = rec.events.clicks.iter().filter(|c| c.down).map(|c| c.t).collect();
     times.retain(|t| *t >= 0.0 && *t <= rec.duration - END_IGNORE);
     let last_end = (rec.duration - END_MARGIN).max(0.0);
@@ -1198,6 +1202,15 @@ mod tests {
     fn spring_presets_match_previous_behaviour() {
         let s = scales(ZoomCurve::from_speed(crate::edit::AnimationSpeed::Mellow));
         assert!(s[0] < 1.05 && s[40] > 1.9);
+    }
+
+    #[test]
+    fn no_auto_zooms_without_cursor_track() {
+        let mut r = rec();
+        r.events.clicks = vec![crate::project::Click { t: 2.0, x: 0.0, y: 0.0, button: 272, down: true }];
+        assert_eq!(auto_zoom_segments(&r, 2.0).len(), 1);
+        r.events.moves.clear();
+        assert!(auto_zoom_segments(&r, 2.0).is_empty());
     }
 
     fn moving_rec() -> Recording {
