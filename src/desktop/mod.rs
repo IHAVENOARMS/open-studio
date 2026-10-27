@@ -56,10 +56,11 @@ impl Caps {
         }
     }
 
-    /// The floating recording bar with direct capture. Elsewhere the
+    /// The floating recording bar with direct capture: needs layer-shell
+    /// overlays and output capture (wlroots, KDE, Hyprland). Elsewhere the
     /// projects window and the ScreenCast portal are used.
     pub fn recording_bar(&self) -> bool {
-        self.hyprland_ipc
+        self.layer_shell && self.image_copy_capture
     }
 
     /// The pointer position can be polled in global coordinates.
@@ -128,6 +129,11 @@ pub fn wayland_monitors() -> anyhow::Result<Vec<Monitor>> {
     wayland::monitors()
 }
 
+/// Where the pointer is in the global layout, where the desktop says.
+pub fn pointer_pos() -> Option<(f64, f64)> {
+    caps().pointer_poll().then(|| hyprland::cursor_pos().ok()).flatten()
+}
+
 /// The capabilities of this session, probed on first use.
 pub fn caps() -> &'static Caps {
     static CAPS: OnceLock<Caps> = OnceLock::new();
@@ -160,10 +166,10 @@ mod tests {
         // Sway: output capture and a window list, but no window capture.
         let sway = ["zwlr_layer_shell_v1", "ext_image_copy_capture_manager_v1", "ext_output_image_capture_source_manager_v1", "ext_foreign_toplevel_list_v1"];
         let c = Caps::from_globals(sway, false);
-        assert!(c.image_copy_capture && c.toplevel_list && !c.toplevel_capture && !c.recording_bar());
+        assert!(c.image_copy_capture && c.toplevel_list && !c.toplevel_capture && c.recording_bar() && !c.window_geometry());
 
         // GNOME: none of these.
         let c = Caps::from_globals(["wl_compositor", "xdg_wm_base"], false);
-        assert!(c.wayland && !c.layer_shell && !c.image_copy_capture && !c.pointer_poll());
+        assert!(c.wayland && !c.layer_shell && !c.image_copy_capture && !c.pointer_poll() && !c.recording_bar());
     }
 }

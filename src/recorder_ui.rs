@@ -95,6 +95,9 @@ struct Shared {
     mode: Mode,
     monitors: Vec<Monitor>,
     windows: Vec<hyprland::Client>,
+    /// Window positions are known, so windows (and phone mirrors) can be
+    /// picked by pointing at them.
+    window_picking: bool,
     /// Monitor that shows the bar (where the pointer was at launch).
     bar_monitor: String,
     /// Area selection in global logical coordinates.
@@ -222,6 +225,8 @@ struct Rt {
     surfaces: Vec<Surf>,
     pointer: Option<ThemedPointer>,
     pointer_surface: Option<wl_surface::WlSurface>,
+    /// Where the pointer last was over one of our surfaces, global logical.
+    last_pointer: Option<(f64, f64)>,
     keyboard_surface: Option<wl_surface::WlSurface>,
     modifiers: egui::Modifiers,
     shared: Shared,
@@ -257,9 +262,12 @@ pub fn run() -> Result<Outcome> {
     let layer_shell = LayerShell::bind(&globals, &qh).context("this compositor has no wlr-layer-shell")?;
     let shm = Shm::bind(&globals, &qh).context("wl_shm")?;
 
-    request_blur();
+    if desktop::caps().hyprland_ipc {
+        request_blur();
+    }
     let monitors = load_monitors()?;
-    let cursor = hyprland::cursor_pos().unwrap_or((0.0, 0.0));
+    // Without a pointer position the bar starts on the first monitor.
+    let cursor = desktop::pointer_pos().unwrap_or((f64::NAN, f64::NAN));
     let pinned = std::env::var("OPEN_STUDIO_BAR_MONITOR").ok();
     let bar_monitor = monitors
         .iter()
@@ -285,12 +293,14 @@ pub fn run() -> Result<Outcome> {
         surfaces: vec![],
         pointer: None,
         pointer_surface: None,
+        last_pointer: None,
         keyboard_surface: None,
         modifiers: egui::Modifiers::default(),
         shared: Shared {
             mode: Mode::Display,
             monitors,
             windows: visible_windows(),
+            window_picking: desktop::caps().window_geometry(),
             bar_monitor,
             area,
             area_drag: None,
@@ -618,12 +628,18 @@ impl Rt {
 
     /// Quick share widget: the recording's first frame with Save, Copy and
     /// Edit, in the corner of the screen the controls were on.
+    /// Where the pointer is: from the desktop where it says, else where it
+    /// was last seen over our overlays.
+    fn pointer_pos(&self) -> Option<(f64, f64)> {
+        desktop::pointer_pos().or(self.last_pointer)
+    }
+
     fn begin_quick_share(&mut self, dir: PathBuf) {
         self.recording = None;
         self.shared.settings.show_notes = false;
         // Where you're looking: the monitor with the mouse (you just clicked
         // Stop there), else the one the controls were on.
-        let cursor = hyprland::cursor_pos().ok();
+        let cursor = self.pointer_pos();
         let monitor = cursor
             .and_then(|(x, y)| self.shared.monitors.iter().find(|m| m.global().contains(pos2(x as f32, y as f32))).cloned())
             .or_else(|| self.surfaces.iter().find(|s| matches!(s.kind, SurfKind::Widget)).map(|s| s.monitor.clone()));
@@ -818,7 +834,7 @@ impl Rt {
             self.create_dims(&req);
         }
         // Controls go on another monitor when possible, so they aren't recorded.
-        let cursor = hyprland::cursor_pos().unwrap_or((0.0, 0.0));
+        let cursor = self.pointer_pos().unwrap_or((f64::NAN, f64::NAN));
         let others: Vec<Monitor> = self.shared.monitors.iter().filter(|m| m.name != recorded).cloned().collect();
         let widget_mon = others
             .iter()
@@ -1464,13 +1480,24 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
     divider(&p, x);
     x += 10.0;
 
-    // Mode tiles.
-    for (mode, icon, label, enabled) in [
-        (Some(Mode::Display), Icon::Display, "Display", true),
-        (Some(Mode::Window), Icon::Window, "Window", true),
-        (Some(Mode::Area), Icon::Resolution, "Area", true),
-        (Some(Mode::Device), Icon::Phone, "Device", sh.scrcpy),
+    // Mode tiles, with why one is unavailable.
+    const NO_WINDOWS: &str = "This desktop doesn't tell apps where windows are. Record the display or an area instead.";
+    for (mode, icon, label, unavailable) in [
+        (Some(Mode::Display), Icon::Display, "Display", None),
+        (Some(Mode::Window), Icon::Window, "Window", (!sh.window_picking).then_some(NO_WINDOWS)),
+        (Some(Mode::Area), Icon::Resolution, "Area", None),
+        (
+            Some(Mode::Device),
+            Icon::Phone,
+            "Device",
+            if !sh.scrcpy {
+                Some("scrcpy needs to be installed to record an Android phone or tablet")
+            } else {
+                (!sh.window_picking).then_some(NO_WINDOWS)
+            },
+        ),
     ] {
+        let enabled = unavailable.is_none();
         let tile = Rect::from_min_size(pos2(x, bar.top() + 9.0), vec2(70.0, BAR_H - 18.0));
         let resp = ui.interact(tile, ui.scope_id().with(("mode", label)), Sense::click());
         let selected = mode == Some(sh.mode);
@@ -1482,10 +1509,9 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
         let col = if !enabled { BAR_DIM.gamma_multiply(0.6) } else if selected { BAR_TEXT } else { Color32::from_rgb(0xc9, 0xc4, 0xd4) };
         icons::paint(&p, Rect::from_center_size(pos2(tile.center().x, tile.top() + 21.0), vec2(26.0, 26.0)), icon, col);
         p.text(pos2(tile.center().x, tile.bottom() - 12.0), Align2::CENTER_CENTER, label, FontId::proportional(12.5), col);
-        let resp = if enabled {
-            resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        } else {
-            resp.on_hover_text("scrcpy needs to be installed to record an Android phone or tablet")
+        let resp = match unavailable {
+            None => resp.on_hover_cursor(egui::CursorIcon::PointingHand),
+            Some(why) => resp.on_hover_text(why),
         };
         if mode == Some(Mode::Device) {
             if enabled && resp.clicked() {
@@ -1501,7 +1527,7 @@ fn bar_ui(ui: &mut egui::Ui, sh: &mut Shared, bar: Rect) {
             x += 74.0;
             continue;
         }
-        if resp.clicked() {
+        if resp.clicked() && enabled {
             if let Some(m) = mode {
                 sh.mode = m;
                 sh.gear_open = false;
@@ -2811,6 +2837,12 @@ impl PointerHandler for Rt {
                 eprintln!("pointer {:?} on {}", ev.kind, self.surfaces[i].monitor.name);
             }
             let pos = pos2(ev.position.0 as f32, ev.position.1 as f32);
+            if matches!(ev.kind, PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. }) {
+                let r = self.surfaces[i].monitor.rect;
+                if matches!(self.surfaces[i].kind, SurfKind::Overlay | SurfKind::Dim | SurfKind::Countdown) {
+                    self.last_pointer = Some((r[0] + ev.position.0, r[1] + ev.position.1));
+                }
+            }
             let mods = self.modifiers;
             let s = &mut self.surfaces[i];
             match ev.kind {
@@ -2942,6 +2974,7 @@ mod tests {
             mode: Mode::Display,
             monitors: vec![test_monitor()],
             windows: vec![],
+            window_picking: true,
             bar_monitor: "T".into(),
             area: Rect::from_min_size(pos2(400.0, 250.0), vec2(900.0, 560.0)),
             area_drag: None,
@@ -3061,6 +3094,21 @@ mod tests {
         let o = crate::settings::ScrcpyOptions { max_size: 1920, max_fps: 0, audio: false, ..Default::default() };
         let a = o.args();
         assert!(a.contains(&"--max-size=1920".to_string()) && a.contains(&"--no-audio".to_string()) && !a.iter().any(|x| x.starts_with("--max-fps")));
+    }
+
+    /// Where window positions are unknown, Window and Device can't be picked.
+    #[test]
+    fn window_modes_need_window_positions() {
+        isolate_config();
+        let (mut h, mut sh) = (Harness::new(false), shared());
+        sh.window_picking = false;
+        sh.scrcpy = true;
+        h.click(&mut sh, tile(1));
+        assert_eq!(sh.mode, Mode::Display);
+        h.click(&mut sh, tile(3));
+        assert_eq!(sh.menu, None);
+        h.click(&mut sh, tile(2));
+        assert_eq!(sh.mode, Mode::Area);
     }
 
     #[test]
