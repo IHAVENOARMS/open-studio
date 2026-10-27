@@ -16,6 +16,7 @@ mod voice;
 mod transcript;
 mod typing;
 mod decode;
+mod desktop;
 mod dialogs;
 mod edit;
 mod engine;
@@ -98,6 +99,8 @@ enum Cmd {
         #[arg(long)]
         list: bool,
     },
+    /// Print what this desktop supports and which recording features use it.
+    Desktop,
     /// Print cursor image changes for a few seconds (development aid).
     #[command(hide = true)]
     DebugCursor {
@@ -231,6 +234,14 @@ fn main() -> Result<()> {
             println!("{}", dir.display());
         }
         Some(Cmd::Stop) => control::send_stop()?,
+        Some(Cmd::Desktop) => {
+            let c = desktop::caps();
+            println!("{c:#?}");
+            println!("recording bar: {}", c.recording_bar());
+            println!("cursor tracking: {}", c.pointer_poll());
+            println!("window following: {}", c.window_geometry());
+            println!("hide own window: {}", c.hide_own_window());
+        }
         Some(Cmd::Flag) => control::send_flag()?,
         Some(Cmd::RecordUi) => match recorder_ui::run()? {
             recorder_ui::Outcome::Recorded(dir) => println!("{}", dir.display()),
@@ -488,9 +499,9 @@ fn visit_points(points: &str) -> Result<()> {
     keys.insert(evdev::KeyCode::BTN_LEFT);
     let mut dev = VirtualDevice::builder()?.name("open-studio test pointer").with_relative_axes(&axes)?.with_keys(&keys)?.build()?;
     std::thread::sleep(std::time::Duration::from_millis(400));
-    let orig = record::hyprland::cursor_pos()?;
+    let orig = desktop::hyprland::cursor_pos()?;
     let warp = |x: f64, y: f64| {
-        record::hyprland::dispatch(&format!("hl.dsp.cursor.move({{x={x},y={y}}})"), &format!("movecursor {x} {y}"))
+        desktop::hyprland::dispatch(&format!("hl.dsp.cursor.move({{x={x},y={y}}})"), &format!("movecursor {x} {y}"))
     };
     for p in points.split_whitespace() {
         // A trailing "!" clicks at the point.
@@ -523,7 +534,7 @@ fn visit_points(points: &str) -> Result<()> {
 /// the editor for what was recorded. Without layer-shell support the
 /// projects window opens instead.
 fn start() -> Result<()> {
-    if record::hyprland::available() {
+    if desktop::caps().recording_bar() {
         match recorder_ui::run() {
             Ok(recorder_ui::Outcome::Recorded(dir)) => app::run(Some(dir))?,
             Ok(recorder_ui::Outcome::OpenProjects) => app::run(None)?,
@@ -546,7 +557,7 @@ fn start() -> Result<()> {
 }
 
 fn hyprland_floating(address: &str) -> bool {
-    record::hyprland::request("j/clients")
+    desktop::hyprland::request("j/clients")
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
         .and_then(|v| v.as_array()?.iter().find(|c| c["address"] == address)?.get("floating")?.as_bool())

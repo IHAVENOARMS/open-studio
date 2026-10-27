@@ -8,10 +8,10 @@ pub mod clock;
 pub mod direct;
 pub mod cursor_shape;
 pub mod device;
-pub mod hyprland;
 pub mod input;
 pub mod portal;
 
+use crate::desktop::{self, hyprland};
 use crate::project::{Click, CustomCursor, Events, Key, Recording, ShapeEvent, Source, VIDEO_FILE};
 use cursor_shape::{Shape, ShapeChange};
 use crate::util::monotonic_ns;
@@ -166,18 +166,18 @@ impl Recorder {
         }
         let moves = Arc::new(Mutex::new(Vec::new()));
         let window_track = Arc::new(Mutex::new(Vec::new()));
-        if let Some(addr) = opts.direct.as_ref().and_then(|r| r.window.clone()).filter(|_| hyprland::available()) {
+        if let Some(addr) = opts.direct.as_ref().and_then(|r| r.window.clone()).filter(|_| desktop::caps().window_geometry()) {
             spawn_window_tracker(stop.clone(), addr, window_track.clone());
         }
         if opts.test_source {
             spawn_fake_cursor(stop.clone(), moves.clone());
-        } else if hyprland::available() {
+        } else if desktop::caps().pointer_poll() {
             spawn_cursor_poller(stop.clone(), moves.clone());
         } else {
-            eprintln!("open-studio: not running under Hyprland, cursor tracking disabled");
+            eprintln!("open-studio: this desktop doesn't report the pointer position, cursor tracking disabled");
         }
         let shapes = Arc::new(Mutex::new(Vec::new()));
-        if !opts.test_source && !opts.show_system_cursor && hyprland::available() {
+        if !opts.test_source && !opts.show_system_cursor && desktop::caps().pointer_poll() && desktop::caps().wlr_screencopy {
             if let Err(e) = cursor_shape::spawn(stop.clone(), shapes.clone()) {
                 eprintln!("open-studio: cursor shapes won't be tracked: {e:#}");
             }

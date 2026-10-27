@@ -210,7 +210,7 @@ impl Mirror {
         let Some(scrcpy) = scrcpy() else { bail!("scrcpy is not installed") };
         // Float the mirror so it keeps the phone's shape instead of tiling.
         let rule = "hl.window_rule({ name = 'open-studio-device', match = { class = '^scrcpy$' }, float = true, center = true })";
-        let _ = super::hyprland::request(&format!("eval {rule}"));
+        let _ = crate::desktop::hyprland::request(&format!("eval {rule}"));
         let mut cmd = Command::new(scrcpy);
         cmd.args(["--serial", &device.serial, "--window-title", &format!("{} (Open Studio)", device.model)])
             .args(opts.args())
@@ -238,9 +238,9 @@ impl Mirror {
     }
 
     /// The mirror's Hyprland window, once it has appeared.
-    pub fn window(&self) -> Option<super::hyprland::Client> {
+    pub fn window(&self) -> Option<crate::desktop::hyprland::Client> {
         let pid = self.child.id() as i64;
-        super::hyprland::clients().ok()?.into_iter().find(|c| c.pid == pid && c.mapped && !c.hidden)
+        crate::desktop::hyprland::clients().ok()?.into_iter().find(|c| c.pid == pid && c.mapped && !c.hidden)
     }
 }
 

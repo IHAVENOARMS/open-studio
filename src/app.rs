@@ -4,7 +4,8 @@ use crate::control::ControlServer;
 use crate::editor::{Action, Editor, Leaving};
 use crate::icons::{self, Icon};
 use crate::project::Recording;
-use crate::record::{RecordOptions, Recorder, hyprland};
+use crate::desktop::{self, hyprland};
+use crate::record::{RecordOptions, Recorder};
 use crate::theme;
 use crate::util::format_time;
 use egui::{Color32, CornerRadius, RichText, Sense, vec2};
@@ -85,7 +86,7 @@ impl App {
             mode: Mode::Home,
             projects: scan_projects(),
             options: RecordOptions::default(),
-            hide_while_recording: hyprland::available(),
+            hide_while_recording: desktop::caps().hide_own_window(),
             error: None,
             control: ControlServer::start().ok().map(Arc::new),
             may_close: false,
@@ -121,9 +122,9 @@ impl App {
             c.take_flags();
         }
         std::thread::spawn(move || {
-            // On Hyprland the floating recording bar (direct capture) is used;
-            // elsewhere the portal flow.
-            let res = if hyprland::available() { supervise_bar(&ctx2) } else { supervise(opts, hide, ph, st, control, &ctx2) };
+            // The floating recording bar (direct capture) where the desktop
+            // supports it; elsewhere the portal flow.
+            let res = if desktop::caps().recording_bar() { supervise_bar(&ctx2) } else { supervise(opts, hide, ph, st, control, &ctx2) };
             let _ = tx.send(res.map_err(|e| format!("{e:#}")));
             ctx2.request_repaint();
         });
@@ -201,7 +202,7 @@ impl App {
                         ui.add_space((ui.available_width() - 470.0).max(0.0) / 2.0);
                         ui.checkbox(&mut self.options.reuse_selection, "Reuse last screen");
                         ui.checkbox(&mut self.options.show_system_cursor, "Bake in system cursor");
-                        if hyprland::available() {
+                        if desktop::caps().hide_own_window() {
                             ui.checkbox(&mut self.hide_while_recording, "Hide this window");
                         }
                     });

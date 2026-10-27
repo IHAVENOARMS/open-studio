@@ -10,7 +10,8 @@
 //! capture (ext-image-copy-capture), so no portal dialog appears.
 
 use crate::icons::{self, Icon};
-use crate::record::{self, DirectRequest, RecordOptions, Recorder, hyprland};
+use crate::desktop::{self, hyprland};
+use crate::record::{self, DirectRequest, RecordOptions, Recorder};
 use crate::settings::Settings;
 use crate::theme;
 use anyhow::{Context as _, Result, anyhow};
@@ -726,7 +727,7 @@ impl Rt {
                 let recording = self.recording.is_some() || self.countdown.is_some();
                 let recorded = recording.then_some(self.shared.recorded_rect);
                 let Some(m) = notes_monitor(&self.shared.monitors, &self.shared.bar_monitor, recorded) else { return };
-                let hidden = record::hyprland::available() && record::hyprland::hide_layer_from_capture(NOTES_NAMESPACE);
+                let hidden = desktop::caps().hyprland_ipc && hyprland::hide_layer_from_capture(NOTES_NAMESPACE);
                 let on_recorded = recorded.is_some_and(|r| m.global().intersects(r));
                 self.shared.notes_recorded = on_recorded && !hidden;
                 let out = self.output_for(&m.name);

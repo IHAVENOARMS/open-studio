@@ -10,7 +10,7 @@
 //! compared with what the compositor drew; the best match names the shape.
 //! Unrecognised cursors are kept as images.
 
-use super::hyprland;
+use crate::desktop::hyprland;
 use crate::util::monotonic_ns;
 use crate::xcursor::{self, XImage};
 use anyhow::{Context, Result, anyhow};
