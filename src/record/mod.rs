@@ -98,6 +98,9 @@ pub struct Recorder {
     capture: Capture,
     stop: Arc<AtomicBool>,
     moves: Arc<Mutex<Vec<(i64, f64, f64)>>>,
+    /// `moves` are already in video pixels (cursor capture session) rather
+    /// than global logical coordinates.
+    stream_cursor: bool,
     /// Where the captured window's top-left was, over time (window capture).
     window_track: Arc<Mutex<Vec<(i64, [f64; 2])>>>,
     shapes: Arc<Mutex<Vec<ShapeChange>>>,
@@ -166,15 +169,36 @@ impl Recorder {
         }
         let moves = Arc::new(Mutex::new(Vec::new()));
         let window_track = Arc::new(Mutex::new(Vec::new()));
-        if let Some(addr) = opts.direct.as_ref().and_then(|r| r.window.clone()).filter(|_| desktop::caps().window_geometry()) {
-            spawn_window_tracker(stop.clone(), addr, window_track.clone());
-        }
+        // Cursor positions: from a cursor capture session on the captured
+        // source where the compositor supports it (already in video pixels),
+        // else by polling the global pointer position. On Hyprland polling
+        // stays the default: its cursor sessions report logical rather than
+        // buffer pixels, which is off on scaled monitors.
+        // OPEN_STUDIO_CURSOR=session|ipc picks one.
+        let mode = std::env::var("OPEN_STUDIO_CURSOR").unwrap_or_default();
+        let mut stream_cursor = false;
         if opts.test_source {
             spawn_fake_cursor(stop.clone(), moves.clone());
-        } else if desktop::caps().pointer_poll() {
-            spawn_cursor_poller(stop.clone(), moves.clone());
         } else {
-            eprintln!("open-studio: this desktop doesn't report the pointer position, cursor tracking disabled");
+            let prefer_session = match mode.as_str() {
+                "session" => true,
+                "ipc" => false,
+                _ => !desktop::caps().pointer_poll(),
+            };
+            if let Some(req) = opts.direct.as_ref().filter(|_| prefer_session) {
+                match direct::spawn_cursor_tracker(&req.target, stop.clone(), moves.clone()) {
+                    Ok(()) => stream_cursor = true,
+                    Err(e) => eprintln!("open-studio: no cursor capture session: {e:#}"),
+                }
+            }
+            if !stream_cursor && desktop::caps().pointer_poll() {
+                spawn_cursor_poller(stop.clone(), moves.clone());
+                if let Some(addr) = opts.direct.as_ref().and_then(|r| r.window.clone()).filter(|_| desktop::caps().window_geometry()) {
+                    spawn_window_tracker(stop.clone(), addr, window_track.clone());
+                }
+            } else if !stream_cursor {
+                eprintln!("open-studio: this desktop doesn't report the pointer position, cursor tracking disabled");
+            }
         }
         let shapes = Arc::new(Mutex::new(Vec::new()));
         if !opts.test_source && !opts.show_system_cursor && desktop::caps().pointer_poll() && desktop::caps().wlr_screencopy {
@@ -250,6 +274,7 @@ impl Recorder {
             capture,
             stop,
             moves,
+            stream_cursor,
             window_track,
             shapes,
             flags,
@@ -355,7 +380,7 @@ impl Recorder {
         let duration = result.frames as f64 / fps as f64;
 
         let mut source = self.source;
-        if source.logical_rect.is_none() {
+        if source.logical_rect.is_none() && !self.stream_cursor {
             let monitors = desktop::monitors().unwrap_or_default();
             source.logical_rect = guess_monitor_rect(&monitors, result.width, result.height, &self.moves.lock().unwrap());
         }
@@ -363,6 +388,9 @@ impl Recorder {
         // (the size stays the first one's, like the video).
         let track = self.window_track.lock().unwrap().clone();
         let map = |t: i64, x: f64, y: f64| -> (f64, f64) {
+            if self.stream_cursor {
+                return (x, y);
+            }
             match source.logical_rect {
                 Some(r) => {
                     let i = track.partition_point(|(tt, _)| *tt <= t);

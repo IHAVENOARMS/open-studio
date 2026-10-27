@@ -7,7 +7,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use wayland_client::protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool};
+use std::sync::Mutex;
+use wayland_client::protocol::{wl_buffer, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1 as tl_handle, ext_foreign_toplevel_list_v1 as tl_list,
@@ -17,8 +18,8 @@ use wayland_protocols::ext::image_capture_source::v1::client::{
     ext_output_image_capture_source_manager_v1 as out_src_mgr,
 };
 use wayland_protocols::ext::image_copy_capture::v1::client::{
-    ext_image_copy_capture_frame_v1 as frame, ext_image_copy_capture_manager_v1 as cap_mgr,
-    ext_image_copy_capture_session_v1 as session,
+    ext_image_copy_capture_cursor_session_v1 as cursor_session, ext_image_copy_capture_frame_v1 as frame,
+    ext_image_copy_capture_manager_v1 as cap_mgr, ext_image_copy_capture_session_v1 as session,
 };
 
 #[derive(Clone, Debug)]
@@ -54,6 +55,9 @@ struct State {
     tl_mgr: Option<tl_src_mgr::ExtForeignToplevelImageCaptureSourceManagerV1>,
     cap: Option<cap_mgr::ExtImageCopyCaptureManagerV1>,
     list: Option<tl_list::ExtForeignToplevelListV1>,
+    seat: Option<wl_seat::WlSeat>,
+    has_pointer: bool,
+    cursor: Option<CursorSink>,
     outputs: Vec<(wl_output::WlOutput, String)>,
     toplevels: Vec<Toplevel>,
     size: (u32, u32),
@@ -91,6 +95,99 @@ fn gst_format(f: wl_shm::Format) -> Option<&'static str> {
     })
 }
 
+/// Where cursor positions go: (monotonic ns, x, y) in video pixels.
+pub type Moves = Arc<Mutex<Vec<(i64, f64, f64)>>>;
+
+struct CursorSink {
+    /// Top-left of the video in the captured buffer (the crop).
+    origin: (f64, f64),
+    moves: Moves,
+    last: Option<(f64, f64)>,
+    last_push: i64,
+}
+
+impl CursorSink {
+    fn push(&mut self, p: (f64, f64)) {
+        let t = crate::util::monotonic_ns();
+        self.moves.lock().unwrap().push((t, p.0, p.1));
+        self.last = Some(p);
+        self.last_push = t;
+    }
+}
+
+/// Connects and creates a capture source for `target`.
+fn connect(target: &Target) -> Result<(Connection, EventQueue<State>, State, ext_image_capture_source_v1::ExtImageCaptureSourceV1)> {
+    let conn = Connection::connect_to_env().context("connecting to Wayland")?;
+    let mut queue: EventQueue<State> = conn.new_event_queue();
+    let qh = queue.handle();
+    conn.display().get_registry(&qh, ());
+    let mut st = State::default();
+    queue.roundtrip(&mut st)?;
+    queue.roundtrip(&mut st)?;
+    let source = match target {
+        Target::Output { name, .. } => {
+            let mgr = st.out_mgr.clone().ok_or_else(|| anyhow!("no output capture source manager"))?;
+            let out = st.outputs.iter().find(|(_, n)| n == name).ok_or_else(|| anyhow!("output {name} not found"))?.0.clone();
+            mgr.create_source(&out, &qh, ())
+        }
+        Target::Window { app_id, title } => {
+            let mgr = st.tl_mgr.clone().ok_or_else(|| anyhow!("no window capture source manager"))?;
+            let tl = st
+                .toplevels
+                .iter()
+                .find(|t| &t.app_id == app_id && &t.title == title)
+                .or_else(|| st.toplevels.iter().find(|t| &t.app_id == app_id))
+                .ok_or_else(|| anyhow!("window {app_id} \"{title}\" not found"))?;
+            mgr.create_source(tl.handle.as_ref().unwrap(), &qh, ())
+        }
+    };
+    Ok((conn, queue, st, source))
+}
+
+/// Tracks the pointer over `target` with a cursor capture session, on its
+/// own thread, until `stop`. The compositor reports positions relative to
+/// the captured image, so they need no layout or window geometry. Returns
+/// an error when the compositor doesn't support it.
+pub fn spawn_cursor_tracker(target: &Target, stop: Arc<AtomicBool>, moves: Moves) -> Result<()> {
+    let (conn, mut queue, mut st, source) = connect(target)?;
+    let qh = queue.handle();
+    let cap = st.cap.clone().ok_or_else(|| anyhow!("compositor lacks ext-image-copy-capture"))?;
+    anyhow::ensure!(st.has_pointer, "no pointer");
+    let pointer = st.seat.as_ref().unwrap().get_pointer(&qh, ());
+    let origin = match target {
+        Target::Output { crop: Some(c), .. } => (c[0] as f64, c[1] as f64),
+        _ => (0.0, 0.0),
+    };
+    st.cursor = Some(CursorSink { origin, moves, last: None, last_push: 0 });
+    let session = cap.create_pointer_cursor_session(&source, &pointer, &qh, ());
+    // An unsupported request ends the connection with a protocol error.
+    queue.roundtrip(&mut st).context("cursor session refused")?;
+    std::thread::spawn(move || {
+        let _keep = (conn, source, pointer, session);
+        while !stop.load(Ordering::Relaxed) {
+            if queue.dispatch_pending(&mut st).is_err() {
+                return;
+            }
+            if let Some(guard) = queue.prepare_read() {
+                let fd = guard.connection_fd().as_raw_fd();
+                let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                if unsafe { libc::poll(&mut pfd, 1, 50) } > 0 && guard.read().is_err() {
+                    return;
+                }
+            }
+            if queue.flush().is_err() {
+                return;
+            }
+            // A heartbeat so idle time is represented.
+            let c = st.cursor.as_mut().unwrap();
+            if let Some(p) = c.last.filter(|_| crate::util::monotonic_ns() - c.last_push > 500_000_000) {
+                c.push(p);
+            }
+        }
+    });
+    Ok(())
+}
+
 pub struct Direct {
     queue: EventQueue<State>,
     st: State,
@@ -106,31 +203,9 @@ impl Direct {
     /// Connects and creates the capture session; returns once the frame size
     /// and format are known.
     pub fn open(target: &Target, paint_cursor: bool) -> Result<Self> {
-        let conn = Connection::connect_to_env().context("connecting to Wayland")?;
-        let mut queue: EventQueue<State> = conn.new_event_queue();
+        let (conn, mut queue, mut st, source) = connect(target)?;
         let qh = queue.handle();
-        conn.display().get_registry(&qh, ());
-        let mut st = State::default();
-        queue.roundtrip(&mut st)?;
-        queue.roundtrip(&mut st)?;
         let cap = st.cap.clone().ok_or_else(|| anyhow!("compositor lacks ext-image-copy-capture"))?;
-        let source = match target {
-            Target::Output { name, .. } => {
-                let mgr = st.out_mgr.clone().ok_or_else(|| anyhow!("no output capture source manager"))?;
-                let out = st.outputs.iter().find(|(_, n)| n == name).ok_or_else(|| anyhow!("output {name} not found"))?.0.clone();
-                mgr.create_source(&out, &qh, ())
-            }
-            Target::Window { app_id, title } => {
-                let mgr = st.tl_mgr.clone().ok_or_else(|| anyhow!("no window capture source manager"))?;
-                let tl = st
-                    .toplevels
-                    .iter()
-                    .find(|t| &t.app_id == app_id && &t.title == title)
-                    .or_else(|| st.toplevels.iter().find(|t| &t.app_id == app_id))
-                    .ok_or_else(|| anyhow!("window {app_id} \"{title}\" not found"))?;
-                mgr.create_source(tl.handle.as_ref().unwrap(), &qh, ())
-            }
-        };
         let opts = if paint_cursor { cap_mgr::Options::PaintCursors } else { cap_mgr::Options::empty() };
         let session = cap.create_session(&source, opts, &qh, ());
         while !st.constraints_done && !st.stopped {
@@ -267,6 +342,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 "ext_foreign_toplevel_image_capture_source_manager_v1" => st.tl_mgr = Some(reg.bind(name, 1, qh, ())),
                 "ext_image_copy_capture_manager_v1" => st.cap = Some(reg.bind(name, 1, qh, ())),
                 "ext_foreign_toplevel_list_v1" => st.list = Some(reg.bind(name, 1, qh, ())),
+                "wl_seat" if st.seat.is_none() => st.seat = Some(reg.bind(name, version.min(5), qh, ())),
                 "wl_output" => {
                     let idx = st.outputs.len();
                     let o = reg.bind(name, version.min(4), qh, idx);
@@ -338,6 +414,24 @@ impl Dispatch<frame::ExtImageCopyCaptureFrameV1, ()> for State {
     }
 }
 
+impl Dispatch<wl_seat::WlSeat, ()> for State {
+    fn event(st: &mut Self, _: &wl_seat::WlSeat, ev: wl_seat::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_seat::Event::Capabilities { capabilities: WEnum::Value(c) } = ev {
+            st.has_pointer = c.contains(wl_seat::Capability::Pointer);
+        }
+    }
+}
+
+impl Dispatch<cursor_session::ExtImageCopyCaptureCursorSessionV1, ()> for State {
+    fn event(st: &mut Self, _: &cursor_session::ExtImageCopyCaptureCursorSessionV1, ev: cursor_session::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        let Some(c) = st.cursor.as_mut() else { return };
+        if let cursor_session::Event::Position { x, y } = ev {
+            c.push((x as f64 - c.origin.0, y as f64 - c.origin.1));
+        }
+    }
+}
+
+delegate_noop!(State: ignore wl_pointer::WlPointer);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_buffer::WlBuffer);
