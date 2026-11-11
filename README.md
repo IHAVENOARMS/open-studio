@@ -1,3 +1,6 @@
+> [!WARNING]
+> Open Studio is under active development and experimental. Expect bugs, missing pieces and changes between versions. It has been tested on Hyprland only so far; other desktops should work but are untested.
+
 <div align="center">
 
 # Open Studio
@@ -80,9 +83,10 @@ open-studio export ~/Videos/"Open Studio"/Demo --format mp4 --height 1080
 
 | | |
 |---|---|
-| **Hyprland** | Full support: direct capture, cursor and window tracking |
-| **GNOME, KDE and other Wayland desktops** | Capture through the screen-sharing portal; cursor tracking is in progress |
-| **GPUs** | AMD and Intel (VAAPI), NVIDIA (NVENC), or CPU encoding |
+| **Hyprland** | Tested. Direct capture, cursor and window tracking |
+| **Sway, KDE and other compositors with layer-shell** | Supported, not yet tested |
+| **GNOME and other Wayland desktops** | Capture and cursor through the screen-sharing portal, not yet tested |
+| **Encoding** | CPU and AMD (VAAPI) tested; Intel (VAAPI) and NVIDIA (NVENC) not yet tested |
 
 ## Documentation
 
