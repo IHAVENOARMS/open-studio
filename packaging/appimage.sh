@@ -25,9 +25,15 @@ export PATH="$BUILD:$PATH"
 # CI runners have no FUSE.
 export APPIMAGE_EXTRACT_AND_RUN=1
 
-# A static FFmpeg (GPL build: x264, ProRes, VAAPI, NVENC).
-curl -fsSL https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz | tar xJ
-cp ffmpeg-n7.1-latest-linux64-gpl-7.1/bin/ffmpeg ffmpeg-n7.1-latest-linux64-gpl-7.1/bin/ffprobe "$APPDIR/usr/bin/"
+# A static FFmpeg (GPL build: x264, ProRes, VAAPI, NVENC): the newest stable
+# release series on FFmpeg-Builds (their names rotate as versions come out).
+ffmpeg=$(curl -fsSL https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/tags/latest \
+    | grep -o '"name": *"ffmpeg-n[0-9.]*-latest-linux64-gpl-[0-9.]*\.tar\.xz"' \
+    | sed 's/.*"\(ffmpeg-[^"]*\)\.tar\.xz"/\1/' | sort -V | tail -n 1)
+[ -n "$ffmpeg" ] || { echo "No FFmpeg build found"; exit 1; }
+echo "Bundling $ffmpeg"
+curl -fsSL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/$ffmpeg.tar.xz" | tar xJ
+cp "$ffmpeg/bin/ffmpeg" "$ffmpeg/bin/ffprobe" "$APPDIR/usr/bin/"
 
 arch_libs=/usr/lib/x86_64-linux-gnu
 export GSTREAMER_PLUGINS_DIR="$arch_libs/gstreamer-1.0"
