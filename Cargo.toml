@@ -1,6 +1,6 @@
 [package]
 name = "open-studio"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 edition = "2024"
 description = "Screen recorder for Linux with automatic zoom, a smooth cursor and polished exports"
 license = "GPL-3.0-or-later"

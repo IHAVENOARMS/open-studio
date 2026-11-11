@@ -11,6 +11,7 @@ Automatic zooms, a smooth cursor and a beautiful frame, straight out of the reco
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-5b45f0?style=flat-square)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Linux%20%C2%B7%20Wayland-1f1f24?style=flat-square)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-1f1f24?style=flat-square)
+[![CI](https://img.shields.io/github/actions/workflow/status/IHAVENOARMS/open-studio/ci.yml?branch=master&style=flat-square&label=CI)](https://github.com/IHAVENOARMS/open-studio/actions/workflows/ci.yml)
 
 <img src="docs/assets/hero.gif" width="880" alt="A recording with an automatic zoom that follows the cursor to a button and a chart, on a wallpaper background">
 
@@ -42,13 +43,17 @@ Automatic zooms, a smooth cursor and a beautiful frame, straight out of the reco
 
 ## Getting started
 
-Open Studio is built from source for now.
+### Download
+
+Grab the latest beta from [Releases](https://github.com/IHAVENOARMS/open-studio/releases), unpack it and run `./install.sh`. The release notes list what to install alongside it for your distribution.
+
+### Build from source
 
 **Requirements:** Rust (stable), ffmpeg, GStreamer with the base, good and PipeWire plugins, and a Wayland session with xdg-desktop-portal.
 
 ```sh
 # Arch Linux
-sudo pacman -S rust ffmpeg gstreamer gst-plugins-base gst-plugins-good gst-plugin-pipewire
+sudo pacman -S rust clang ffmpeg gstreamer gst-plugins-base gst-plugins-good gst-plugin-pipewire pipewire
 
 git clone https://github.com/IHAVENOARMS/open-studio
 cd open-studio

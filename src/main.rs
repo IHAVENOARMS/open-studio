@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Parser)]
-#[command(name = "open-studio", about = "Screen recorder with automatic cursor zoom")]
+#[command(name = "open-studio", version, about = "Screen recorder with automatic cursor zoom")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
