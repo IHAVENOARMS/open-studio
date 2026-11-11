@@ -5,15 +5,17 @@ set -e
 here=$(cd "$(dirname "$0")" && pwd)
 bin="${XDG_BIN_HOME:-$HOME/.local/bin}"
 apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
 
 if [ "$1" = "--uninstall" ]; then
-    rm -f "$bin/open-studio" "$apps/open-studio.desktop"
+    rm -f "$bin/open-studio" "$apps/open-studio.desktop" "$icons/open-studio.png"
     echo "Open Studio removed. Projects in ~/Videos/Open Studio are kept."
     exit 0
 fi
 
-mkdir -p "$bin" "$apps"
+mkdir -p "$bin" "$apps" "$icons"
 install -m 755 "$here/open-studio" "$bin/open-studio"
+install -m 644 "$here/open-studio.png" "$icons/open-studio.png"
 sed "s|^Exec=open-studio|Exec=$bin/open-studio|" "$here/open-studio.desktop" > "$apps/open-studio.desktop"
 echo "Installed to $bin/open-studio"
 

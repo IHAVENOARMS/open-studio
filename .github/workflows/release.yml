@@ -57,7 +57,7 @@ jobs:
           name="open-studio-${TAG#v}-x86_64-linux"
           mkdir -p "dist/$name"
           strip -o "dist/$name/open-studio" target/release/open-studio
-          cp LICENSE README.md packaging/open-studio.desktop packaging/install.sh "dist/$name/"
+          cp LICENSE README.md packaging/open-studio.desktop packaging/open-studio.png packaging/install.sh "dist/$name/"
           chmod +x "dist/$name/install.sh"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
@@ -66,8 +66,18 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           name: Open Studio ${{ env.TAG }}
-          prerelease: ${{ contains(env.TAG, '-') }}
+          # Betas ship as full releases, so the newest is marked Latest; the
+          # notes say it's a beta.
+          prerelease: false
+          make_latest: true
           body_path: packaging/release-notes.md
           files: |
             dist/*.tar.gz
             dist/*.sha256
+
+  appimage:
+    name: AppImage
+    needs: linux
+    uses: ./.github/workflows/appimage.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}

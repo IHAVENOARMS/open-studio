@@ -7,8 +7,6 @@ on:
         description: Release tag to build and publish to
         type: string
         required: true
-  push:
-    branches: [appimage-test]
 
 permissions:
   contents: write

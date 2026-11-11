@@ -45,7 +45,7 @@ Automatic zooms, a smooth cursor and a beautiful frame, straight out of the reco
 
 ### Download
 
-Grab the latest beta from [Releases](https://github.com/IHAVENOARMS/open-studio/releases), unpack it and run `./install.sh`. The release notes list what to install alongside it for your distribution.
+Download the AppImage from the [latest release](https://github.com/IHAVENOARMS/open-studio/releases/latest), make it executable and run it: it brings everything it needs. A smaller tarball that uses your system's libraries is there too.
 
 ### Build from source
 
