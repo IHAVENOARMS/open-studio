@@ -38,7 +38,7 @@ jobs:
             gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio \
             libpipewire-0.3-dev libspa-0.2-dev \
             libxkbcommon-dev libwayland-dev \
-            meson ninja-build
+            meson ninja-build libdbus-1-dev libglib2.0-dev
 
       # The pipewire crate needs PipeWire 1.x headers; 22.04 has 0.3.48. Build
       # them (and a library to link against) into /usr/local. Only for
