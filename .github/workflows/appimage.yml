@@ -28,9 +28,6 @@ jobs:
 
       - name: System dependencies
         run: |
-          # PipeWire 1.x headers (22.04 has 0.3.48, too old for the pipewire
-          # crate). Only for building: the AppImage uses the system's PipeWire.
-          sudo add-apt-repository -y ppa:pipewire-debian/pipewire-upstream
           sudo apt-get update
           # The runner's LLVM libunwind blocks the one GStreamer's headers need.
           sudo apt-get remove -y libunwind-14-dev || true
@@ -40,7 +37,22 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio \
             libpipewire-0.3-dev libspa-0.2-dev \
-            libxkbcommon-dev libwayland-dev
+            libxkbcommon-dev libwayland-dev \
+            meson ninja-build
+
+      # The pipewire crate needs PipeWire 1.x headers; 22.04 has 0.3.48. Build
+      # them (and a library to link against) into /usr/local. Only for
+      # compiling: the AppImage uses the system's PipeWire at run time.
+      - name: PipeWire 1.2 development files
+        run: |
+          curl -fsSL https://gitlab.freedesktop.org/pipewire/pipewire/-/archive/1.2.7/pipewire-1.2.7.tar.gz | tar xz
+          cd pipewire-1.2.7
+          meson setup build --prefix=/usr/local -Dauto_features=disabled \
+            -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled -Dman=disabled -Ddocs=disabled
+          ninja -C build
+          sudo ninja -C build install
+          echo "PKG_CONFIG_PATH=/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=/usr/local/lib/x86_64-linux-gnu" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
 
