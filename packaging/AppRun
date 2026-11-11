@@ -1,0 +1,9 @@
+#!/bin/sh
+# AppImage entry point: the bundled ffmpeg and ffprobe come first on PATH,
+# the bundled GStreamer plugins are used (set by the hooks), then the app.
+HERE="$(dirname "$(readlink -f "$0")")"
+export PATH="$HERE/usr/bin:$PATH"
+for hook in "$HERE"/apprun-hooks/*.sh; do
+    [ -f "$hook" ] && . "$hook"
+done
+exec "$HERE/usr/bin/open-studio" "$@"

@@ -1,0 +1,77 @@
+name: AppImage
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to build and publish to
+        type: string
+        required: true
+  push:
+    branches: [appimage-test]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  appimage:
+    name: AppImage x86_64
+    # The oldest glibc we target, so the AppImage runs on most desktops.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libclang-dev file \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-pulseaudio \
+            libpipewire-0.3-dev libspa-0.2-dev \
+            libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: AppImage
+        id: build
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          packaging/appimage.sh "$version"
+          echo "file=dist/open-studio-$version-x86_64.AppImage" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+          FILE: ${{ steps.build.outputs.file }}
+        run: |
+          "./$FILE" --version
+          # Records a test pattern with the bundled GStreamer and FFmpeg.
+          "./$FILE" record --test --duration 3 --out "$RUNNER_TEMP/rec"
+          test -s "$RUNNER_TEMP/rec/screen.mp4"
+          test -s "$RUNNER_TEMP/rec/recording.json"
+          ls -la "$RUNNER_TEMP/rec"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: appimage
+          path: dist/*
+
+      - if: ${{ inputs.tag }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            dist/*.AppImage
+            dist/*.AppImage.sha256
