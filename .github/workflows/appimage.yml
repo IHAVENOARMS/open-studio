@@ -29,6 +29,8 @@ jobs:
       - name: System dependencies
         run: |
           sudo apt-get update
+          # The runner's LLVM libunwind blocks the one GStreamer's headers need.
+          sudo apt-get remove -y libunwind-14-dev || true
           sudo apt-get install -y --no-install-recommends \
             pkg-config clang libclang-dev file \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
